@@ -195,13 +195,13 @@ pub enum SelectionType {
     Ketama,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HealthCheck {
     // only support passive check for now
     pub active: ActiveCheck,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveCheck {
     #[serde(default)]
     pub r#type: ActiveCheckType,
@@ -219,12 +219,13 @@ pub struct ActiveCheck {
     pub unhealthy: Option<Unhealthy>,
 }
 
-#[derive(Default, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ActiveCheckType {
     TCP,
     #[default]
     HTTP,
+    HTTPS,
 }
 
 impl ActiveCheck {
@@ -241,7 +242,7 @@ impl ActiveCheck {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Health {
     #[serde(default = "Health::default_interval")]
     pub interval: u32,
@@ -265,33 +266,21 @@ impl Health {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Unhealthy {
-    #[serde(default = "Unhealthy::default_interval")]
-    pub interval: u32,
     #[serde(default = "Unhealthy::default_http_failures")]
     pub http_failures: u32,
     #[serde(default = "Unhealthy::default_tcp_failures")]
     pub tcp_failures: u32,
-    #[serde(default = "Unhealthy::default_timeouts")]
-    pub timeouts: u32,
 }
 
 impl Unhealthy {
-    fn default_interval() -> u32 {
-        1
-    }
-
     fn default_http_failures() -> u32 {
         5
     }
 
     fn default_tcp_failures() -> u32 {
         2
-    }
-
-    fn default_timeouts() -> u32 {
-        3
     }
 }
 
