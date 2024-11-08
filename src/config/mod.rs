@@ -1,12 +1,11 @@
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::fs;
 use std::path::PathBuf;
 
 use log::{debug, trace};
 use pingora::server::configuration::{Opt, ServerConf};
 use pingora_error::{Error, ErrorType::*, OrErr, Result};
 use serde::{Deserialize, Serialize};
-use std::fs;
 use validator::{Validate, ValidationError};
 
 #[derive(Default, Debug, Serialize, Deserialize, Validate)]
@@ -80,7 +79,7 @@ impl Config {
 #[derive(Debug, Serialize, Deserialize, Validate)]
 #[validate(schema(function = "Listener::validate_tls_for_offer_h2"))]
 pub struct Listener {
-    pub address: SocketAddr,
+    pub address: String,
     pub tls: Option<Tls>,
     #[serde(default)]
     pub offer_h2: bool,
@@ -157,7 +156,7 @@ pub struct Upstream {
     pub retry_timeout: Option<u64>,
     pub timeout: Option<Timeout>,
     #[validate(length(min = 1))]
-    pub nodes: HashMap<SocketAddr, u32>,
+    pub nodes: HashMap<String, u32>,
     #[serde(default)]
     pub r#type: SelectionType,
     pub checks: Option<HealthCheck>,
@@ -305,7 +304,7 @@ pub enum UpstreamHashOn {
     COOKIE,
 }
 
-#[derive(Default, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum UpstreamScheme {
     #[default]
