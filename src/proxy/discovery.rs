@@ -144,11 +144,22 @@ impl ServiceDiscovery for HybridDiscovery {
             health_checks.extend(static_health_checks);
         }
 
-        // 2. Then process DNS discoveries
+        // 2. Then process DNS discoveries, ignoring errors
         for discovery in self.dns_discoveries.iter() {
-            let (dns_backends, dns_health_checks) = discovery.discover().await?;
-            backends.extend(dns_backends);
-            health_checks.extend(dns_health_checks);
+            match discovery.discover().await {
+                Ok((dns_backends, dns_health_checks)) => {
+                    backends.extend(dns_backends);
+                    health_checks.extend(dns_health_checks);
+                }
+                Err(e) => {
+                    log::warn!(
+                        "DNS discovery for '{}' failed: {}",
+                        discovery.name.clone(),
+                        e
+                    );
+                    continue; // Skip to the next DNS discovery
+                }
+            }
         }
 
         Ok((backends, health_checks))
