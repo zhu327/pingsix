@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use hickory_resolver::TokioAsyncResolver;
 use once_cell::sync::OnceCell;
-use pingora::prelude::HttpPeer;
+use pingora::upstreams::peer::HttpPeer;
 use pingora::ErrorType::InternalError;
 use pingora_error::{OrErr, Result};
 use pingora_load_balancing::{
