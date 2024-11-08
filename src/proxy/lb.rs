@@ -2,14 +2,12 @@ use pingora_http::RequestHeader;
 use pingora_load_balancing::{selection::BackendSelection, LoadBalancer};
 use pingora_proxy::Session;
 
-use crate::config::{Upstream, UpstreamHashOn};
+use crate::config::{Upstream, UpstreamHashOn, UpstreamPassHost};
 
 pub struct LB<BS: BackendSelection> {
     // LB
     pub load_balancer: LoadBalancer<BS>,
     // health_check
-    // retry
-    // host rewrite
 }
 
 impl Upstream {
@@ -52,6 +50,14 @@ impl Upstream {
                 .map_or("".to_string(), |s| s.to_string()),
             UpstreamHashOn::COOKIE => get_cookie_value(session.req_header(), self.key.as_str())
                 .map_or("".to_string(), |s| s.to_string()),
+        }
+    }
+
+    pub fn upstream_host_rewrite(&self, upstream_request: &mut RequestHeader) {
+        if self.pass_host == UpstreamPassHost::REWRITE {
+            if let Some(host) = self.upstream_host.clone() {
+                upstream_request.insert_header("Host", host).unwrap();
+            }
         }
     }
 }
