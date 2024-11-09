@@ -1,9 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use http::Uri;
-use pingora::{
-    services::background::background_service, services::background::GenBackgroundService,
-};
+use pingora::services::background::background_service;
 use pingora_core::services::Service;
 use pingora_error::Error;
 use pingora_http::{RequestHeader, ResponseHeader};
@@ -43,22 +41,10 @@ impl From<Upstream> for SelectionLB {
 impl SelectionLB {
     pub fn take_background_service(&mut self) -> Option<Box<dyn Service + 'static>> {
         match self {
-            SelectionLB::RoundRobin(ref mut lb) => lb
-                .service
-                .take()
-                .map(|s| Box::new(s) as Box<dyn Service + 'static>),
-            SelectionLB::Random(ref mut lb) => lb
-                .service
-                .take()
-                .map(|s| Box::new(s) as Box<dyn Service + 'static>),
-            SelectionLB::Fnv(ref mut lb) => lb
-                .service
-                .take()
-                .map(|s| Box::new(s) as Box<dyn Service + 'static>),
-            SelectionLB::Ketama(ref mut lb) => lb
-                .service
-                .take()
-                .map(|s| Box::new(s) as Box<dyn Service + 'static>),
+            SelectionLB::RoundRobin(ref mut lb) => lb.service.take(),
+            SelectionLB::Random(ref mut lb) => lb.service.take(),
+            SelectionLB::Fnv(ref mut lb) => lb.service.take(),
+            SelectionLB::Ketama(ref mut lb) => lb.service.take(),
         }
     }
 
@@ -74,7 +60,7 @@ impl SelectionLB {
 
 pub struct LB<BS: BackendSelection> {
     pub upstreams: Arc<LoadBalancer<BS>>,
-    pub service: Option<GenBackgroundService<LoadBalancer<BS>>>,
+    pub service: Option<Box<dyn Service + 'static>>,
 }
 
 impl<BS> LB<BS>
@@ -104,7 +90,7 @@ where
 
         LB {
             upstreams,
-            service: Some(background),
+            service: Some(Box::new(background)),
         }
     }
 }
