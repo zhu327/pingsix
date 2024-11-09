@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 async-trait = "0.1.83"
+clap = "4.5.20"
 env_logger = { version = "0.11.5", features = ["unstable-kv"] }
 futures-util = "0.3.31"
 hickory-resolver = "0.24.1"

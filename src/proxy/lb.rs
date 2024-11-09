@@ -1,6 +1,10 @@
 use std::{sync::Arc, time::Duration};
 
 use http::Uri;
+use pingora::{
+    services::background::background_service, services::background::GenBackgroundService,
+};
+use pingora_core::services::Service;
 use pingora_error::Error;
 use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_load_balancing::{
@@ -8,7 +12,7 @@ use pingora_load_balancing::{
     selection::{
         consistent::KetamaHashing, BackendIter, BackendSelection, FVNHash, Random, RoundRobin,
     },
-    Backends, LoadBalancer,
+    Backend, Backends, LoadBalancer,
 };
 use pingora_proxy::Session;
 
@@ -36,8 +40,42 @@ impl From<Upstream> for SelectionLB {
     }
 }
 
-#[allow(dead_code)]
-pub struct LB<BS: BackendSelection>(Arc<LoadBalancer<BS>>);
+impl SelectionLB {
+    pub fn take_background_service(&mut self) -> Option<Box<dyn Service + 'static>> {
+        match self {
+            SelectionLB::RoundRobin(ref mut lb) => lb
+                .service
+                .take()
+                .map(|s| Box::new(s) as Box<dyn Service + 'static>),
+            SelectionLB::Random(ref mut lb) => lb
+                .service
+                .take()
+                .map(|s| Box::new(s) as Box<dyn Service + 'static>),
+            SelectionLB::Fnv(ref mut lb) => lb
+                .service
+                .take()
+                .map(|s| Box::new(s) as Box<dyn Service + 'static>),
+            SelectionLB::Ketama(ref mut lb) => lb
+                .service
+                .take()
+                .map(|s| Box::new(s) as Box<dyn Service + 'static>),
+        }
+    }
+
+    pub fn select_backend(&self, key: String) -> Option<Backend> {
+        match self {
+            SelectionLB::RoundRobin(lb) => lb.upstreams.select(key.as_bytes(), 256),
+            SelectionLB::Random(lb) => lb.upstreams.select(key.as_bytes(), 256),
+            SelectionLB::Fnv(lb) => lb.upstreams.select(key.as_bytes(), 256),
+            SelectionLB::Ketama(lb) => lb.upstreams.select(key.as_bytes(), 256),
+        }
+    }
+}
+
+pub struct LB<BS: BackendSelection> {
+    pub upstreams: Arc<LoadBalancer<BS>>,
+    pub service: Option<GenBackgroundService<LoadBalancer<BS>>>,
+}
 
 impl<BS> LB<BS>
 where
@@ -60,7 +98,14 @@ where
             upstreams.health_check_frequency = Some(health_check_frequency);
         }
 
-        LB(Arc::new(upstreams))
+        let background: pingora::services::background::GenBackgroundService<LoadBalancer<BS>> =
+            background_service("health check", upstreams);
+        let upstreams = background.task();
+
+        LB {
+            upstreams,
+            service: Some(background),
+        }
     }
 }
 
