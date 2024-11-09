@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use log::{debug, trace};
@@ -76,10 +77,10 @@ impl Config {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Validate)]
+#[derive(Clone, Debug, Serialize, Deserialize, Validate)]
 #[validate(schema(function = "Listener::validate_tls_for_offer_h2"))]
 pub struct Listener {
-    pub address: String,
+    pub address: SocketAddr,
     pub tls: Option<Tls>,
     #[serde(default)]
     pub offer_h2: bool,
@@ -95,20 +96,20 @@ impl Listener {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Tls {
     pub cert_path: PathBuf,
     pub key_path: PathBuf,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Timeout {
     pub connect: Option<u64>,
     pub send: Option<u64>,
     pub read: Option<u64>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Validate)]
+#[derive(Clone, Debug, Serialize, Deserialize, Validate)]
 #[validate(schema(function = "Router::validate_uri_and_uris"))]
 pub struct Router {
     pub id: String,
@@ -134,7 +135,7 @@ impl Router {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum HttpMethod {
     GET,
     POST,
@@ -148,7 +149,7 @@ pub enum HttpMethod {
     PURGE,
 }
 
-#[derive(Debug, Serialize, Deserialize, Validate)]
+#[derive(Clone, Debug, Serialize, Deserialize, Validate)]
 #[validate(schema(function = "Upstream::validate_upstream_host"))]
 pub struct Upstream {
     pub id: Option<String>,
@@ -185,7 +186,7 @@ impl Upstream {
     }
 }
 
-#[derive(Default, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SelectionType {
     #[default]
@@ -284,7 +285,7 @@ impl Unhealthy {
     }
 }
 
-#[derive(Default, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum UpstreamHashOn {
     #[default]
@@ -301,7 +302,7 @@ pub enum UpstreamScheme {
     HTTPS,
 }
 
-#[derive(Default, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum UpstreamPassHost {
     #[default]
