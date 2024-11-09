@@ -111,6 +111,9 @@ impl From<Upstream> for HybridDiscovery {
                     resolver,
                 ));
             } else {
+                let addr =
+                    &SocketAddr::new(host.parse::<IpAddr>().unwrap(), port as u16).to_string();
+
                 let mut backend = Backend::new(addr).unwrap();
                 backend.weight = *weight as usize;
 

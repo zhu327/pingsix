@@ -1,21 +1,67 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use http::Uri;
 use pingora_error::Error;
 use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_load_balancing::{
     health_check::{HealthCheck as HealthCheckTrait, HttpHealthCheck, TcpHealthCheck},
-    selection::BackendSelection,
-    LoadBalancer,
+    selection::{
+        consistent::KetamaHashing, BackendIter, BackendSelection, FVNHash, Random, RoundRobin,
+    },
+    Backends, LoadBalancer,
 };
 use pingora_proxy::Session;
 
-use crate::config::{ActiveCheckType, HealthCheck, Upstream, UpstreamHashOn, UpstreamPassHost};
+use crate::config::{
+    ActiveCheckType, HealthCheck, SelectionType, Upstream, UpstreamHashOn, UpstreamPassHost,
+};
 
-pub struct LB<BS: BackendSelection> {
-    // LB
-    pub load_balancer: LoadBalancer<BS>,
-    // health_check
+use super::discovery::HybridDiscovery;
+
+pub enum SelectionLB {
+    RoundRobin(LB<RoundRobin>),
+    Random(LB<Random>),
+    Fnv(LB<FVNHash>),
+    Ketama(LB<KetamaHashing>),
+}
+
+impl From<Upstream> for SelectionLB {
+    fn from(value: Upstream) -> Self {
+        match value.r#type {
+            SelectionType::RoundRobin => SelectionLB::RoundRobin(LB::new_from_upstream(value)),
+            SelectionType::Random => SelectionLB::Random(LB::new_from_upstream(value)),
+            SelectionType::Fnv => SelectionLB::Fnv(LB::new_from_upstream(value)),
+            SelectionType::Ketama => SelectionLB::Ketama(LB::new_from_upstream(value)),
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub struct LB<BS: BackendSelection>(Arc<LoadBalancer<BS>>);
+
+impl<BS> LB<BS>
+where
+    BS: BackendSelection + Send + Sync + 'static,
+    BS::Iter: BackendIter,
+{
+    pub fn new_from_upstream(upstream: Upstream) -> Self {
+        let discovery: HybridDiscovery = upstream.clone().into();
+        let mut upstreams = LoadBalancer::<BS>::from_backends(Backends::new(Box::new(discovery)));
+
+        if let Some(check) = upstream.checks.clone() {
+            let health_check: Box<(dyn HealthCheckTrait + std::marker::Send + Sync + 'static)> =
+                check.clone().into();
+            upstreams.set_health_check(health_check);
+
+            let mut health_check_frequency = Duration::from_secs(1);
+            if let Some(healthy) = check.active.healthy {
+                health_check_frequency = Duration::from_secs(healthy.interval as u64);
+            }
+            upstreams.health_check_frequency = Some(health_check_frequency);
+        }
+
+        LB(Arc::new(upstreams))
+    }
 }
 
 impl Upstream {
@@ -70,7 +116,7 @@ impl Upstream {
     }
 }
 
-impl From<HealthCheck> for Box<dyn HealthCheckTrait> {
+impl From<HealthCheck> for Box<(dyn HealthCheckTrait + std::marker::Send + Sync + 'static)> {
     fn from(val: HealthCheck) -> Self {
         match val.active.r#type {
             ActiveCheckType::TCP => {
