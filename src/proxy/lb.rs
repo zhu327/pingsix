@@ -120,10 +120,10 @@ enum SelectionLB {
 impl From<Upstream> for SelectionLB {
     fn from(value: Upstream) -> Self {
         match value.r#type {
-            SelectionType::RoundRobin => SelectionLB::RoundRobin(LB::new_from_upstream(value)),
-            SelectionType::Random => SelectionLB::Random(LB::new_from_upstream(value)),
-            SelectionType::Fnv => SelectionLB::Fnv(LB::new_from_upstream(value)),
-            SelectionType::Ketama => SelectionLB::Ketama(LB::new_from_upstream(value)),
+            SelectionType::RoundRobin => SelectionLB::RoundRobin(LB::from(value)),
+            SelectionType::Random => SelectionLB::Random(LB::from(value)),
+            SelectionType::Fnv => SelectionLB::Fnv(LB::from(value)),
+            SelectionType::Ketama => SelectionLB::Ketama(LB::from(value)),
         }
     }
 }
@@ -133,12 +133,12 @@ struct LB<BS: BackendSelection> {
     service: Option<Box<dyn Service + 'static>>,
 }
 
-impl<BS> LB<BS>
+impl<BS> From<Upstream> for LB<BS>
 where
     BS: BackendSelection + Send + Sync + 'static,
     BS::Iter: BackendIter,
 {
-    fn new_from_upstream(upstream: Upstream) -> Self {
+    fn from(upstream: Upstream) -> Self {
         let discovery: HybridDiscovery = upstream.clone().into();
         let mut upstreams = LoadBalancer::<BS>::from_backends(Backends::new(Box::new(discovery)));
 
