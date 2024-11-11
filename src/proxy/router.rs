@@ -8,7 +8,7 @@ use pingora_error::Result;
 use pingora_http::RequestHeader;
 use pingora_proxy::Session;
 
-use crate::config::Router;
+use crate::config::{Router, Timeout};
 
 use super::lb::ProxyLB;
 
@@ -46,18 +46,15 @@ impl ProxyRouter {
     }
 
     fn set_timeout(&self, p: &mut HttpPeer) {
-        if let Some(timeout) = self.router.timeout.clone() {
-            if let Some(connect) = timeout.connect {
-                p.options.connection_timeout = Some(time::Duration::from_secs(connect));
-            }
-
-            if let Some(read) = timeout.read {
-                p.options.read_timeout = Some(time::Duration::from_secs(read));
-            }
-
-            if let Some(send) = timeout.send {
-                p.options.write_timeout = Some(time::Duration::from_secs(send));
-            }
+        if let Some(Timeout {
+            connect,
+            read,
+            send,
+        }) = self.router.timeout.clone()
+        {
+            p.options.connection_timeout = connect.map(time::Duration::from_secs);
+            p.options.read_timeout = read.map(time::Duration::from_secs);
+            p.options.write_timeout = send.map(time::Duration::from_secs);
         }
     }
 }
@@ -83,20 +80,11 @@ impl MatchEntry {
         let proxy_router = Arc::new(ProxyRouter::from(router));
 
         if hosts.as_ref().map_or(true, |v| v.is_empty()) {
-            for uri in uris.unwrap().iter() {
-                if self.non_host_uri.at(uri).is_err() {
-                    self.non_host_uri.insert(uri, vec![proxy_router.clone()])?;
-                } else {
-                    self.non_host_uri
-                        .at_mut(uri)
-                        .unwrap()
-                        .value
-                        .push(proxy_router.clone());
-                }
-            }
+            // Insert for non-host URIs
+            MatchEntry::insert_router_for_uri(&mut self.non_host_uri, uris.unwrap(), proxy_router)?;
         } else {
+            // Insert for host URIs
             for host in hosts.unwrap().iter() {
-                // reverse host
                 let reversed_host = host.chars().rev().collect::<String>();
 
                 if self.host_uris.at(reversed_host.as_str()).is_err() {
@@ -107,17 +95,34 @@ impl MatchEntry {
                     self.host_uris.insert(reversed_host, inner)?;
                 } else {
                     let inner = self.host_uris.at_mut(reversed_host.as_str()).unwrap().value;
-                    for uri in uris.clone().unwrap().iter() {
-                        if inner.at(uri).is_err() {
-                            inner.insert(uri, vec![proxy_router.clone()])?;
-                        } else {
-                            inner.at_mut(uri).unwrap().value.push(proxy_router.clone());
-                        }
-                    }
+                    MatchEntry::insert_router_for_uri(
+                        inner,
+                        uris.clone().unwrap(),
+                        proxy_router.clone(),
+                    )?;
                 }
             }
-        };
+        }
 
+        Ok(())
+    }
+
+    fn insert_router_for_uri(
+        match_router: &mut MatchRouter<Vec<Arc<ProxyRouter>>>,
+        uris: Vec<String>,
+        proxy_router: Arc<ProxyRouter>,
+    ) -> Result<(), InsertError> {
+        for uri in uris.iter() {
+            if match_router.at(uri).is_err() {
+                match_router.insert(uri, vec![proxy_router.clone()])?;
+            } else {
+                match_router
+                    .at_mut(uri)
+                    .unwrap()
+                    .value
+                    .push(proxy_router.clone());
+            }
+        }
         Ok(())
     }
 
@@ -137,70 +142,52 @@ impl MatchEntry {
         );
 
         if host.map_or(true, |v| v.is_empty()) {
-            // match uri
-            if let Ok(v) = self.non_host_uri.at(uri) {
-                let params: HashMap<String, String> = v
-                    .params
-                    .iter()
-                    .map(|(k, v)| (k.to_string(), v.to_string()))
-                    .collect();
-
-                for router in v.value.iter() {
-                    if router.router.methods.is_none() {
-                        return Some((params, router.clone()));
-                    }
-
-                    // match method
-                    if router
-                        .router
-                        .methods
-                        .clone()
-                        .unwrap()
-                        .iter()
-                        .map(|method| method.to_string())
-                        .collect::<Vec<String>>()
-                        .contains(&method.to_string())
-                    {
-                        return Some((params, router.clone()));
-                    }
-                }
-            }
+            // Match non-host uri
+            return self.match_uri(&self.non_host_uri, uri, method);
         } else {
+            // Match host uri
             let reversed_host = host.unwrap().chars().rev().collect::<String>();
-
-            // match host
             if let Ok(v) = self.host_uris.at(reversed_host.as_str()) {
-                // match uri
-                if let Ok(v) = v.value.at(uri) {
-                    let params: HashMap<String, String> = v
-                        .params
-                        .iter()
-                        .map(|(k, v)| (k.to_string(), v.to_string()))
-                        .collect();
-
-                    for router in v.value.iter() {
-                        if router.router.methods.is_none() {
-                            return Some((params, router.clone()));
-                        }
-
-                        // match method
-                        if router
-                            .router
-                            .methods
-                            .clone()
-                            .unwrap()
-                            .iter()
-                            .map(|method| method.to_string())
-                            .collect::<Vec<String>>()
-                            .contains(&method.to_string())
-                        {
-                            return Some((params, router.clone()));
-                        }
-                    }
-                }
+                return self.match_uri(v.value, uri, method);
             }
         }
 
+        None
+    }
+
+    fn match_uri(
+        &self,
+        match_router: &MatchRouter<Vec<Arc<ProxyRouter>>>,
+        uri: &str,
+        method: &str,
+    ) -> Option<(HashMap<String, String>, Arc<ProxyRouter>)> {
+        if let Ok(v) = match_router.at(uri) {
+            let params: HashMap<String, String> = v
+                .params
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+
+            for router in v.value.iter() {
+                if router.router.methods.is_none() {
+                    return Some((params, router.clone()));
+                }
+
+                // Match method
+                if router
+                    .router
+                    .methods
+                    .clone()
+                    .unwrap()
+                    .iter()
+                    .map(|method| method.to_string())
+                    .collect::<Vec<String>>()
+                    .contains(&method.to_string())
+                {
+                    return Some((params, router.clone()));
+                }
+            }
+        }
         None
     }
 }

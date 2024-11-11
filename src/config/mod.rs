@@ -87,12 +87,12 @@ pub struct Listener {
 }
 
 impl Listener {
-    fn validate_tls_for_offer_h2(listener: &Listener) -> Result<(), ValidationError> {
-        if listener.offer_h2 && listener.tls.is_none() {
-            let err = ValidationError::new("tls_required_for_h2");
-            return Err(err);
+    fn validate_tls_for_offer_h2(&self) -> Result<(), ValidationError> {
+        if self.offer_h2 && self.tls.is_none() {
+            Err(ValidationError::new("tls_required_for_h2"))
+        } else {
+            Ok(())
         }
-        Ok(())
     }
 }
 
@@ -128,10 +128,10 @@ pub struct Router {
 impl Router {
     fn validate_uri_and_uris(router: &Router) -> Result<(), ValidationError> {
         if router.uri.is_none() && router.uris.as_ref().map_or(true, |v| v.is_empty()) {
-            let error = ValidationError::new("uri_and_uris");
-            return Err(error);
+            Err(ValidationError::new("uri_and_uris"))
+        } else {
+            Ok(())
         }
-        Ok(())
     }
 
     pub fn get_hosts(&self) -> Option<Vec<String>> {
@@ -213,10 +213,10 @@ impl Upstream {
 
     fn validate_upstream_host(upstream: &Upstream) -> Result<(), ValidationError> {
         if upstream.pass_host == UpstreamPassHost::REWRITE && upstream.upstream_host.is_none() {
-            let err = ValidationError::new("upstream_host_required_for_rewrite");
-            return Err(err);
+            Err(ValidationError::new("upstream_host_required_for_rewrite"))
+        } else {
+            Ok(())
         }
-        Ok(())
     }
 }
 

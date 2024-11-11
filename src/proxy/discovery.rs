@@ -94,14 +94,15 @@ impl From<Upstream> for HybridDiscovery {
 
         let mut backends = BTreeSet::new();
         for (addr, weight) in upstream.nodes.iter() {
-            let (host, port, is_domain) = parse_upstream_node(addr).unwrap();
+            let (host, port) = parse_host_and_port(addr).unwrap();
             let port = port.unwrap_or(if upstream.scheme == UpstreamScheme::HTTPS {
                 443
             } else {
                 80
             });
 
-            if is_domain {
+            if host.parse::<IpAddr>().is_err() {
+                // host is a domain name
                 let resolver = get_global_resolver();
                 this.dns_discoveries.push(DnsDiscovery::new(
                     host,
@@ -160,7 +161,6 @@ impl ServiceDiscovery for HybridDiscovery {
                         discovery.name.clone(),
                         e
                     );
-                    continue; // Skip to the next DNS discovery
                 }
             }
         }
@@ -169,9 +169,7 @@ impl ServiceDiscovery for HybridDiscovery {
     }
 }
 
-fn parse_upstream_node(
-    addr: &str,
-) -> Result<(String, Option<u32>, bool), Box<dyn std::error::Error>> {
+fn parse_host_and_port(addr: &str) -> Result<(String, Option<u32>), Box<dyn std::error::Error>> {
     let re = Regex::new(r"^(?:\[(.+?)\]|([^:]+))(?::(\d+))?$").unwrap();
 
     let caps = match re.captures(addr) {
@@ -179,49 +177,41 @@ fn parse_upstream_node(
         None => return Err("Invalid address format".into()),
     };
 
-    let raw_host = caps.get(1).or(caps.get(2)).unwrap().as_str();
-    let port_str = caps.get(3).map(|p| p.as_str());
-    let port = port_str.map(|p| p.parse::<u32>()).transpose()?;
-
-    let is_domain = raw_host.parse::<IpAddr>().is_err();
+    let host = caps.get(1).or(caps.get(2)).unwrap().as_str();
+    let port_opt = caps.get(3).map(|p| p.as_str());
+    let port = port_opt.map(|p| p.parse::<u32>()).transpose()?;
 
     // Ensure IPv6 addresses are enclosed in square brackets
-    let host = if !is_domain && raw_host.contains(':') {
-        format!("[{}]", raw_host)
+    let host = if host.contains(':') {
+        format!("[{}]", host)
     } else {
-        raw_host.to_string()
+        host.to_string()
     };
 
-    Ok((host, port, is_domain))
+    Ok((host, port))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::parse_upstream_node;
+    use super::parse_host_and_port;
 
     #[test]
     fn test_parse_upstream_node() {
         let test_cases = [
-            ("127.0.0.1", ("127.0.0.1".to_string(), None, false)),
-            ("[::1]", ("[::1]".to_string(), None, false)),
-            ("example.com", ("example.com".to_string(), None, true)),
-            (
-                "example.com:80",
-                ("example.com".to_string(), Some(80), true),
-            ),
-            (
-                "192.168.1.1:8080",
-                ("192.168.1.1".to_string(), Some(8080), false),
-            ),
+            ("127.0.0.1", ("127.0.0.1".to_string(), None)),
+            ("[::1]", ("[::1]".to_string(), None)),
+            ("example.com", ("example.com".to_string(), None)),
+            ("example.com:80", ("example.com".to_string(), Some(80))),
+            ("192.168.1.1:8080", ("192.168.1.1".to_string(), Some(8080))),
             // ... 其他测试用例
         ];
 
         for (input, expected) in test_cases {
-            let result = parse_upstream_node(input).unwrap();
+            let result = parse_host_and_port(input).unwrap();
             assert_eq!(result, expected);
         }
 
         // 测试异常情况
-        assert!(parse_upstream_node("").is_err());
+        assert!(parse_host_and_port("").is_err());
     }
 }
