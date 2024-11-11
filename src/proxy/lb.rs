@@ -1,8 +1,12 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{self, Duration},
+};
 
 use http::Uri;
 use pingora::services::background::background_service;
 use pingora_core::services::Service;
+use pingora_core::upstreams::peer::HttpPeer;
 use pingora_error::Error;
 use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_load_balancing::{
@@ -23,7 +27,7 @@ use super::discovery::HybridDiscovery;
 pub struct ProxyLB {
     upstream: Upstream,
     lb: SelectionLB,
-    // TODO: add support for timeout and retry
+    // TODO: add support retry
 }
 
 impl From<Upstream> for ProxyLB {
@@ -40,12 +44,33 @@ impl ProxyLB {
         let key = self.request_selector_key(session);
         log::debug!("proxy lb key: {}", &key);
 
-        match &self.lb {
+        let mut backend = match &self.lb {
             SelectionLB::RoundRobin(lb) => lb.upstreams.select(key.as_bytes(), 256),
             SelectionLB::Random(lb) => lb.upstreams.select(key.as_bytes(), 256),
             SelectionLB::Fnv(lb) => lb.upstreams.select(key.as_bytes(), 256),
             SelectionLB::Ketama(lb) => lb.upstreams.select(key.as_bytes(), 256),
+        };
+
+        if let Some(ref mut b) = backend {
+            if let Some(p) = b.ext.get_mut::<HttpPeer>() {
+                // set timeout from upstream
+                if let Some(timeout) = self.upstream.timeout.clone() {
+                    if let Some(connect) = timeout.connect {
+                        p.options.connection_timeout = Some(time::Duration::from_secs(connect));
+                    }
+
+                    if let Some(read) = timeout.read {
+                        p.options.read_timeout = Some(time::Duration::from_secs(read));
+                    }
+
+                    if let Some(send) = timeout.send {
+                        p.options.write_timeout = Some(time::Duration::from_secs(send));
+                    }
+                }
+            };
         }
+
+        backend
     }
 
     pub fn upstream_host_rewrite(&self, upstream_request: &mut RequestHeader) {

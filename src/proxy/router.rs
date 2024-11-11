@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time;
 
 use matchit::{InsertError, Router as MatchRouter};
+use pingora_core::upstreams::peer::HttpPeer;
+use pingora_error::Result;
 use pingora_proxy::Session;
 
 use crate::config::Router;
@@ -23,6 +26,37 @@ impl From<Router> for ProxyRouter {
     }
 }
 
+impl ProxyRouter {
+    pub fn select_http_peer<'a>(&'a self, session: &'a mut Session) -> Result<Box<HttpPeer>> {
+        let backend = self.lb.select_backend(session);
+        let mut backend =
+            backend.ok_or_else(|| pingora::Error::new_str("Unable to determine backend"))?;
+
+        backend
+            .ext
+            .get_mut::<HttpPeer>()
+            .map(|p| {
+                // set timeout from router
+                if let Some(timeout) = self.router.timeout.clone() {
+                    if let Some(connect) = timeout.connect {
+                        p.options.connection_timeout = Some(time::Duration::from_secs(connect));
+                    }
+
+                    if let Some(read) = timeout.read {
+                        p.options.read_timeout = Some(time::Duration::from_secs(read));
+                    }
+
+                    if let Some(send) = timeout.send {
+                        p.options.write_timeout = Some(time::Duration::from_secs(send));
+                    }
+                }
+
+                Box::new(p.clone())
+            })
+            .ok_or_else(|| pingora::Error::new_str("Fatal: Missing selected backend metadata"))
+    }
+}
+
 pub struct MatchEntry {
     /// Router for non-host URI matching
     non_host_uri: MatchRouter<Vec<Arc<ProxyRouter>>>,
@@ -38,7 +72,7 @@ impl MatchEntry {
         }
     }
 
-    pub fn insert_route(&mut self, router: Router) -> Result<(), InsertError> {
+    pub fn insert_router(&mut self, router: Router) -> Result<(), InsertError> {
         let hosts = router.get_hosts();
         let uris = router.get_uris();
         let proxy_router = Arc::new(ProxyRouter::from(router));
@@ -65,7 +99,7 @@ impl MatchEntry {
                     for uri in uris.clone().unwrap().iter() {
                         inner.insert(uri, vec![proxy_router.clone()])?;
                     }
-                    self.host_uris.insert(host, inner)?;
+                    self.host_uris.insert(reversed_host, inner)?;
                 } else {
                     let inner = self.host_uris.at_mut(reversed_host.as_str()).unwrap().value;
                     for uri in uris.clone().unwrap().iter() {
@@ -90,7 +124,12 @@ impl MatchEntry {
         let uri = session.req_header().uri.path();
         let method = session.req_header().method.as_str();
 
-        log::debug!("match request: host={:?}, uri={:?}, method={:?}", host, uri, method);
+        log::debug!(
+            "match request: host={:?}, uri={:?}, method={:?}",
+            host,
+            uri,
+            method
+        );
 
         if host.map_or(true, |v| v.is_empty()) {
             // match uri
