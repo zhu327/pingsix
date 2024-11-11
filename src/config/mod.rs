@@ -1,7 +1,7 @@
-use std::collections::HashMap;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::{collections::HashMap, fmt};
 
 use log::{debug, trace};
 use pingora::server::configuration::{Opt, ServerConf};
@@ -133,6 +133,22 @@ impl Router {
         }
         Ok(())
     }
+
+    pub fn get_hosts(&self) -> Option<Vec<String>> {
+        if let Some(host) = &self.host {
+            Some(vec![host.clone()])
+        } else {
+            self.hosts.clone()
+        }
+    }
+
+    pub fn get_uris(&self) -> Option<Vec<String>> {
+        if let Some(uri) = &self.uri {
+            Some(vec![uri.clone()])
+        } else {
+            self.uris.clone()
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -147,6 +163,24 @@ pub enum HttpMethod {
     CONNECT,
     TRACE,
     PURGE,
+}
+
+impl std::fmt::Display for HttpMethod {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let method = match self {
+            HttpMethod::GET => "GET",
+            HttpMethod::POST => "POST",
+            HttpMethod::PUT => "PUT",
+            HttpMethod::DELETE => "DELETE",
+            HttpMethod::PATCH => "PATCH",
+            HttpMethod::HEAD => "HEAD",
+            HttpMethod::OPTIONS => "OPTIONS",
+            HttpMethod::CONNECT => "CONNECT",
+            HttpMethod::TRACE => "TRACE",
+            HttpMethod::PURGE => "PURGE",
+        };
+        write!(f, "{}", method)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Validate)]

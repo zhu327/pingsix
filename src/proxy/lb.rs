@@ -23,6 +23,7 @@ use super::discovery::HybridDiscovery;
 pub struct ProxyLB {
     upstream: Upstream,
     lb: SelectionLB,
+    // TODO: add support for timeout and retry
 }
 
 impl From<Upstream> for ProxyLB {
@@ -37,12 +38,30 @@ impl From<Upstream> for ProxyLB {
 impl ProxyLB {
     pub fn select_backend<'a>(&'a self, session: &'a mut Session) -> Option<Backend> {
         let key = self.request_selector_key(session);
+        log::debug!("proxy lb key: {}", &key);
 
         match &self.lb {
             SelectionLB::RoundRobin(lb) => lb.upstreams.select(key.as_bytes(), 256),
             SelectionLB::Random(lb) => lb.upstreams.select(key.as_bytes(), 256),
             SelectionLB::Fnv(lb) => lb.upstreams.select(key.as_bytes(), 256),
             SelectionLB::Ketama(lb) => lb.upstreams.select(key.as_bytes(), 256),
+        }
+    }
+
+    pub fn upstream_host_rewrite(&self, upstream_request: &mut RequestHeader) {
+        if self.upstream.pass_host == UpstreamPassHost::REWRITE {
+            if let Some(host) = self.upstream.upstream_host.clone() {
+                upstream_request.insert_header("Host", host).unwrap();
+            }
+        }
+    }
+
+    pub fn take_background_service(&mut self) -> Option<Box<dyn Service + 'static>> {
+        match self.lb {
+            SelectionLB::RoundRobin(ref mut lb) => lb.service.take(),
+            SelectionLB::Random(ref mut lb) => lb.service.take(),
+            SelectionLB::Fnv(ref mut lb) => lb.service.take(),
+            SelectionLB::Ketama(ref mut lb) => lb.service.take(),
         }
     }
 
@@ -89,23 +108,6 @@ impl ProxyLB {
                 get_cookie_value(session.req_header(), self.upstream.key.as_str())
                     .map_or("".to_string(), |s| s.to_string())
             }
-        }
-    }
-
-    pub fn upstream_host_rewrite(&self, upstream_request: &mut RequestHeader) {
-        if self.upstream.pass_host == UpstreamPassHost::REWRITE {
-            if let Some(host) = self.upstream.upstream_host.clone() {
-                upstream_request.insert_header("Host", host).unwrap();
-            }
-        }
-    }
-
-    pub fn take_background_service(&mut self) -> Option<Box<dyn Service + 'static>> {
-        match self.lb {
-            SelectionLB::RoundRobin(ref mut lb) => lb.service.take(),
-            SelectionLB::Random(ref mut lb) => lb.service.take(),
-            SelectionLB::Fnv(ref mut lb) => lb.service.take(),
-            SelectionLB::Ketama(ref mut lb) => lb.service.take(),
         }
     }
 }
