@@ -5,6 +5,7 @@ use std::time;
 use matchit::{InsertError, Router as MatchRouter};
 use pingora_core::upstreams::peer::HttpPeer;
 use pingora_error::Result;
+use pingora_http::RequestHeader;
 use pingora_proxy::Session;
 
 use crate::config::Router;
@@ -120,7 +121,7 @@ impl MatchEntry {
         &self,
         session: &mut Session,
     ) -> Option<(HashMap<String, String>, Arc<ProxyRouter>)> {
-        let host = session.req_header().uri.host();
+        let host = get_request_host(session.req_header());
         let uri = session.req_header().uri.path();
         let method = session.req_header().method.as_str();
 
@@ -204,4 +205,16 @@ impl Default for MatchEntry {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn get_request_host(header: &RequestHeader) -> Option<&str> {
+    if let Some(host) = header.uri.host() {
+        return Some(host);
+    }
+    if let Some(host) = header.headers.get("Host") {
+        if let Ok(value) = host.to_str().map(|host| host.split(':').next()) {
+            return value;
+        }
+    }
+    None
 }
