@@ -81,7 +81,7 @@ impl MatchEntry {
 
         if hosts.as_ref().map_or(true, |v| v.is_empty()) {
             // Insert for non-host URIs
-            MatchEntry::insert_router_for_uri(&mut self.non_host_uri, uris.unwrap(), proxy_router)?;
+            Self::insert_router_for_uri(&mut self.non_host_uri, uris.unwrap(), proxy_router)?;
         } else {
             // Insert for host URIs
             for host in hosts.unwrap().iter() {
@@ -95,7 +95,7 @@ impl MatchEntry {
                     self.host_uris.insert(reversed_host, inner)?;
                 } else {
                     let inner = self.host_uris.at_mut(reversed_host.as_str()).unwrap().value;
-                    MatchEntry::insert_router_for_uri(
+                    Self::insert_router_for_uri(
                         inner,
                         uris.clone().unwrap(),
                         proxy_router.clone(),
@@ -143,12 +143,12 @@ impl MatchEntry {
 
         if host.map_or(true, |v| v.is_empty()) {
             // Match non-host uri
-            return self.match_uri(&self.non_host_uri, uri, method);
+            return Self::match_uri(&self.non_host_uri, uri, method);
         } else {
             // Match host uri
             let reversed_host = host.unwrap().chars().rev().collect::<String>();
             if let Ok(v) = self.host_uris.at(reversed_host.as_str()) {
-                return self.match_uri(v.value, uri, method);
+                return Self::match_uri(v.value, uri, method);
             }
         }
 
@@ -156,7 +156,6 @@ impl MatchEntry {
     }
 
     fn match_uri(
-        &self,
         match_router: &MatchRouter<Vec<Arc<ProxyRouter>>>,
         uri: &str,
         method: &str,
