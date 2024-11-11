@@ -38,23 +38,27 @@ impl ProxyRouter {
             .get_mut::<HttpPeer>()
             .map(|p| {
                 // set timeout from router
-                if let Some(timeout) = self.router.timeout.clone() {
-                    if let Some(connect) = timeout.connect {
-                        p.options.connection_timeout = Some(time::Duration::from_secs(connect));
-                    }
-
-                    if let Some(read) = timeout.read {
-                        p.options.read_timeout = Some(time::Duration::from_secs(read));
-                    }
-
-                    if let Some(send) = timeout.send {
-                        p.options.write_timeout = Some(time::Duration::from_secs(send));
-                    }
-                }
+                self.set_timeout(p);
 
                 Box::new(p.clone())
             })
             .ok_or_else(|| pingora::Error::new_str("Fatal: Missing selected backend metadata"))
+    }
+
+    fn set_timeout(&self, p: &mut HttpPeer) {
+        if let Some(timeout) = self.router.timeout.clone() {
+            if let Some(connect) = timeout.connect {
+                p.options.connection_timeout = Some(time::Duration::from_secs(connect));
+            }
+
+            if let Some(read) = timeout.read {
+                p.options.read_timeout = Some(time::Duration::from_secs(read));
+            }
+
+            if let Some(send) = timeout.send {
+                p.options.write_timeout = Some(time::Duration::from_secs(send));
+            }
+        }
     }
 }
 

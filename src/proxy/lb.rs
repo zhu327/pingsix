@@ -54,19 +54,7 @@ impl ProxyLB {
         if let Some(ref mut b) = backend {
             if let Some(p) = b.ext.get_mut::<HttpPeer>() {
                 // set timeout from upstream
-                if let Some(timeout) = self.upstream.timeout.clone() {
-                    if let Some(connect) = timeout.connect {
-                        p.options.connection_timeout = Some(time::Duration::from_secs(connect));
-                    }
-
-                    if let Some(read) = timeout.read {
-                        p.options.read_timeout = Some(time::Duration::from_secs(read));
-                    }
-
-                    if let Some(send) = timeout.send {
-                        p.options.write_timeout = Some(time::Duration::from_secs(send));
-                    }
-                }
+                self.set_timeout(p);
             };
         }
 
@@ -87,6 +75,22 @@ impl ProxyLB {
             SelectionLB::Random(ref mut lb) => lb.service.take(),
             SelectionLB::Fnv(ref mut lb) => lb.service.take(),
             SelectionLB::Ketama(ref mut lb) => lb.service.take(),
+        }
+    }
+
+    fn set_timeout(&self, p: &mut HttpPeer) {
+        if let Some(timeout) = self.upstream.timeout.clone() {
+            if let Some(connect) = timeout.connect {
+                p.options.connection_timeout = Some(time::Duration::from_secs(connect));
+            }
+
+            if let Some(read) = timeout.read {
+                p.options.read_timeout = Some(time::Duration::from_secs(read));
+            }
+
+            if let Some(send) = timeout.send {
+                p.options.write_timeout = Some(time::Duration::from_secs(send));
+            }
         }
     }
 
