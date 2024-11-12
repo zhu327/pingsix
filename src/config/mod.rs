@@ -136,7 +136,7 @@ impl Router {
 
     pub fn get_hosts(&self) -> Option<Vec<String>> {
         if let Some(host) = &self.host {
-            Some(vec![host.clone()])
+            Some(vec![host.to_string()])
         } else {
             self.hosts.clone()
         }
@@ -144,7 +144,7 @@ impl Router {
 
     pub fn get_uris(&self) -> Option<Vec<String>> {
         if let Some(uri) = &self.uri {
-            Some(vec![uri.clone()])
+            Some(vec![uri.to_string()])
         } else {
             self.uris.clone()
         }

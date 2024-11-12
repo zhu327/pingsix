@@ -63,7 +63,7 @@ impl ProxyLB {
 
     pub fn upstream_host_rewrite(&self, upstream_request: &mut RequestHeader) {
         if self.upstream.pass_host == UpstreamPassHost::REWRITE {
-            if let Some(host) = self.upstream.upstream_host.clone() {
+            if let Some(host) = &self.upstream.upstream_host {
                 upstream_request.insert_header("Host", host).unwrap();
             }
         }
@@ -91,7 +91,7 @@ impl ProxyLB {
             connect,
             read,
             send,
-        }) = self.upstream.timeout.clone()
+        }) = self.upstream.timeout
         {
             p.options.connection_timeout = Some(time::Duration::from_secs(connect));
             p.options.read_timeout = Some(time::Duration::from_secs(read));
@@ -184,7 +184,7 @@ where
         let discovery: HybridDiscovery = upstream.clone().into();
         let mut upstreams = LoadBalancer::<BS>::from_backends(Backends::new(Box::new(discovery)));
 
-        if let Some(check) = upstream.checks.clone() {
+        if let Some(check) = upstream.checks {
             let health_check: Box<(dyn HealthCheckTrait + Send + Sync + 'static)> =
                 check.clone().into();
             upstreams.set_health_check(health_check);
@@ -241,7 +241,7 @@ impl From<HealthCheck> for Box<TcpHealthCheck> {
 
 impl From<HealthCheck> for Box<HttpHealthCheck> {
     fn from(value: HealthCheck) -> Self {
-        let host = value.active.host.clone().unwrap_or_default();
+        let host = value.active.host.unwrap_or_default();
         let tls = value.active.r#type == ActiveCheckType::HTTPS;
         let mut health_check = HttpHealthCheck::new(host.as_str(), tls);
 
@@ -275,7 +275,7 @@ impl From<HealthCheck> for Box<HttpHealthCheck> {
             health_check.consecutive_success = healthy.successes as usize;
 
             if !healthy.http_statuses.is_empty() {
-                let http_statuses = healthy.http_statuses.clone();
+                let http_statuses = healthy.http_statuses;
 
                 health_check.validator = Some(Box::new(move |header: &ResponseHeader| {
                     if http_statuses.contains(&(header.status.as_u16() as u32)) {
