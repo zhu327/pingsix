@@ -28,17 +28,6 @@ pub struct ProxyContext {
     pub created_at: u64,
 }
 
-impl ProxyContext {
-    pub fn new() -> Self {
-        ProxyContext {
-            router: None,
-            router_params: HashMap::new(),
-            tries: 0,
-            created_at: now().as_millis() as u64,
-        }
-    }
-}
-
 #[derive(Default)]
 pub struct ProxyService {
     pub matcher: MatchEntry,
@@ -93,12 +82,12 @@ impl ProxyHttp for ProxyService {
         ctx: &mut Self::CTX,
         mut e: Box<Error>,
     ) -> Box<Error> {
-        let reties = ctx.router.as_ref().unwrap().get_retries();
+        let reties = ctx.router.as_ref().unwrap().lb.get_retries();
         if reties.is_none() || matches!(reties, Some(0)) {
             return e;
         }
 
-        let retry_timeout = ctx.router.as_ref().unwrap().get_retry_timeout();
+        let retry_timeout = ctx.router.as_ref().unwrap().lb.get_retry_timeout();
         if let Some(timeout) = retry_timeout {
             if (now().as_millis() as u64) - ctx.created_at > (timeout * 1000) {
                 return e;
@@ -122,6 +111,21 @@ impl ProxyHttp for ProxyService {
         ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
         ctx.router.as_ref().unwrap().select_http_peer(session)
+    }
+
+    // Modify the request before it is sent to the upstream
+    async fn upstream_request_filter(
+        &self,
+        _session: &mut Session,
+        upstream_request: &mut pingora_http::RequestHeader,
+        ctx: &mut Self::CTX,
+    ) -> Result<()> {
+        ctx.router
+            .as_ref()
+            .unwrap()
+            .lb
+            .upstream_host_rewrite(upstream_request);
+        Ok(())
     }
 }
 

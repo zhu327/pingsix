@@ -26,7 +26,7 @@ use crate::config::{
 use super::discovery::HybridDiscovery;
 
 pub struct ProxyLB {
-    upstream: Upstream,
+    pub upstream: Upstream,
     lb: SelectionLB,
 }
 

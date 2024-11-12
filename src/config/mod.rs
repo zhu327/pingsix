@@ -1,6 +1,5 @@
 use std::fs;
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::{collections::HashMap, fmt};
 
 use log::{debug, trace};
@@ -66,6 +65,7 @@ impl Config {
         Ok(conf)
     }
 
+    #[allow(dead_code)]
     pub fn to_yaml(&self) -> String {
         serde_yaml::to_string(self).unwrap()
     }
@@ -98,8 +98,8 @@ impl Listener {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Tls {
-    pub cert_path: PathBuf,
-    pub key_path: PathBuf,
+    pub cert_path: String,
+    pub key_path: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -44,14 +44,6 @@ impl ProxyRouter {
             .ok_or_else(|| Error::new_str("Fatal: Missing selected backend metadata"))
     }
 
-    pub fn get_retries(&self) -> Option<usize> {
-        self.lb.get_retries()
-    }
-
-    pub fn get_retry_timeout(&self) -> Option<u64> {
-        self.lb.get_retry_timeout()
-    }
-
     fn set_timeout(&self, p: &mut HttpPeer) {
         if let Some(Timeout {
             connect,
@@ -75,17 +67,10 @@ pub struct MatchEntry {
 }
 
 impl MatchEntry {
-    pub fn new() -> Self {
-        Self {
-            non_host_uri: MatchRouter::new(),
-            host_uris: MatchRouter::new(),
-        }
-    }
-
-    pub fn insert_router(&mut self, router: Router) -> Result<(), InsertError> {
-        let hosts = router.get_hosts();
-        let uris = router.get_uris();
-        let proxy_router = Arc::new(ProxyRouter::from(router));
+    pub fn insert_router(&mut self, proxy_router: ProxyRouter) -> Result<(), InsertError> {
+        let hosts = proxy_router.router.get_hosts();
+        let uris = proxy_router.router.get_uris();
+        let proxy_router = Arc::new(proxy_router);
 
         if hosts.as_ref().map_or(true, |v| v.is_empty()) {
             // Insert for non-host URIs
