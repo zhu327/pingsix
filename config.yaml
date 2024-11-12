@@ -57,6 +57,8 @@ routers:
           unhealthy:
             http_failures: 5
             tcp_failures: 2
+      hash_on: vars # supported types: vars, cookie, header
+      key: uri
       pass_host: rewrite
       upstream_host: www.baidu.com
       scheme: https
