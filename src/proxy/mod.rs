@@ -3,12 +3,9 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use bytes::Bytes;
-use http::{header, Response, StatusCode};
-use once_cell::sync::Lazy;
+use http::StatusCode;
 use pingora_core::upstreams::peer::HttpPeer;
-use pingora_error::{Error, Result};
-use pingora_http::ResponseHeader;
+use pingora_error::{Error, ErrorType, Result};
 use pingora_proxy::{ProxyHttp, Session};
 
 use router::{MatchEntry, ProxyRouter};
@@ -16,8 +13,6 @@ use router::{MatchEntry, ProxyRouter};
 pub mod discovery;
 pub mod lb;
 pub mod router;
-
-static NOT_FOUND: Lazy<Bytes> = Lazy::new(|| Bytes::from("not found"));
 
 #[derive(Default)]
 pub struct ProxyContext {
@@ -60,15 +55,10 @@ impl ProxyHttp for ProxyService {
             ctx.router_params = router_params;
             ctx.router = Some(Arc::clone(&router));
         } else {
-            send_response(
-                session,
-                StatusCode::NOT_FOUND,
-                None,
-                Some(NOT_FOUND.clone()),
-                None,
-            )
-            .await?;
-            return Ok(true);
+            return Err(Error::explain(
+                ErrorType::HTTPStatus(StatusCode::NOT_FOUND.as_u16()),
+                "Not Found",
+            ));
         }
 
         Ok(false)
@@ -126,47 +116,6 @@ impl ProxyHttp for ProxyService {
             .lb
             .upstream_host_rewrite(upstream_request);
         Ok(())
-    }
-}
-
-pub async fn send_response(
-    session: &mut Session,
-    status: StatusCode,
-    content_type: Option<&'static str>,
-    body: Option<Bytes>,
-    headers: Option<HashMap<String, String>>,
-) -> Result<()> {
-    let cl = body.as_ref().map(|b| b.len()).unwrap_or(0);
-    let mut bd = Response::builder()
-        .status(status)
-        .header(header::CONTENT_LENGTH, cl);
-    if let Some(headers) = headers {
-        for (key, value) in headers {
-            bd = bd.header(key, value);
-        }
-    }
-    if let Some(content_type) = content_type {
-        bd = bd.header(header::CONTENT_TYPE, content_type);
-    } else {
-        bd = bd.header(header::CONTENT_TYPE, "text/plain");
-    }
-
-    if let Some(body) = body {
-        let resp = bd.body(body).unwrap();
-        let (parts, body) = resp.into_parts();
-        let resp_header: ResponseHeader = parts.into();
-        session
-            .write_response_header(Box::new(resp_header), false)
-            .await?;
-        session.write_response_body(Some(body), true).await
-    } else {
-        let resp = bd.body(()).unwrap();
-        let (parts, _) = resp.into_parts();
-        let resp_header: ResponseHeader = parts.into();
-        session
-            .write_response_header(Box::new(resp_header), false)
-            .await?;
-        session.write_response_body(None, true).await
     }
 }
 
