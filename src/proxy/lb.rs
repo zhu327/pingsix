@@ -28,7 +28,6 @@ use super::discovery::HybridDiscovery;
 pub struct ProxyLB {
     upstream: Upstream,
     lb: SelectionLB,
-    // TODO: add support retry
 }
 
 impl From<Upstream> for ProxyLB {
@@ -79,6 +78,14 @@ impl ProxyLB {
         }
     }
 
+    pub fn get_retries(&self) -> Option<usize> {
+        self.upstream.retries.map(|r| r as usize)
+    }
+
+    pub fn get_retry_timeout(&self) -> Option<u64> {
+        self.upstream.retry_timeout
+    }
+
     fn set_timeout(&self, p: &mut HttpPeer) {
         if let Some(Timeout {
             connect,
@@ -86,9 +93,9 @@ impl ProxyLB {
             send,
         }) = self.upstream.timeout.clone()
         {
-            p.options.connection_timeout = connect.map(time::Duration::from_secs);
-            p.options.read_timeout = read.map(time::Duration::from_secs);
-            p.options.write_timeout = send.map(time::Duration::from_secs);
+            p.options.connection_timeout = Some(time::Duration::from_secs(connect));
+            p.options.read_timeout = Some(time::Duration::from_secs(read));
+            p.options.write_timeout = Some(time::Duration::from_secs(send));
         }
     }
 

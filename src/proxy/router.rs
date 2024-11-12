@@ -44,6 +44,14 @@ impl ProxyRouter {
             .ok_or_else(|| Error::new_str("Fatal: Missing selected backend metadata"))
     }
 
+    pub fn get_retries(&self) -> Option<usize> {
+        self.lb.get_retries()
+    }
+
+    pub fn get_retry_timeout(&self) -> Option<u64> {
+        self.lb.get_retry_timeout()
+    }
+
     fn set_timeout(&self, p: &mut HttpPeer) {
         if let Some(Timeout {
             connect,
@@ -51,13 +59,14 @@ impl ProxyRouter {
             send,
         }) = self.router.timeout.clone()
         {
-            p.options.connection_timeout = connect.map(time::Duration::from_secs);
-            p.options.read_timeout = read.map(time::Duration::from_secs);
-            p.options.write_timeout = send.map(time::Duration::from_secs);
+            p.options.connection_timeout = Some(time::Duration::from_secs(connect));
+            p.options.read_timeout = Some(time::Duration::from_secs(read));
+            p.options.write_timeout = Some(time::Duration::from_secs(send));
         }
     }
 }
 
+#[derive(Default)]
 pub struct MatchEntry {
     /// Router for non-host URI matching
     non_host_uri: MatchRouter<Vec<Arc<ProxyRouter>>>,
@@ -187,12 +196,6 @@ impl MatchEntry {
             }
         }
         None
-    }
-}
-
-impl Default for MatchEntry {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

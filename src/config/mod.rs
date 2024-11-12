@@ -104,9 +104,9 @@ pub struct Tls {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Timeout {
-    pub connect: Option<u64>,
-    pub send: Option<u64>,
-    pub read: Option<u64>,
+    pub connect: u64,
+    pub send: u64,
+    pub read: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Validate)]
