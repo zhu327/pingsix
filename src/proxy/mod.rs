@@ -28,14 +28,6 @@ pub struct ProxyService {
     pub matcher: MatchEntry,
 }
 
-impl ProxyService {
-    pub fn new() -> ProxyService {
-        ProxyService {
-            matcher: MatchEntry::default(),
-        }
-    }
-}
-
 #[async_trait]
 impl ProxyHttp for ProxyService {
     type CTX = ProxyContext;
@@ -53,7 +45,7 @@ impl ProxyHttp for ProxyService {
         // Match request to pipeline
         if let Some((router_params, router)) = self.matcher.match_request(session) {
             ctx.router_params = router_params;
-            ctx.router = Some(Arc::clone(&router));
+            ctx.router = Some(router);
         } else {
             return Err(Error::explain(
                 ErrorType::HTTPStatus(StatusCode::NOT_FOUND.as_u16()),
@@ -72,25 +64,24 @@ impl ProxyHttp for ProxyService {
         ctx: &mut Self::CTX,
         mut e: Box<Error>,
     ) -> Box<Error> {
-        let reties = ctx.router.as_ref().unwrap().lb.get_retries();
-        if reties.is_none() || matches!(reties, Some(0)) {
-            return e;
-        }
+        if let Some(router) = ctx.router.as_ref() {
+            if let Some(retries) = router.lb.get_retries() {
+                if retries == 0 || ctx.tries >= retries {
+                    return e;
+                }
 
-        let retry_timeout = ctx.router.as_ref().unwrap().lb.get_retry_timeout();
-        if let Some(timeout) = retry_timeout {
-            if (now().as_millis() as u64) - ctx.created_at > (timeout * 1000) {
+                if let Some(timeout) = router.lb.get_retry_timeout() {
+                    if now().as_millis() as u64 - ctx.created_at > timeout * 1000 {
+                        return e;
+                    }
+                }
+
+                ctx.tries += 1;
+                e.set_retry(true);
                 return e;
             }
         }
 
-        if ctx.tries > reties.unwrap() {
-            return e;
-        }
-
-        // retry
-        ctx.tries += 1;
-        e.set_retry(true);
         e
     }
 

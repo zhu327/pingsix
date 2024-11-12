@@ -13,20 +13,24 @@ mod config;
 mod proxy;
 
 fn main() {
+    // Initialize logging
     env_logger::init();
 
-    // read command line arguments
+    // Read command-line arguments
     let opt = Opt::parse_args();
 
+    // Load configuration with optional override
     let config = Config::load_yaml_with_opt_override(&opt).unwrap();
 
+    // Create Pingora server with optional configuration
     let mut pingsix_server = Server::new_with_opt_and_conf(Some(opt), config.pingora);
 
+    // Apply proxy routers
     log::info!("Applying Routers...");
     let mut background_services: Vec<Box<dyn Service>> = vec![];
 
-    // init proxy service
-    let mut proxy_service = ProxyService::new();
+    // Create proxy service and configure routing
+    let mut proxy_service = ProxyService::default();
     for router in config.routers {
         log::info!("Configuring Router: {}", router.id);
         let mut proxy_router = ProxyRouter::from(router);
@@ -37,29 +41,36 @@ fn main() {
         proxy_service.matcher.insert_router(proxy_router).unwrap();
     }
 
+    // Create HTTP proxy service with name
     let mut pingsix_service =
         http_proxy_service_with_name(&pingsix_server.configuration, proxy_service, "pingsix");
 
-    // add listeners
-    log::info!("Add listeners...");
+    // Add listeners from configuration
+    log::info!("Adding listeners...");
     for list_cfg in config.listeners {
-        if let Some(Tls {
-            cert_path,
-            key_path,
-        }) = list_cfg.tls
-        {
-            let mut settings = TlsSettings::intermediate(&cert_path, &key_path)
-                .expect("adding TLS listener shouldn't fail");
-            if list_cfg.offer_h2 {
-                settings.enable_h2();
+        match list_cfg.tls {
+            Some(Tls {
+                cert_path,
+                key_path,
+            }) => {
+                let mut settings = TlsSettings::intermediate(&cert_path, &key_path)
+                    .expect("Adding TLS listener shouldn't fail");
+                if list_cfg.offer_h2 {
+                    settings.enable_h2();
+                }
+                pingsix_service.add_tls_with_settings(
+                    &list_cfg.address.to_string(),
+                    None,
+                    settings,
+                );
             }
-
-            pingsix_service.add_tls_with_settings(&list_cfg.address.to_string(), None, settings);
-        } else {
-            pingsix_service.add_tcp(&list_cfg.address.to_string());
+            None => {
+                pingsix_service.add_tcp(&list_cfg.address.to_string());
+            }
         }
     }
 
+    // Bootstrapping and server startup
     log::info!("Bootstrapping...");
     pingsix_server.bootstrap();
 
