@@ -178,7 +178,7 @@ where
         let mut upstreams = LoadBalancer::<BS>::from_backends(Backends::new(Box::new(discovery)));
 
         if let Some(check) = upstream.checks.clone() {
-            let health_check: Box<(dyn HealthCheckTrait + std::marker::Send + Sync + 'static)> =
+            let health_check: Box<(dyn HealthCheckTrait + Send + Sync + 'static)> =
                 check.clone().into();
             upstreams.set_health_check(health_check);
 
@@ -189,8 +189,7 @@ where
             upstreams.health_check_frequency = Some(health_check_frequency);
         }
 
-        let background: pingora::services::background::GenBackgroundService<LoadBalancer<BS>> =
-            background_service("health check", upstreams);
+        let background = background_service("health check", upstreams);
         let upstreams = background.task();
 
         LB {
@@ -200,76 +199,92 @@ where
     }
 }
 
-impl From<HealthCheck> for Box<(dyn HealthCheckTrait + std::marker::Send + Sync + 'static)> {
-    fn from(val: HealthCheck) -> Self {
-        match val.active.r#type {
+impl From<HealthCheck> for Box<(dyn HealthCheckTrait + Send + Sync + 'static)> {
+    fn from(value: HealthCheck) -> Self {
+        match value.active.r#type {
             ActiveCheckType::TCP => {
-                let mut health_check = TcpHealthCheck::new();
-                health_check.peer_template.options.total_connection_timeout =
-                    Some(Duration::from_secs(val.active.timeout as u64));
-
-                if let Some(healthy) = val.active.healthy {
-                    health_check.consecutive_success = healthy.successes as usize;
-                }
-
-                if let Some(unhealthy) = val.active.unhealthy {
-                    health_check.consecutive_failure = unhealthy.tcp_failures as usize;
-                }
-
+                let health_check: Box<TcpHealthCheck> = value.into();
                 health_check
             }
             ActiveCheckType::HTTP | ActiveCheckType::HTTPS => {
-                let host = val.active.host.clone().unwrap_or_default();
-                let tls = val.active.r#type == ActiveCheckType::HTTPS;
-                let mut health_check = HttpHealthCheck::new(host.as_str(), tls);
-
-                health_check.peer_template.options.total_connection_timeout =
-                    Some(Duration::from_secs(val.active.timeout as u64));
-                if tls {
-                    health_check.peer_template.options.verify_cert =
-                        val.active.https_verify_certificate;
-                }
-
-                if let Ok(uri) = Uri::builder().path_and_query(val.active.http_path).build() {
-                    health_check.req.set_uri(uri);
-                }
-
-                for header in val.active.req_headers.iter() {
-                    let mut parts = header.splitn(2, ":");
-                    if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
-                        let key = key.trim().to_string();
-                        let value = value.trim().to_string();
-                        let _ = health_check.req.insert_header(key, value);
-                    }
-                }
-
-                if let Some(port) = val.active.port {
-                    health_check.port_override = Some(port as u16);
-                }
-
-                if let Some(healthy) = val.active.healthy {
-                    health_check.consecutive_success = healthy.successes as usize;
-
-                    if !healthy.http_statuses.is_empty() {
-                        let http_statuses = healthy.http_statuses.clone();
-
-                        health_check.validator = Some(Box::new(move |header: &ResponseHeader| {
-                            if http_statuses.contains(&(header.status.as_u16() as u32)) {
-                                Ok(())
-                            } else {
-                                Err(Error::new_str("Invalid response"))
-                            }
-                        }));
-                    }
-                }
-
-                if let Some(unhealthy) = val.active.unhealthy {
-                    health_check.consecutive_failure = unhealthy.http_failures as usize;
-                }
-
-                Box::new(health_check)
+                let health_check: Box<HttpHealthCheck> = value.into();
+                health_check
             }
         }
+    }
+}
+
+impl From<HealthCheck> for Box<TcpHealthCheck> {
+    fn from(value: HealthCheck) -> Self {
+        let mut health_check = TcpHealthCheck::new();
+        health_check.peer_template.options.total_connection_timeout =
+            Some(Duration::from_secs(value.active.timeout as u64));
+
+        if let Some(healthy) = value.active.healthy {
+            health_check.consecutive_success = healthy.successes as usize;
+        }
+
+        if let Some(unhealthy) = value.active.unhealthy {
+            health_check.consecutive_failure = unhealthy.tcp_failures as usize;
+        }
+
+        health_check
+    }
+}
+
+impl From<HealthCheck> for Box<HttpHealthCheck> {
+    fn from(value: HealthCheck) -> Self {
+        let host = value.active.host.clone().unwrap_or_default();
+        let tls = value.active.r#type == ActiveCheckType::HTTPS;
+        let mut health_check = HttpHealthCheck::new(host.as_str(), tls);
+
+        health_check.peer_template.options.total_connection_timeout =
+            Some(Duration::from_secs(value.active.timeout as u64));
+        if tls {
+            health_check.peer_template.options.verify_cert = value.active.https_verify_certificate;
+        }
+
+        if let Ok(uri) = Uri::builder()
+            .path_and_query(value.active.http_path)
+            .build()
+        {
+            health_check.req.set_uri(uri);
+        }
+
+        for header in value.active.req_headers.iter() {
+            let mut parts = header.splitn(2, ":");
+            if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
+                let key = key.trim().to_string();
+                let value = value.trim().to_string();
+                let _ = health_check.req.insert_header(key, value);
+            }
+        }
+
+        if let Some(port) = value.active.port {
+            health_check.port_override = Some(port as u16);
+        }
+
+        if let Some(healthy) = value.active.healthy {
+            health_check.consecutive_success = healthy.successes as usize;
+
+            if !healthy.http_statuses.is_empty() {
+                let http_statuses = healthy.http_statuses.clone();
+
+                health_check.validator = Some(Box::new(move |header: &ResponseHeader| {
+                    if http_statuses.contains(&(header.status.as_u16() as u32)) {
+                        Ok(())
+                    } else {
+                        Err(Error::new_str("Invalid response"))
+                    }
+                }));
+            }
+        }
+
+        if let Some(unhealthy) = value.active.unhealthy {
+            health_check.consecutive_failure = unhealthy.http_failures as usize;
+        }
+
+        Box::new(health_check)
     }
 }
 

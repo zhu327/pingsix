@@ -4,7 +4,7 @@ use std::time;
 
 use matchit::{InsertError, Router as MatchRouter};
 use pingora_core::upstreams::peer::HttpPeer;
-use pingora_error::Result;
+use pingora_error::{Error, Result};
 use pingora_http::RequestHeader;
 use pingora_proxy::Session;
 
@@ -30,8 +30,7 @@ impl From<Router> for ProxyRouter {
 impl ProxyRouter {
     pub fn select_http_peer<'a>(&'a self, session: &'a mut Session) -> Result<Box<HttpPeer>> {
         let backend = self.lb.select_backend(session);
-        let mut backend =
-            backend.ok_or_else(|| pingora::Error::new_str("Unable to determine backend"))?;
+        let mut backend = backend.ok_or_else(|| Error::new_str("Unable to determine backend"))?;
 
         backend
             .ext
@@ -42,7 +41,7 @@ impl ProxyRouter {
 
                 Box::new(p.clone())
             })
-            .ok_or_else(|| pingora::Error::new_str("Fatal: Missing selected backend metadata"))
+            .ok_or_else(|| Error::new_str("Fatal: Missing selected backend metadata"))
     }
 
     fn set_timeout(&self, p: &mut HttpPeer) {
