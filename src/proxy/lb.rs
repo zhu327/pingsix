@@ -25,12 +25,16 @@ use crate::config::{
 
 use super::discovery::HybridDiscovery;
 
+/// Proxy load balancer.
+///
+/// Manages the load balancing of requests to upstream servers.
 pub struct ProxyLB {
     pub upstream: Upstream,
     lb: SelectionLB,
 }
 
 impl From<Upstream> for ProxyLB {
+    /// Creates a new `ProxyLB` instance from an `Upstream` configuration.
     fn from(value: Upstream) -> Self {
         ProxyLB {
             upstream: value.clone(),
@@ -40,6 +44,7 @@ impl From<Upstream> for ProxyLB {
 }
 
 impl ProxyLB {
+    /// Selects a backend server for a given session.
     pub fn select_backend<'a>(&'a self, session: &'a mut Session) -> Option<Backend> {
         let key = self.request_selector_key(session);
         log::debug!("proxy lb key: {}", &key);
@@ -61,6 +66,7 @@ impl ProxyLB {
         backend
     }
 
+    /// Rewrites the upstream host in the request header if needed.
     pub fn upstream_host_rewrite(&self, upstream_request: &mut RequestHeader) {
         if self.upstream.pass_host == UpstreamPassHost::REWRITE {
             if let Some(host) = &self.upstream.upstream_host {
@@ -69,6 +75,7 @@ impl ProxyLB {
         }
     }
 
+    /// Takes the background service if it exists.
     pub fn take_background_service(&mut self) -> Option<Box<dyn Service + 'static>> {
         match self.lb {
             SelectionLB::RoundRobin(ref mut lb) => lb.service.take(),
@@ -78,14 +85,17 @@ impl ProxyLB {
         }
     }
 
+    /// Gets the number of retries from the upstream configuration.
     pub fn get_retries(&self) -> Option<usize> {
         self.upstream.retries.map(|r| r as usize)
     }
 
+    /// Gets the retry timeout from the upstream configuration.
     pub fn get_retry_timeout(&self) -> Option<u64> {
         self.upstream.retry_timeout
     }
 
+    /// Sets the timeout for an `HttpPeer`.
     fn set_timeout(&self, p: &mut HttpPeer) {
         if let Some(Timeout {
             connect,
@@ -99,6 +109,7 @@ impl ProxyLB {
         }
     }
 
+    /// Generates the key for request selection based on the upstream configuration.
     fn request_selector_key<'a>(&'a self, session: &'a mut Session) -> String {
         match self.upstream.hash_on {
             UpstreamHashOn::VARS => self.handle_vars(session),
@@ -115,6 +126,7 @@ impl ProxyLB {
         }
     }
 
+    /// Handles variable-based request selection.
     fn handle_vars<'a>(&'a self, session: &'a mut Session) -> String {
         if self.upstream.key.as_str().starts_with("arg_") {
             if let Some(name) = self.upstream.key.as_str().strip_prefix("arg_") {

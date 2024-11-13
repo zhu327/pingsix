@@ -12,12 +12,16 @@ use crate::config::{Router, Timeout};
 
 use super::lb::ProxyLB;
 
+/// Proxy router.
+///
+/// Manages routing of requests to appropriate proxy load balancers.
 pub struct ProxyRouter {
     pub router: Router,
     pub lb: ProxyLB,
 }
 
 impl From<Router> for ProxyRouter {
+    /// Creates a new `ProxyRouter` instance from a `Router` configuration.
     fn from(value: Router) -> Self {
         Self {
             router: value.clone(),
@@ -28,6 +32,7 @@ impl From<Router> for ProxyRouter {
 }
 
 impl ProxyRouter {
+    /// Selects an HTTP peer for a given session.
     pub fn select_http_peer<'a>(&'a self, session: &'a mut Session) -> Result<Box<HttpPeer>> {
         let backend = self.lb.select_backend(session);
         let mut backend = backend.ok_or_else(|| Error::new_str("Unable to determine backend"))?;
@@ -44,6 +49,7 @@ impl ProxyRouter {
             .ok_or_else(|| Error::new_str("Fatal: Missing selected backend metadata"))
     }
 
+    /// Sets the timeout for an `HttpPeer` based on the router configuration.
     fn set_timeout(&self, p: &mut HttpPeer) {
         if let Some(Timeout {
             connect,
@@ -67,6 +73,7 @@ pub struct MatchEntry {
 }
 
 impl MatchEntry {
+    /// Inserts a router into the match entry.
     pub fn insert_router(&mut self, proxy_router: ProxyRouter) -> Result<(), InsertError> {
         let hosts = proxy_router.router.get_hosts().unwrap_or_default();
         let uris = proxy_router.router.get_uris().unwrap_or_default();
@@ -96,6 +103,7 @@ impl MatchEntry {
         Ok(())
     }
 
+    /// Inserts a router for a given URI.
     fn insert_router_for_uri(
         match_router: &mut MatchRouter<Vec<Arc<ProxyRouter>>>,
         uris: &[String],
@@ -115,6 +123,7 @@ impl MatchEntry {
         Ok(())
     }
 
+    /// Matches a request to a router.
     pub fn match_request(
         &self,
         session: &mut Session,
@@ -144,6 +153,7 @@ impl MatchEntry {
         None
     }
 
+    /// Matches a URI to a router.
     fn match_uri(
         match_router: &MatchRouter<Vec<Arc<ProxyRouter>>>,
         uri: &str,
@@ -180,6 +190,7 @@ impl MatchEntry {
     }
 }
 
+/// Retrieves the request host from the request header.
 fn get_request_host(header: &RequestHeader) -> Option<&str> {
     if let Some(host) = header.uri.host() {
         return Some(host);

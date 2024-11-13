@@ -25,6 +25,9 @@ fn get_global_resolver() -> Arc<TokioAsyncResolver> {
         .clone()
 }
 
+/// DNS-based service discovery.
+///
+/// Resolves DNS names to IP addresses and creates backends for each resolved IP.
 pub struct DnsDiscovery {
     resolver: Arc<TokioAsyncResolver>,
     name: String,
@@ -35,6 +38,7 @@ pub struct DnsDiscovery {
 }
 
 impl DnsDiscovery {
+    /// Creates a new `DnsDiscovery` instance.
     pub fn new(
         name: String,
         port: u32,
@@ -54,6 +58,7 @@ impl DnsDiscovery {
 
 #[async_trait]
 impl ServiceDiscovery for DnsDiscovery {
+    /// Discovers backends by resolving DNS names to IP addresses.
     async fn discover(&self) -> Result<(BTreeSet<Backend>, HashMap<u64, bool>)> {
         let name = self.name.as_str();
         log::debug!("Resolving DNS for domain: {}", name);
@@ -83,6 +88,9 @@ impl ServiceDiscovery for DnsDiscovery {
     }
 }
 
+/// Hybrid service discovery.
+///
+/// Combines static and DNS-based service discovery.
 #[derive(Default)]
 pub struct HybridDiscovery {
     static_discovery: Option<Box<Static>>,
@@ -136,6 +144,7 @@ impl From<Upstream> for HybridDiscovery {
 
 #[async_trait]
 impl ServiceDiscovery for HybridDiscovery {
+    /// Discovers backends by combining static and DNS-based service discovery.
     async fn discover(&self) -> Result<(BTreeSet<Backend>, HashMap<u64, bool>)> {
         // Combine backends from static and DNS discoveries
 
@@ -168,6 +177,7 @@ impl ServiceDiscovery for HybridDiscovery {
     }
 }
 
+/// Parses a host and port from a string.
 fn parse_host_and_port(addr: &str) -> Result<(String, Option<u32>), Box<dyn std::error::Error>> {
     let re = Regex::new(r"^(?:\[(.+?)\]|([^:]+))(?::(\d+))?$").unwrap();
 
@@ -202,7 +212,10 @@ mod tests {
             ("example.com", ("example.com".to_string(), None)),
             ("example.com:80", ("example.com".to_string(), Some(80))),
             ("192.168.1.1:8080", ("192.168.1.1".to_string(), Some(8080))),
-            // ... 其他测试用例
+            (
+                "[2001:db8:85a3::8a2e:370:7334]:8080",
+                ("[2001:db8:85a3::8a2e:370:7334]".to_string(), Some(8080)),
+            ),
         ];
 
         for (input, expected) in test_cases {
@@ -210,7 +223,9 @@ mod tests {
             assert_eq!(result, expected);
         }
 
-        // 测试异常情况
+        // Test invalid cases
         assert!(parse_host_and_port("").is_err());
+        assert!(parse_host_and_port("invalid:port").is_err());
+        assert!(parse_host_and_port("127.0.0.1:invalid").is_err());
     }
 }

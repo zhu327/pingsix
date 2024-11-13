@@ -14,6 +14,9 @@ pub mod discovery;
 pub mod lb;
 pub mod router;
 
+/// Proxy context.
+///
+/// Holds the context for each request.
 pub struct ProxyContext {
     pub router: Option<Arc<ProxyRouter>>,
     pub router_params: HashMap<String, String>,
@@ -33,6 +36,9 @@ impl Default for ProxyContext {
     }
 }
 
+/// Proxy service.
+///
+/// Manages the proxying of requests to upstream servers.
 #[derive(Default)]
 pub struct ProxyService {
     pub matcher: MatchEntry,
@@ -120,6 +126,7 @@ impl ProxyHttp for ProxyService {
     }
 }
 
+/// Returns the current time as a `Duration` since the UNIX epoch.
 fn now() -> Duration {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
