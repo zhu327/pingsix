@@ -49,7 +49,7 @@ impl ProxyRouter {
             connect,
             read,
             send,
-        }) = self.router.timeout.clone()
+        }) = self.router.timeout
         {
             p.options.connection_timeout = Some(time::Duration::from_secs(connect));
             p.options.read_timeout = Some(time::Duration::from_secs(read));
@@ -68,31 +68,27 @@ pub struct MatchEntry {
 
 impl MatchEntry {
     pub fn insert_router(&mut self, proxy_router: ProxyRouter) -> Result<(), InsertError> {
-        let hosts = proxy_router.router.get_hosts();
-        let uris = proxy_router.router.get_uris();
+        let hosts = proxy_router.router.get_hosts().unwrap_or_default();
+        let uris = proxy_router.router.get_uris().unwrap_or_default();
         let proxy_router = Arc::new(proxy_router);
 
-        if hosts.as_ref().map_or(true, |v| v.is_empty()) {
+        if hosts.is_empty() {
             // Insert for non-host URIs
-            Self::insert_router_for_uri(&mut self.non_host_uri, uris.unwrap(), proxy_router)?;
+            Self::insert_router_for_uri(&mut self.non_host_uri, &uris, proxy_router)?;
         } else {
             // Insert for host URIs
-            for host in hosts.unwrap().iter() {
+            for host in hosts.iter() {
                 let reversed_host = host.chars().rev().collect::<String>();
 
                 if self.host_uris.at(reversed_host.as_str()).is_err() {
                     let mut inner = MatchRouter::new();
-                    for uri in uris.clone().unwrap().iter() {
+                    for uri in uris.iter() {
                         inner.insert(uri, vec![proxy_router.clone()])?;
                     }
                     self.host_uris.insert(reversed_host, inner)?;
                 } else {
                     let inner = self.host_uris.at_mut(reversed_host.as_str()).unwrap().value;
-                    Self::insert_router_for_uri(
-                        inner,
-                        uris.clone().unwrap(),
-                        proxy_router.clone(),
-                    )?;
+                    Self::insert_router_for_uri(inner, &uris, proxy_router.clone())?;
                 }
             }
         }
@@ -102,7 +98,7 @@ impl MatchEntry {
 
     fn insert_router_for_uri(
         match_router: &mut MatchRouter<Vec<Arc<ProxyRouter>>>,
-        uris: Vec<String>,
+        uris: &[String],
         proxy_router: Arc<ProxyRouter>,
     ) -> Result<(), InsertError> {
         for uri in uris.iter() {

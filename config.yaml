@@ -51,7 +51,7 @@ routers:
           https_verify_certificate: true
           req_headers: ["User-Agent: curl/7.29.0"]
           healthy:
-            interval: 1
+            interval: 5
             http_statuses: [200, 201]
             successes: 2
           unhealthy:

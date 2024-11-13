@@ -14,13 +14,23 @@ pub mod discovery;
 pub mod lb;
 pub mod router;
 
-#[derive(Default)]
 pub struct ProxyContext {
     pub router: Option<Arc<ProxyRouter>>,
     pub router_params: HashMap<String, String>,
 
     pub tries: usize,
     pub created_at: u64,
+}
+
+impl Default for ProxyContext {
+    fn default() -> Self {
+        Self {
+            router: None,
+            router_params: HashMap::new(),
+            tries: 0,
+            created_at: now().as_millis() as u64,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -110,7 +120,7 @@ impl ProxyHttp for ProxyService {
     }
 }
 
-pub fn now() -> Duration {
+fn now() -> Duration {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

@@ -3,6 +3,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures::future::join_all;
 use hickory_resolver::TokioAsyncResolver;
 use once_cell::sync::OnceCell;
 use pingora::upstreams::peer::HttpPeer;
@@ -148,21 +149,19 @@ impl ServiceDiscovery for HybridDiscovery {
             health_checks.extend(static_health_checks);
         }
 
-        // 2. Then process DNS discoveries, ignoring errors
-        for discovery in self.dns_discoveries.iter() {
-            match discovery.discover().await {
-                Ok((dns_backends, dns_health_checks)) => {
-                    backends.extend(dns_backends);
-                    health_checks.extend(dns_health_checks);
-                }
-                Err(e) => {
-                    log::warn!(
-                        "DNS discovery for '{}' failed: {}",
-                        discovery.name.clone(),
-                        e
-                    );
-                }
-            }
+        // 2. Process DNS discoveries concurrently, ignoring errors
+        let dns_futures = self.dns_discoveries.iter().map(|discovery| async move {
+            discovery.discover().await.map_err(|e| {
+                log::warn!("DNS discovery for '{}' failed: {}", &discovery.name, e);
+                e
+            })
+        });
+
+        let dns_results = join_all(dns_futures).await;
+
+        for (dns_backends, dns_health_checks) in dns_results.into_iter().flatten() {
+            backends.extend(dns_backends);
+            health_checks.extend(dns_health_checks);
         }
 
         Ok((backends, health_checks))
