@@ -119,6 +119,8 @@ pub struct Router {
     pub methods: Option<Vec<HttpMethod>>,
     pub host: Option<String>,
     pub hosts: Option<Vec<String>>,
+    #[serde(default = "Router::default_priority")]
+    pub priority: u32,
 
     #[validate(nested)]
     pub upstream: Upstream,
@@ -148,6 +150,10 @@ impl Router {
         } else {
             self.uris.clone()
         }
+    }
+
+    fn default_priority() -> u32 {
+        0
     }
 }
 

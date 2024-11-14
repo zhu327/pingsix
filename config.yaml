@@ -30,6 +30,7 @@ routers:
     #   connect: 2
     #   send: 3
     #   read: 5
+    # priority: 10
     upstream: # Field description https://apisix.apache.org/docs/apisix/admin-api/#upstream
       # id: 1
       # retries: 2

@@ -113,11 +113,12 @@ impl MatchEntry {
             if match_router.at(uri).is_err() {
                 match_router.insert(uri, vec![proxy_router.clone()])?;
             } else {
-                match_router
-                    .at_mut(uri)
-                    .unwrap()
+                let routers = match_router.at_mut(uri).unwrap();
+                routers.value.push(proxy_router.clone());
+                // Sort by priority
+                routers
                     .value
-                    .push(proxy_router.clone());
+                    .sort_by(|a, b| b.router.priority.cmp(&a.router.priority));
             }
         }
         Ok(())
