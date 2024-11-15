@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use http::StatusCode;
 use pingora_core::upstreams::peer::HttpPeer;
-use pingora_error::{Error, ErrorType, Result};
+use pingora_error::{Error, Result};
 use pingora_proxy::{ProxyHttp, Session};
 
 use router::{MatchEntry, ProxyRouter};
@@ -63,10 +63,8 @@ impl ProxyHttp for ProxyService {
             ctx.router_params = router_params;
             ctx.router = Some(router);
         } else {
-            return Err(Error::explain(
-                ErrorType::HTTPStatus(StatusCode::NOT_FOUND.as_u16()),
-                "Not Found",
-            ));
+            let _ = session.respond_error(StatusCode::NOT_FOUND.as_u16()).await;
+            return Ok(true);
         }
 
         Ok(false)
