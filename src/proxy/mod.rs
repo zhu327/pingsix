@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use async_trait::async_trait;
 use http::StatusCode;
@@ -22,7 +22,7 @@ pub struct ProxyContext {
     pub router_params: HashMap<String, String>,
 
     pub tries: usize,
-    pub created_at: u64,
+    pub request_start: Instant,
 }
 
 impl Default for ProxyContext {
@@ -31,7 +31,7 @@ impl Default for ProxyContext {
             router: None,
             router_params: HashMap::new(),
             tries: 0,
-            created_at: now().as_millis() as u64,
+            request_start: Instant::now(),
         }
     }
 }
@@ -85,7 +85,7 @@ impl ProxyHttp for ProxyService {
                 }
 
                 if let Some(timeout) = router.lb.get_retry_timeout() {
-                    if now().as_millis() as u64 - ctx.created_at > timeout * 1000 {
+                    if ctx.request_start.elapsed().as_millis() > (timeout * 1000) as u128 {
                         return e;
                     }
                 }
@@ -122,11 +122,4 @@ impl ProxyHttp for ProxyService {
             .upstream_host_rewrite(upstream_request);
         Ok(())
     }
-}
-
-/// Returns the current time as a `Duration` since the UNIX epoch.
-fn now() -> Duration {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
 }
