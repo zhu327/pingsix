@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -19,7 +19,7 @@ pub mod router;
 /// Holds the context for each request.
 pub struct ProxyContext {
     pub router: Option<Arc<ProxyRouter>>,
-    pub router_params: HashMap<String, String>,
+    pub router_params: BTreeMap<String, String>,
 
     pub tries: usize,
     pub request_start: Instant,
@@ -29,7 +29,7 @@ impl Default for ProxyContext {
     fn default() -> Self {
         Self {
             router: None,
-            router_params: HashMap::new(),
+            router_params: BTreeMap::new(),
             tries: 0,
             request_start: Instant::now(),
         }

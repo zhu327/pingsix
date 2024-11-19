@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time;
 
@@ -128,7 +128,7 @@ impl MatchEntry {
     pub fn match_request(
         &self,
         session: &mut Session,
-    ) -> Option<(HashMap<String, String>, Arc<ProxyRouter>)> {
+    ) -> Option<(BTreeMap<String, String>, Arc<ProxyRouter>)> {
         let host = get_request_host(session.req_header());
         let uri = session.req_header().uri.path();
         let method = session.req_header().method.as_str();
@@ -159,9 +159,9 @@ impl MatchEntry {
         match_router: &MatchRouter<Vec<Arc<ProxyRouter>>>,
         uri: &str,
         method: &str,
-    ) -> Option<(HashMap<String, String>, Arc<ProxyRouter>)> {
+    ) -> Option<(BTreeMap<String, String>, Arc<ProxyRouter>)> {
         if let Ok(v) = match_router.at(uri) {
-            let params: HashMap<String, String> = v
+            let params: BTreeMap<String, String> = v
                 .params
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
