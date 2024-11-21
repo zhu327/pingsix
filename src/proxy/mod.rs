@@ -11,8 +11,8 @@ use pingora_proxy::{ProxyHttp, Session};
 use router::{MatchEntry, ProxyRouter};
 
 pub mod discovery;
-pub mod lb;
 pub mod router;
+pub mod upstream;
 
 /// Proxy context.
 ///
@@ -79,12 +79,12 @@ impl ProxyHttp for ProxyService {
         mut e: Box<Error>,
     ) -> Box<Error> {
         if let Some(router) = ctx.router.as_ref() {
-            if let Some(retries) = router.lb.get_retries() {
+            if let Some(retries) = router.upstream.get_retries() {
                 if retries == 0 || ctx.tries >= retries {
                     return e;
                 }
 
-                if let Some(timeout) = router.lb.get_retry_timeout() {
+                if let Some(timeout) = router.upstream.get_retry_timeout() {
                     if ctx.request_start.elapsed().as_millis() > (timeout * 1000) as u128 {
                         return e;
                     }
@@ -118,7 +118,7 @@ impl ProxyHttp for ProxyService {
         ctx.router
             .as_ref()
             .unwrap()
-            .lb
+            .upstream
             .upstream_host_rewrite(upstream_request);
         Ok(())
     }

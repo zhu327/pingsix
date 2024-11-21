@@ -28,22 +28,22 @@ use super::discovery::HybridDiscovery;
 /// Proxy load balancer.
 ///
 /// Manages the load balancing of requests to upstream servers.
-pub struct ProxyLB {
-    pub upstream: Upstream,
+pub struct ProxyUpstream {
+    pub inner: Upstream,
     lb: SelectionLB,
 }
 
-impl From<Upstream> for ProxyLB {
+impl From<Upstream> for ProxyUpstream {
     /// Creates a new `ProxyLB` instance from an `Upstream` configuration.
     fn from(value: Upstream) -> Self {
-        ProxyLB {
-            upstream: value.clone(),
+        ProxyUpstream {
+            inner: value.clone(),
             lb: SelectionLB::from(value),
         }
     }
 }
 
-impl ProxyLB {
+impl ProxyUpstream {
     /// Selects a backend server for a given session.
     pub fn select_backend<'a>(&'a self, session: &'a mut Session) -> Option<Backend> {
         let key = self.request_selector_key(session);
@@ -68,8 +68,8 @@ impl ProxyLB {
 
     /// Rewrites the upstream host in the request header if needed.
     pub fn upstream_host_rewrite(&self, upstream_request: &mut RequestHeader) {
-        if self.upstream.pass_host == UpstreamPassHost::REWRITE {
-            if let Some(host) = &self.upstream.upstream_host {
+        if self.inner.pass_host == UpstreamPassHost::REWRITE {
+            if let Some(host) = &self.inner.upstream_host {
                 upstream_request.insert_header("Host", host).unwrap();
             }
         }
@@ -87,12 +87,12 @@ impl ProxyLB {
 
     /// Gets the number of retries from the upstream configuration.
     pub fn get_retries(&self) -> Option<usize> {
-        self.upstream.retries.map(|r| r as usize)
+        self.inner.retries.map(|r| r as usize)
     }
 
     /// Gets the retry timeout from the upstream configuration.
     pub fn get_retry_timeout(&self) -> Option<u64> {
-        self.upstream.retry_timeout
+        self.inner.retry_timeout
     }
 
     /// Sets the timeout for an `HttpPeer`.
@@ -101,7 +101,7 @@ impl ProxyLB {
             connect,
             read,
             send,
-        }) = self.upstream.timeout
+        }) = self.inner.timeout
         {
             p.options.connection_timeout = Some(time::Duration::from_secs(connect));
             p.options.read_timeout = Some(time::Duration::from_secs(read));
@@ -111,15 +111,15 @@ impl ProxyLB {
 
     /// Generates the key for request selection based on the upstream configuration.
     fn request_selector_key<'a>(&'a self, session: &'a mut Session) -> String {
-        match self.upstream.hash_on {
+        match self.inner.hash_on {
             UpstreamHashOn::VARS => self.handle_vars(session),
             UpstreamHashOn::HEAD => {
-                get_req_header_value(session.req_header(), self.upstream.key.as_str())
+                get_req_header_value(session.req_header(), self.inner.key.as_str())
                     .unwrap_or_default()
                     .to_string()
             }
             UpstreamHashOn::COOKIE => {
-                get_cookie_value(session.req_header(), self.upstream.key.as_str())
+                get_cookie_value(session.req_header(), self.inner.key.as_str())
                     .unwrap_or_default()
                     .to_string()
             }
@@ -128,15 +128,15 @@ impl ProxyLB {
 
     /// Handles variable-based request selection.
     fn handle_vars<'a>(&'a self, session: &'a mut Session) -> String {
-        if self.upstream.key.as_str().starts_with("arg_") {
-            if let Some(name) = self.upstream.key.as_str().strip_prefix("arg_") {
+        if self.inner.key.as_str().starts_with("arg_") {
+            if let Some(name) = self.inner.key.as_str().strip_prefix("arg_") {
                 return get_query_value(session.req_header(), name)
                     .unwrap_or_default()
                     .to_string();
             }
         }
 
-        match self.upstream.key.as_str() {
+        match self.inner.key.as_str() {
             "uri" => session.req_header().uri.path().to_string(),
             "request_uri" => session
                 .req_header()

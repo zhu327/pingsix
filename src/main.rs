@@ -34,7 +34,7 @@ fn main() {
     for router in config.routers {
         log::info!("Configuring Router: {}", router.id);
         let mut proxy_router = ProxyRouter::from(router);
-        if let Some(background_service) = proxy_router.lb.take_background_service() {
+        if let Some(background_service) = proxy_router.upstream.take_background_service() {
             background_services.push(background_service);
         }
 
@@ -42,7 +42,7 @@ fn main() {
     }
 
     // Create HTTP proxy service with name
-    let mut pingsix_service =
+    let mut http_service =
         http_proxy_service_with_name(&pingsix_server.configuration, proxy_service, "pingsix");
 
     // Add listeners from configuration
@@ -58,14 +58,10 @@ fn main() {
                 if list_cfg.offer_h2 {
                     settings.enable_h2();
                 }
-                pingsix_service.add_tls_with_settings(
-                    &list_cfg.address.to_string(),
-                    None,
-                    settings,
-                );
+                http_service.add_tls_with_settings(&list_cfg.address.to_string(), None, settings);
             }
             None => {
-                pingsix_service.add_tcp(&list_cfg.address.to_string());
+                http_service.add_tcp(&list_cfg.address.to_string());
             }
         }
     }
@@ -75,7 +71,7 @@ fn main() {
     pingsix_server.bootstrap();
 
     log::info!("Bootstrapped. Adding Services...");
-    pingsix_server.add_service(pingsix_service);
+    pingsix_server.add_service(http_service);
     pingsix_server.add_services(background_services);
 
     log::info!("Starting Server...");

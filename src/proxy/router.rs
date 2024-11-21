@@ -10,23 +10,23 @@ use pingora_proxy::Session;
 
 use crate::config::{Router, Timeout};
 
-use super::lb::ProxyLB;
+use super::upstream::ProxyUpstream;
 
 /// Proxy router.
 ///
 /// Manages routing of requests to appropriate proxy load balancers.
 pub struct ProxyRouter {
-    pub router: Router,
-    pub lb: ProxyLB,
+    pub inner: Router,
+    pub upstream: ProxyUpstream,
 }
 
 impl From<Router> for ProxyRouter {
     /// Creates a new `ProxyRouter` instance from a `Router` configuration.
     fn from(value: Router) -> Self {
         Self {
-            router: value.clone(),
+            inner: value.clone(),
             // TODO: support get upstream from router.upstream_id.
-            lb: ProxyLB::from(value.upstream),
+            upstream: ProxyUpstream::from(value.upstream),
         }
     }
 }
@@ -34,7 +34,7 @@ impl From<Router> for ProxyRouter {
 impl ProxyRouter {
     /// Selects an HTTP peer for a given session.
     pub fn select_http_peer<'a>(&'a self, session: &'a mut Session) -> Result<Box<HttpPeer>> {
-        let backend = self.lb.select_backend(session);
+        let backend = self.upstream.select_backend(session);
         let mut backend = backend.ok_or_else(|| Error::new_str("Unable to determine backend"))?;
 
         backend
@@ -55,7 +55,7 @@ impl ProxyRouter {
             connect,
             read,
             send,
-        }) = self.router.timeout
+        }) = self.inner.timeout
         {
             p.options.connection_timeout = Some(time::Duration::from_secs(connect));
             p.options.read_timeout = Some(time::Duration::from_secs(read));
@@ -75,8 +75,8 @@ pub struct MatchEntry {
 impl MatchEntry {
     /// Inserts a router into the match entry.
     pub fn insert_router(&mut self, proxy_router: ProxyRouter) -> Result<(), InsertError> {
-        let hosts = proxy_router.router.get_hosts().unwrap_or_default();
-        let uris = proxy_router.router.get_uris().unwrap_or_default();
+        let hosts = proxy_router.inner.get_hosts().unwrap_or_default();
+        let uris = proxy_router.inner.get_uris().unwrap_or_default();
         let proxy_router = Arc::new(proxy_router);
 
         if hosts.is_empty() {
@@ -118,7 +118,7 @@ impl MatchEntry {
                 // Sort by priority
                 routers
                     .value
-                    .sort_by(|a, b| b.router.priority.cmp(&a.router.priority));
+                    .sort_by(|a, b| b.inner.priority.cmp(&a.inner.priority));
             }
         }
         Ok(())
@@ -168,13 +168,13 @@ impl MatchEntry {
                 .collect();
 
             for router in v.value.iter() {
-                if router.router.methods.is_none() {
+                if router.inner.methods.is_none() {
                     return Some((params, router.clone()));
                 }
 
                 // Match method
                 if router
-                    .router
+                    .inner
                     .methods
                     .clone()
                     .unwrap()
