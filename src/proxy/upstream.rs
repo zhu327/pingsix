@@ -7,7 +7,7 @@ use http::Uri;
 use pingora::services::background::background_service;
 use pingora_core::services::Service;
 use pingora_core::upstreams::peer::HttpPeer;
-use pingora_error::Error;
+use pingora_error::{Error, Result};
 use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_load_balancing::{
     health_check::{HealthCheck as HealthCheckTrait, HttpHealthCheck, TcpHealthCheck},
@@ -33,13 +33,15 @@ pub struct ProxyUpstream {
     lb: SelectionLB,
 }
 
-impl From<Upstream> for ProxyUpstream {
+impl TryFrom<Upstream> for ProxyUpstream {
+    type Error = Box<Error>;
+
     /// Creates a new `ProxyLB` instance from an `Upstream` configuration.
-    fn from(value: Upstream) -> Self {
-        ProxyUpstream {
+    fn try_from(value: Upstream) -> Result<Self> {
+        Ok(Self {
             inner: value.clone(),
-            lb: SelectionLB::from(value),
-        }
+            lb: SelectionLB::try_from(value)?,
+        })
     }
 }
 
@@ -70,7 +72,9 @@ impl ProxyUpstream {
     pub fn upstream_host_rewrite(&self, upstream_request: &mut RequestHeader) {
         if self.inner.pass_host == UpstreamPassHost::REWRITE {
             if let Some(host) = &self.inner.upstream_host {
-                upstream_request.insert_header("Host", host).unwrap();
+                upstream_request
+                    .insert_header(http::header::HOST, host)
+                    .unwrap();
             }
         }
     }
@@ -171,13 +175,17 @@ enum SelectionLB {
     Ketama(LB<KetamaHashing>),
 }
 
-impl From<Upstream> for SelectionLB {
-    fn from(value: Upstream) -> Self {
+impl TryFrom<Upstream> for SelectionLB {
+    type Error = Box<Error>;
+
+    fn try_from(value: Upstream) -> Result<Self> {
         match value.r#type {
-            SelectionType::RoundRobin => SelectionLB::RoundRobin(LB::from(value)),
-            SelectionType::Random => SelectionLB::Random(LB::from(value)),
-            SelectionType::Fnv => SelectionLB::Fnv(LB::from(value)),
-            SelectionType::Ketama => SelectionLB::Ketama(LB::from(value)),
+            SelectionType::RoundRobin => {
+                Ok(SelectionLB::RoundRobin(LB::<RoundRobin>::try_from(value)?))
+            }
+            SelectionType::Random => Ok(SelectionLB::Random(LB::<Random>::try_from(value)?)),
+            SelectionType::Fnv => Ok(SelectionLB::Fnv(LB::<FVNHash>::try_from(value)?)),
+            SelectionType::Ketama => Ok(SelectionLB::Ketama(LB::<KetamaHashing>::try_from(value)?)),
         }
     }
 }
@@ -187,13 +195,15 @@ struct LB<BS: BackendSelection> {
     service: Option<Box<dyn Service + 'static>>,
 }
 
-impl<BS> From<Upstream> for LB<BS>
+impl<BS> TryFrom<Upstream> for LB<BS>
 where
     BS: BackendSelection + Send + Sync + 'static,
     BS::Iter: BackendIter,
 {
-    fn from(upstream: Upstream) -> Self {
-        let discovery: HybridDiscovery = upstream.clone().into();
+    type Error = Box<Error>;
+
+    fn try_from(upstream: Upstream) -> Result<Self> {
+        let discovery: HybridDiscovery = upstream.clone().try_into()?;
         let mut upstreams = LoadBalancer::<BS>::from_backends(Backends::new(Box::new(discovery)));
 
         if let Some(check) = upstream.checks {
@@ -211,10 +221,12 @@ where
         let background = background_service("health check", upstreams);
         let upstreams = background.task();
 
-        LB {
+        let this = Self {
             upstreams,
             service: Some(Box::new(background)),
-        }
+        };
+
+        Ok(this)
     }
 }
 

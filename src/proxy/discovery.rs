@@ -7,8 +7,7 @@ use futures::future::join_all;
 use hickory_resolver::TokioAsyncResolver;
 use once_cell::sync::OnceCell;
 use pingora::upstreams::peer::HttpPeer;
-use pingora::ErrorType::InternalError;
-use pingora_error::{OrErr, Result};
+use pingora_error::{Error, ErrorType::InternalError, OrErr, Result};
 use pingora_load_balancing::{
     discovery::{ServiceDiscovery, Static},
     Backend,
@@ -97,51 +96,6 @@ pub struct HybridDiscovery {
     dns_discoveries: Vec<DnsDiscovery>,
 }
 
-impl From<Upstream> for HybridDiscovery {
-    fn from(upstream: Upstream) -> Self {
-        let mut this = Self::default();
-
-        let mut backends = BTreeSet::new();
-        for (addr, weight) in upstream.nodes.iter() {
-            let (host, port) = parse_host_and_port(addr).unwrap();
-            let port = port.unwrap_or(if upstream.scheme == UpstreamScheme::HTTPS {
-                443
-            } else {
-                80
-            });
-
-            if host.parse::<IpAddr>().is_err() {
-                // host is a domain name
-                let resolver = get_global_resolver();
-                this.dns_discoveries.push(DnsDiscovery::new(
-                    host,
-                    port,
-                    upstream.scheme,
-                    *weight,
-                    resolver,
-                ));
-            } else {
-                let addr =
-                    &SocketAddr::new(host.parse::<IpAddr>().unwrap(), port as u16).to_string();
-
-                let mut backend = Backend::new(addr).unwrap();
-                backend.weight = *weight as usize;
-
-                // !! for now we don't support TLS for static upstream
-                let uppy = HttpPeer::new(addr, false, "".to_string());
-                assert!(backend.ext.insert::<HttpPeer>(uppy).is_none());
-                backends.insert(backend);
-            }
-        }
-
-        if !backends.is_empty() {
-            this.static_discovery = Some(Static::new(backends));
-        }
-
-        this
-    }
-}
-
 #[async_trait]
 impl ServiceDiscovery for HybridDiscovery {
     /// Discovers backends by combining static and DNS-based service discovery.
@@ -177,18 +131,68 @@ impl ServiceDiscovery for HybridDiscovery {
     }
 }
 
+impl TryFrom<Upstream> for HybridDiscovery {
+    type Error = Box<Error>;
+
+    fn try_from(upstream: Upstream) -> Result<Self> {
+        let mut this = Self::default();
+
+        let mut backends = BTreeSet::new();
+        for (addr, weight) in upstream.nodes.iter() {
+            let (host, port) = parse_host_and_port(addr)?;
+            let port = port.unwrap_or(if upstream.scheme == UpstreamScheme::HTTPS {
+                443
+            } else {
+                80
+            });
+
+            if host.parse::<IpAddr>().is_err() {
+                // host is a domain name
+                let resolver = get_global_resolver();
+                this.dns_discoveries.push(DnsDiscovery::new(
+                    host,
+                    port,
+                    upstream.scheme,
+                    *weight,
+                    resolver,
+                ));
+            } else {
+                let addr =
+                    &SocketAddr::new(host.parse::<IpAddr>().unwrap(), port as u16).to_string();
+
+                let mut backend = Backend::new(addr).unwrap();
+                backend.weight = *weight as usize;
+
+                // !! for now we don't support TLS for static upstream
+                let uppy = HttpPeer::new(addr, false, "".to_string());
+                assert!(backend.ext.insert::<HttpPeer>(uppy).is_none());
+                backends.insert(backend);
+            }
+        }
+
+        if !backends.is_empty() {
+            this.static_discovery = Some(Static::new(backends));
+        }
+
+        Ok(this)
+    }
+}
+
 /// Parses a host and port from a string.
-fn parse_host_and_port(addr: &str) -> Result<(String, Option<u32>), Box<dyn std::error::Error>> {
+fn parse_host_and_port(addr: &str) -> Result<(String, Option<u32>)> {
     let re = Regex::new(r"^(?:\[(.+?)\]|([^:]+))(?::(\d+))?$").unwrap();
 
     let caps = match re.captures(addr) {
         Some(caps) => caps,
-        None => return Err("Invalid address format".into()),
+        None => return Err(Error::explain(InternalError, "Invalid address format")),
     };
 
     let host = caps.get(1).or(caps.get(2)).unwrap().as_str();
     let port_opt = caps.get(3).map(|p| p.as_str());
-    let port = port_opt.map(|p| p.parse::<u32>()).transpose()?;
+    let port = port_opt
+        .map(|p| p.parse::<u32>())
+        .transpose()
+        .or_err_with(InternalError, || "Invalid port")?;
 
     // Ensure IPv6 addresses are enclosed in square brackets
     let host = if host.contains(':') {

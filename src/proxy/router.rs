@@ -20,14 +20,16 @@ pub struct ProxyRouter {
     pub upstream: ProxyUpstream,
 }
 
-impl From<Router> for ProxyRouter {
+impl TryFrom<Router> for ProxyRouter {
+    type Error = Box<Error>;
+
     /// Creates a new `ProxyRouter` instance from a `Router` configuration.
-    fn from(value: Router) -> Self {
-        Self {
+    fn try_from(value: Router) -> Result<Self> {
+        Ok(Self {
             inner: value.clone(),
             // TODO: support get upstream from router.upstream_id.
-            upstream: ProxyUpstream::from(value.upstream),
-        }
+            upstream: ProxyUpstream::try_from(value.upstream)?,
+        })
     }
 }
 

@@ -33,7 +33,7 @@ fn main() {
     let mut proxy_service = ProxyService::default();
     for router in config.routers {
         log::info!("Configuring Router: {}", router.id);
-        let mut proxy_router = ProxyRouter::from(router);
+        let mut proxy_router = ProxyRouter::try_from(router).unwrap();
         if let Some(background_service) = proxy_router.upstream.take_background_service() {
             background_services.push(background_service);
         }
