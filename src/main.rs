@@ -6,10 +6,12 @@ use pingora_core::server::Server;
 use pingora_proxy::http_proxy_service_with_name;
 
 use config::{Config, Tls};
-use proxy::{init_proxy_service, service::load_services, upstream::load_upstreams};
+use proxy::{service::load_services, upstream::load_upstreams};
+use service::http::build_http_service;
 
 mod config;
 mod proxy;
+mod service;
 
 fn main() {
     // Initialize logging
@@ -31,14 +33,14 @@ fn main() {
 
     // Load routers from configuration
     log::info!("Loading routers...");
-    let proxy_service = init_proxy_service(&config).expect("Failed to initialize proxy service");
+    let http_service = build_http_service(&config).expect("Failed to initialize proxy service");
 
     // Create Pingora server with optional configuration
     let mut pingsix_server = Server::new_with_opt_and_conf(Some(opt), config.pingora);
 
     // Create HTTP proxy service with name
     let mut http_service =
-        http_proxy_service_with_name(&pingsix_server.configuration, proxy_service, "pingsix");
+        http_proxy_service_with_name(&pingsix_server.configuration, http_service, "pingsix");
 
     // Add listeners from configuration
     log::info!("Adding listeners...");

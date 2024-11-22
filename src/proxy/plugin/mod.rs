@@ -1,20 +1,105 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
+
+use once_cell::sync::Lazy;
+use pingora::OkOrErr;
+use pingora_error::{Error, ErrorType::ReadError, Result};
+use serde_yaml::Value as YamlValue;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use pingora_error::{Error, Result};
 use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_proxy::Session;
 
-use super::ProxyContext;
+use crate::proxy::ProxyContext;
 
-/*
-5. 考虑下插件的加载
-    1. 插件可能是从service_id来的，也可能是直接从router来的
-    2. router上要有插件的绑定，service也可能有
-    3. 可能需要有一个插件的runner来包装在ctx上，执行的时候clone出来
-    4. 在router匹配之后，然后组合排序去重把插件加载到ctx
-*/
+use super::{router::ProxyRouter, service::service_fetch};
+
+pub mod echo;
+pub mod rate_limit;
+
+/// Type alias for plugin initialization functions
+pub type PluginCreateFn = Arc<dyn Fn(YamlValue) -> Result<Arc<dyn ProxyPlugin>> + Send + Sync>;
+
+/// Registry of plugin builders
+static PLUGIN_BUILDER_REGISTRY: Lazy<HashMap<&'static str, PluginCreateFn>> = Lazy::new(|| {
+    let arr: Vec<(&str, PluginCreateFn)> = vec![
+        (echo::PLUGIN_NAME, Arc::new(echo::create_echo_plugin)),
+        (
+            rate_limit::PLUGIN_NAME,
+            Arc::new(rate_limit::create_rate_limit_plugin),
+        ),
+    ];
+    arr.into_iter().collect()
+});
+
+/// Builds a plugin instance based on its name and configuration.
+///
+/// # Arguments
+/// - `name`: The name of the plugin to be created.
+/// - `cfg`: The configuration for the plugin, provided as a `YamlValue`.
+///
+/// # Returns
+/// - `Result<Arc<dyn ProxyPlugin>>`: On success, returns a reference-counted pointer to the created plugin instance.
+///   On failure, returns an error.
+///
+/// # Errors
+/// - `ReadError`: Returned if the plugin name is not found in the `PLUGIN_BUILDER_REGISTRY`.
+///
+/// # Notes
+/// - This function retrieves the appropriate plugin builder from a global registry and invokes it with the provided configuration.
+pub fn build_plugin(name: &str, cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> {
+    let builder = PLUGIN_BUILDER_REGISTRY
+        .get(name)
+        .or_err(ReadError, "Unknow plugin type")?;
+    builder(cfg)
+}
+
+/// Builds a `ProxyPluginExecutor` by combining plugins from both a router and its associated service.
+///
+/// # Arguments
+/// - `router`: A reference-counted pointer to a `ProxyRouter` instance containing router-specific plugins.
+///
+/// # Returns
+/// - `Arc<ProxyPluginExecutor>`: A reference-counted pointer to a `ProxyPluginExecutor` that manages the merged plugin list.
+///
+/// # Process
+/// - Retrieves router-specific plugins from the `router`.
+/// - If the router is associated with a service (via `service_id`), retrieves service-specific plugins.
+/// - Combines the router and service plugins, ensuring unique entries by their name.
+/// - Sorts the merged plugin list by priority in descending order.
+/// - Constructs and returns the `ProxyPluginExecutor` instance.
+///
+/// # Notes
+/// - This function ensures that plugins from the router take precedence over those from the service in case of naming conflicts.
+pub fn build_plugin_executor(router: Arc<ProxyRouter>) -> Arc<ProxyPluginExecutor> {
+    let router_plugins = router.plugins.clone();
+    let mut service_plugins = Vec::new();
+
+    if let Some(service_id) = router.inner.service_id.clone() {
+        if let Some(service) = service_fetch(&service_id) {
+            service_plugins = service.plugins.clone();
+        }
+    }
+
+    let mut plugin_map: HashMap<String, Arc<dyn ProxyPlugin>> = HashMap::new();
+
+    for plugin in router_plugins {
+        plugin_map.insert(plugin.name().to_string(), plugin);
+    }
+
+    for plugin in service_plugins {
+        plugin_map
+            .entry(plugin.name().to_string())
+            .or_insert(plugin);
+    }
+
+    let mut merged_plugins: Vec<Arc<dyn ProxyPlugin>> = plugin_map.into_values().collect();
+    merged_plugins.sort_by_key(|b| std::cmp::Reverse(b.priority()));
+
+    Arc::new(ProxyPluginExecutor {
+        plugins: merged_plugins,
+    })
+}
 
 #[async_trait]
 pub trait ProxyPlugin: Send + Sync {
@@ -134,13 +219,28 @@ pub trait ProxyPlugin: Send + Sync {
     async fn logging(&self, _session: &mut Session, _e: Option<&Error>, _ctx: &mut ProxyContext) {}
 }
 
+/// A struct that manages the execution of proxy plugins.
+///
+/// # Fields
+/// - `plugins`: A vector of reference-counted pointers to `ProxyPlugin` instances.
+///   These plugins are executed in the order of their priorities, typically determined
+///   during the construction of the `ProxyPluginExecutor`.
+///
+/// # Purpose
+/// - This struct is responsible for holding and managing a collection of proxy plugins.
+/// - It is typically used to facilitate the execution of plugins in a proxy routing context,
+///   where plugins can perform various tasks such as authentication, logging, traffic shaping, etc.
+///
+/// # Usage
+/// - The plugins are expected to be sorted by their priority (in descending order) during
+///   the initialization of the `ProxyPluginExecutor`.
 #[derive(Default)]
-pub struct PluginExecutor {
+pub struct ProxyPluginExecutor {
     pub plugins: Vec<Arc<dyn ProxyPlugin>>,
 }
 
 #[async_trait]
-impl ProxyPlugin for PluginExecutor {
+impl ProxyPlugin for ProxyPluginExecutor {
     fn name(&self) -> &str {
         "plugin-executor"
     }

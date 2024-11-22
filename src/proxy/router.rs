@@ -8,9 +8,10 @@ use pingora_error::{Error, Result};
 use pingora_http::RequestHeader;
 use pingora_proxy::Session;
 
-use crate::config::{Router, Timeout};
+use crate::config;
 
 use super::{
+    plugin::ProxyPlugin,
     service::service_fetch,
     upstream::{upstream_fetch, ProxyUpstream},
 };
@@ -19,16 +20,18 @@ use super::{
 ///
 /// Manages routing of requests to appropriate proxy load balancers.
 pub struct ProxyRouter {
-    pub inner: Router,
+    pub inner: config::Router,
     pub upstream: Option<Arc<ProxyUpstream>>,
+    pub plugins: Vec<Arc<dyn ProxyPlugin>>,
 }
 
-impl From<Router> for ProxyRouter {
+impl From<config::Router> for ProxyRouter {
     /// Creates a new `ProxyRouter` instance from a `Router` configuration.
-    fn from(value: Router) -> Self {
+    fn from(value: config::Router) -> Self {
         Self {
             inner: value,
             upstream: None,
+            plugins: Vec::new(),
         }
     }
 }
@@ -99,7 +102,7 @@ impl ProxyRouter {
 
     /// Sets the timeout for an `HttpPeer` based on the router configuration.
     fn set_timeout(&self, p: &mut HttpPeer) {
-        if let Some(Timeout {
+        if let Some(config::Timeout {
             connect,
             read,
             send,

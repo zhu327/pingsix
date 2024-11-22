@@ -9,10 +9,13 @@ use serde::{Deserialize, Serialize};
 use serde_yaml::Value as YamlValue;
 use validator::Validate;
 
-use crate::{
-    config::UpstreamHashOn,
-    proxy::{plugin::ProxyPlugin, upstream::request_selector_key, ProxyContext},
-};
+use crate::config::UpstreamHashOn;
+use crate::proxy::request_selector_key;
+use crate::proxy::ProxyContext;
+
+use super::ProxyPlugin;
+
+pub const PLUGIN_NAME: &str = "rate_limit";
 
 pub fn create_rate_limit_plugin(cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> {
     let config: PluginRaLimitConfig =
@@ -39,7 +42,7 @@ pub struct PluginRateLimit {
 #[async_trait]
 impl ProxyPlugin for PluginRateLimit {
     fn name(&self) -> &str {
-        "rate_limit"
+        PLUGIN_NAME
     }
 
     fn priority(&self) -> i32 {

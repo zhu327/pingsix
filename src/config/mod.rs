@@ -6,6 +6,7 @@ use log::{debug, trace};
 use pingora::server::configuration::{Opt, ServerConf};
 use pingora_error::{Error, ErrorType::*, OrErr, Result};
 use serde::{Deserialize, Serialize};
+use serde_yaml::Value as YamlValue;
 use validator::{Validate, ValidationError};
 
 #[derive(Default, Debug, Serialize, Deserialize, Validate)]
@@ -136,7 +137,8 @@ pub struct Router {
     #[serde(default = "Router::default_priority")]
     pub priority: u32,
 
-    // TODO: pub plugins
+    #[serde(default)]
+    pub plugins: HashMap<String, YamlValue>,
     #[validate(nested)]
     pub upstream: Option<Upstream>,
     pub upstream_id: Option<String>,
@@ -380,7 +382,8 @@ pub enum UpstreamPassHost {
 #[validate(schema(function = "Service::validate_upstream"))]
 pub struct Service {
     pub id: String,
-    // TODO: pub plugins
+    #[serde(default)]
+    pub plugins: HashMap<String, YamlValue>,
     pub upstream: Option<Upstream>,
     pub upstream_id: Option<String>,
     #[serde(default)]

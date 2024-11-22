@@ -9,7 +9,11 @@ use serde::{Deserialize, Serialize};
 use serde_yaml::Value as YamlValue;
 use validator::Validate;
 
-use crate::proxy::{plugin::ProxyPlugin, ProxyContext};
+use crate::proxy::ProxyContext;
+
+use super::ProxyPlugin;
+
+pub const PLUGIN_NAME: &str = "echo";
 
 pub fn create_echo_plugin(cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> {
     let config: PluginEchoConfig =
@@ -30,7 +34,7 @@ pub struct PluginEcho {
 #[async_trait]
 impl ProxyPlugin for PluginEcho {
     fn name(&self) -> &str {
-        "echo"
+        PLUGIN_NAME
     }
 
     fn priority(&self) -> i32 {

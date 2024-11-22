@@ -58,7 +58,7 @@ routers:
           unhealthy:
             http_failures: 5
             tcp_failures: 2
-      hash_on: vars # supported types: vars, cookie, header
+      hash_on: vars # supported types: vars, cookie, head
       key: uri
       pass_host: rewrite
       upstream_host: www.baidu.com
@@ -74,6 +74,15 @@ routers:
     uri: /
     host: www.163.com
     service_id: 2
+  - id: 5
+    uri: /echo
+    host: www.163.com
+    service_id: 2
+    plugins:
+      echo:
+        body: "Hello world!"
+        headers:
+          X-TEST: demo
 
 upstreams:
   - id: 1
@@ -99,3 +108,9 @@ services:
         "www.163.com": 1
       type: roundrobin
       scheme: http
+    plugins:
+      rate_limit:
+        hash_on: head
+        key: Host
+        window_sec: 1
+        max_req_per_sec: 1
