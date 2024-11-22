@@ -18,7 +18,9 @@ pingora-error = "0.4.0"
 pingora-http = "0.4.0"
 pingora-load-balancing = "0.4.0"
 pingora-proxy = "0.4.0"
+pingora-runtime = "0.4.0"
 regex = "1.11.1"
 serde = { version = "1.0.197", features = ["derive"] }
 serde_yaml = "0.9.34"
+tokio = "1.41.1"
 validator = { version = "0.18.1", features = ["derive"] }

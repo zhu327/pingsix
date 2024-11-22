@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use validator::{Validate, ValidationError};
 
 #[derive(Default, Debug, Serialize, Deserialize, Validate)]
+#[validate(schema(function = "Config::validate_upstreams_id"))]
 pub struct Config {
     #[serde(default)]
     pub pingora: ServerConf,
@@ -20,9 +21,12 @@ pub struct Config {
     #[validate(length(min = 1))]
     #[validate(nested)]
     pub routers: Vec<Router>,
-    // TODO: implement upstreams
-    // #[validate(nested)]
-    // pub upstreams: Option<Vec<Upstream>>,
+    #[validate(nested)]
+    #[serde(default)]
+    pub upstreams: Vec<Upstream>,
+    #[validate(nested)]
+    #[serde(default)]
+    pub services: Vec<Service>,
 }
 
 // Config file load and validation
@@ -75,6 +79,16 @@ impl Config {
             self.pingora.daemon = true;
         }
     }
+
+    fn validate_upstreams_id(&self) -> Result<(), ValidationError> {
+        for upstream in &self.upstreams {
+            if upstream.id.is_none() {
+                return Err(ValidationError::new("upstream_id_required"));
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Validate)]
@@ -102,7 +116,7 @@ pub struct Tls {
     pub key_path: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Validate)]
 pub struct Timeout {
     pub connect: u64,
     pub send: u64,
@@ -110,7 +124,7 @@ pub struct Timeout {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Validate)]
-#[validate(schema(function = "Router::validate_uri_and_uris"))]
+#[validate(schema(function = "Router::validate"))]
 pub struct Router {
     pub id: String,
 
@@ -122,18 +136,26 @@ pub struct Router {
     #[serde(default = "Router::default_priority")]
     pub priority: u32,
 
+    // TODO: pub plugins
     #[validate(nested)]
-    pub upstream: Upstream,
+    pub upstream: Option<Upstream>,
+    pub upstream_id: Option<String>,
+    pub service_id: Option<String>,
+    #[validate(nested)]
     pub timeout: Option<Timeout>,
 }
 
 impl Router {
-    fn validate_uri_and_uris(router: &Router) -> Result<(), ValidationError> {
-        if router.uri.is_none() && router.uris.as_ref().map_or(true, |v| v.is_empty()) {
-            Err(ValidationError::new("uri_and_uris"))
-        } else {
-            Ok(())
+    fn validate(&self) -> Result<(), ValidationError> {
+        if self.uri.is_none() && self.uris.as_ref().map_or(true, |v| v.is_empty()) {
+            return Err(ValidationError::new("uri_or_uris_required"));
         }
+
+        if self.upstream_id.is_none() && self.service_id.is_none() && self.upstream.is_none() {
+            return Err(ValidationError::new("upstream_or_service_required"));
+        }
+
+        Ok(())
     }
 
     pub fn get_hosts(&self) -> Option<Vec<String>> {
@@ -195,11 +217,13 @@ pub struct Upstream {
     pub id: Option<String>,
     pub retries: Option<u32>,
     pub retry_timeout: Option<u64>,
+    #[validate(nested)]
     pub timeout: Option<Timeout>,
     #[validate(length(min = 1))]
     pub nodes: HashMap<String, u32>,
     #[serde(default)]
     pub r#type: SelectionType,
+    #[validate(nested)]
     pub checks: Option<HealthCheck>,
     #[serde(default)]
     pub hash_on: UpstreamHashOn,
@@ -217,8 +241,8 @@ impl Upstream {
         "uri".to_string()
     }
 
-    fn validate_upstream_host(upstream: &Upstream) -> Result<(), ValidationError> {
-        if upstream.pass_host == UpstreamPassHost::REWRITE && upstream.upstream_host.is_none() {
+    fn validate_upstream_host(&self) -> Result<(), ValidationError> {
+        if self.pass_host == UpstreamPassHost::REWRITE && self.upstream_host.is_none() {
             Err(ValidationError::new("upstream_host_required_for_rewrite"))
         } else {
             Ok(())
@@ -236,13 +260,14 @@ pub enum SelectionType {
     Ketama,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Validate)]
 pub struct HealthCheck {
     // only support passive check for now
+    #[validate(nested)]
     pub active: ActiveCheck,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Validate)]
 pub struct ActiveCheck {
     #[serde(default)]
     pub r#type: ActiveCheckType,
@@ -254,9 +279,10 @@ pub struct ActiveCheck {
     pub port: Option<u32>,
     #[serde(default = "ActiveCheck::default_https_verify_certificate")]
     pub https_verify_certificate: bool,
-    #[serde(default = "Vec::new")]
+    #[serde(default)]
     pub req_headers: Vec<String>,
     pub healthy: Option<Health>,
+    #[validate(nested)]
     pub unhealthy: Option<Unhealthy>,
 }
 
@@ -307,7 +333,7 @@ impl Health {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Validate)]
 pub struct Unhealthy {
     #[serde(default = "Unhealthy::default_http_failures")]
     pub http_failures: u32,
@@ -348,6 +374,27 @@ pub enum UpstreamPassHost {
     #[default]
     PASS,
     REWRITE,
+}
+
+#[derive(Clone, Default, Debug, Serialize, Deserialize, Validate)]
+#[validate(schema(function = "Service::validate_upstream"))]
+pub struct Service {
+    pub id: String,
+    // TODO: pub plugins
+    pub upstream: Option<Upstream>,
+    pub upstream_id: Option<String>,
+    #[serde(default)]
+    pub hosts: Vec<String>,
+}
+
+impl Service {
+    fn validate_upstream(&self) -> Result<(), ValidationError> {
+        if self.upstream_id.is_none() && self.upstream.is_none() {
+            Err(ValidationError::new("upstream_required"))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -395,6 +442,19 @@ routers:
       checks:
         active:
           type: http
+
+upstreams:
+  - nodes:
+      "127.0.0.1:1980": 1
+    id: 1
+    checks:
+      active:
+        type: http
+
+services:
+  - id: 1
+    upstream_id: 1
+    hosts: ["example.com"]
         "#
         .to_string();
         let conf = Config::from_yaml(&conf_str).unwrap();
@@ -403,6 +463,8 @@ routers:
         assert_eq!(1, conf.pingora.version);
         assert_eq!(2, conf.listeners.len());
         assert_eq!(1, conf.routers.len());
+        assert_eq!(1, conf.upstreams.len());
+        assert_eq!(1, conf.services.len());
         print!("{}", conf.to_yaml());
     }
 
@@ -526,6 +588,104 @@ routers:
       nodes:
         "127.0.0.1:1980": 1
       pass_host: rewrite
+        "#
+        .to_string();
+        let conf = Config::from_yaml(&conf_str);
+        // Check for error and print the result
+        match conf {
+            Ok(_) => panic!("Expected error, but got a valid config"),
+            Err(e) => {
+                // Print the error here
+                eprintln!("Error: {:?}", e);
+                assert!(true); // You can assert true because you expect an error
+            }
+        }
+    }
+
+    #[test]
+    fn test_valid_config_upstream_id() {
+        init_log();
+        let conf_str = r#"
+---
+listeners:
+  - address: "[::1]:8080"
+
+routers:
+  - id: 1
+    uri: /
+    upstream:
+      nodes:
+        "127.0.0.1:1980": 1
+      checks:
+        active:
+          type: http
+
+upstreams:
+  - nodes:
+      "127.0.0.1:1980": 1
+    checks:
+      active:
+        type: http
+        "#
+        .to_string();
+        let conf = Config::from_yaml(&conf_str);
+        // Check for error and print the result
+        match conf {
+            Ok(_) => panic!("Expected error, but got a valid config"),
+            Err(e) => {
+                // Print the error here
+                eprintln!("Error: {:?}", e);
+                assert!(true); // You can assert true because you expect an error
+            }
+        }
+    }
+
+    #[test]
+    fn test_valid_router_upstream() {
+        init_log();
+        let conf_str = r#"
+---
+listeners:
+  - address: "[::1]:8080"
+
+routers:
+  - id: 1
+    uri: /
+        "#
+        .to_string();
+        let conf = Config::from_yaml(&conf_str);
+        // Check for error and print the result
+        match conf {
+            Ok(_) => panic!("Expected error, but got a valid config"),
+            Err(e) => {
+                // Print the error here
+                eprintln!("Error: {:?}", e);
+                assert!(true); // You can assert true because you expect an error
+            }
+        }
+    }
+
+    #[test]
+    fn test_valid_service_upstream() {
+        init_log();
+        let conf_str = r#"
+---
+listeners:
+  - address: "[::1]:8080"
+
+routers:
+  - id: 1
+    uri: /
+    upstream:
+      nodes:
+        "127.0.0.1:1980": 1
+      checks:
+        active:
+          type: http
+
+services:
+  - id: 1
+    hosts: ["example.com"]
         "#
         .to_string();
         let conf = Config::from_yaml(&conf_str);

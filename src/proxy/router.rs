@@ -10,33 +10,79 @@ use pingora_proxy::Session;
 
 use crate::config::{Router, Timeout};
 
-use super::upstream::ProxyUpstream;
+use super::{
+    service::service_fetch,
+    upstream::{upstream_fetch, ProxyUpstream},
+};
 
 /// Proxy router.
 ///
 /// Manages routing of requests to appropriate proxy load balancers.
 pub struct ProxyRouter {
     pub inner: Router,
-    pub upstream: ProxyUpstream,
+    pub upstream: Option<Arc<ProxyUpstream>>,
 }
 
-impl TryFrom<Router> for ProxyRouter {
-    type Error = Box<Error>;
-
+impl From<Router> for ProxyRouter {
     /// Creates a new `ProxyRouter` instance from a `Router` configuration.
-    fn try_from(value: Router) -> Result<Self> {
-        Ok(Self {
-            inner: value.clone(),
-            // TODO: support get upstream from router.upstream_id.
-            upstream: ProxyUpstream::try_from(value.upstream)?,
-        })
+    fn from(value: Router) -> Self {
+        Self {
+            inner: value,
+            upstream: None,
+        }
+    }
+}
+
+impl ProxyRouter {
+    /// Gets the upstream for the router.
+    pub fn get_upstream(&self) -> Option<Arc<ProxyUpstream>> {
+        if self.upstream.is_some() {
+            return self.upstream.clone();
+        }
+
+        if self.inner.upstream_id.is_some() {
+            let upstream = upstream_fetch(&self.inner.upstream_id.clone().unwrap());
+            if upstream.is_some() {
+                return upstream;
+            }
+        }
+
+        if self.inner.service_id.is_some() {
+            let service = service_fetch(&self.inner.service_id.clone().unwrap());
+            if let Some(service) = service {
+                return service.get_upstream();
+            }
+        }
+
+        None
+    }
+
+    /// Gets the list of hosts for the router.
+    fn get_hosts(&self) -> Option<Vec<String>> {
+        let hosts = self.inner.get_hosts();
+        if hosts.is_some() {
+            return hosts;
+        }
+
+        if self.inner.service_id.is_some() {
+            let service = service_fetch(&self.inner.service_id.clone().unwrap());
+            if let Some(service) = service {
+                return Some(service.inner.hosts.clone());
+            }
+        }
+
+        None
     }
 }
 
 impl ProxyRouter {
     /// Selects an HTTP peer for a given session.
     pub fn select_http_peer<'a>(&'a self, session: &'a mut Session) -> Result<Box<HttpPeer>> {
-        let backend = self.upstream.select_backend(session);
+        let upstream = self
+            .get_upstream()
+            .ok_or_else(|| Error::new_str("No upstream configured"))?;
+
+        let backend = upstream.select_backend(session);
         let mut backend = backend.ok_or_else(|| Error::new_str("Unable to determine backend"))?;
 
         backend
@@ -77,7 +123,7 @@ pub struct MatchEntry {
 impl MatchEntry {
     /// Inserts a router into the match entry.
     pub fn insert_router(&mut self, proxy_router: ProxyRouter) -> Result<(), InsertError> {
-        let hosts = proxy_router.inner.get_hosts().unwrap_or_default();
+        let hosts = proxy_router.get_hosts().unwrap_or_default();
         let uris = proxy_router.inner.get_uris().unwrap_or_default();
         let proxy_router = Arc::new(proxy_router);
 

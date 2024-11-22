@@ -9,9 +9,13 @@ use pingora_error::{Error, Result};
 use pingora_proxy::{ProxyHttp, Session};
 
 use router::{MatchEntry, ProxyRouter};
+use upstream::ProxyUpstream;
+
+use crate::config::Config;
 
 pub mod discovery;
 pub mod router;
+pub mod service;
 pub mod upstream;
 
 /// Proxy context.
@@ -79,12 +83,14 @@ impl ProxyHttp for ProxyService {
         mut e: Box<Error>,
     ) -> Box<Error> {
         if let Some(router) = ctx.router.as_ref() {
-            if let Some(retries) = router.upstream.get_retries() {
+            let upstream = router.get_upstream().unwrap();
+
+            if let Some(retries) = upstream.get_retries() {
                 if retries == 0 || ctx.tries >= retries {
                     return e;
                 }
 
-                if let Some(timeout) = router.upstream.get_retry_timeout() {
+                if let Some(timeout) = upstream.get_retry_timeout() {
                     if ctx.request_start.elapsed().as_millis() > (timeout * 1000) as u128 {
                         return e;
                     }
@@ -115,11 +121,29 @@ impl ProxyHttp for ProxyService {
         upstream_request: &mut pingora_http::RequestHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
-        ctx.router
-            .as_ref()
-            .unwrap()
-            .upstream
-            .upstream_host_rewrite(upstream_request);
+        // TODO: plugin may rewrite the host header, so we should check the order of the headers
+        let upstream = ctx.router.as_ref().unwrap().get_upstream().unwrap();
+        upstream.upstream_host_rewrite(upstream_request);
         Ok(())
     }
+}
+
+/// Initializes a proxy service from the given configuration.
+pub fn init_proxy_service(config: &Config) -> Result<ProxyService> {
+    let mut proxy_service = ProxyService::default();
+    for router in config.routers.iter() {
+        log::info!("Configuring Router: {}", router.id);
+        let mut proxy_router = ProxyRouter::from(router.clone());
+
+        if let Some(upstream) = router.upstream.clone() {
+            let mut proxy_upstream = ProxyUpstream::try_from(upstream)?;
+            proxy_upstream.start_health_check(config.pingora.work_stealing);
+
+            proxy_router.upstream = Some(Arc::new(proxy_upstream));
+        }
+
+        proxy_service.matcher.insert_router(proxy_router).unwrap();
+    }
+
+    Ok(proxy_service)
 }

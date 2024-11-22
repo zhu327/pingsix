@@ -1,9 +1,12 @@
 use std::{
-    sync::Arc,
+    collections::HashMap,
+    sync::{Arc, RwLock},
     time::{self, Duration},
 };
 
 use http::Uri;
+use log::info;
+use once_cell::sync::Lazy;
 use pingora::services::background::background_service;
 use pingora_core::services::Service;
 use pingora_core::upstreams::peer::HttpPeer;
@@ -17,13 +20,47 @@ use pingora_load_balancing::{
     Backend, Backends, LoadBalancer,
 };
 use pingora_proxy::Session;
+use pingora_runtime::Runtime;
+use tokio::sync::watch;
 
 use crate::config::{
-    ActiveCheckType, HealthCheck, SelectionType, Timeout, Upstream, UpstreamHashOn,
+    ActiveCheckType, Config, HealthCheck, SelectionType, Timeout, Upstream, UpstreamHashOn,
     UpstreamPassHost,
 };
 
 use super::discovery::HybridDiscovery;
+
+// Define a global upstream map, initialized lazily
+static UPSTREAM_MAP: Lazy<RwLock<HashMap<String, Arc<ProxyUpstream>>>> =
+    Lazy::new(|| RwLock::new(HashMap::new()));
+
+/// Loads upstreams from the given configuration.
+pub fn load_upstreams(config: &Config) -> Result<()> {
+    for upstream in config.upstreams.iter() {
+        info!(
+            "Configuring Upstream: {}",
+            upstream.id.clone().expect("Upstream ID is missing")
+        );
+
+        let mut proxy_upstream = ProxyUpstream::try_from(upstream.clone())?;
+        proxy_upstream.start_health_check(config.pingora.work_stealing);
+
+        let mut map = UPSTREAM_MAP
+            .write()
+            .expect("Failed to acquire write lock on the upstream map");
+        map.insert(upstream.id.clone().unwrap(), Arc::new(proxy_upstream));
+    }
+
+    Ok(())
+}
+
+/// Fetches an upstream by its ID.
+pub fn upstream_fetch(id: &str) -> Option<Arc<ProxyUpstream>> {
+    let map = UPSTREAM_MAP
+        .read()
+        .expect("Failed to acquire read lock on the upstream map");
+    map.get(id).cloned()
+}
 
 /// Proxy load balancer.
 ///
@@ -31,6 +68,9 @@ use super::discovery::HybridDiscovery;
 pub struct ProxyUpstream {
     pub inner: Upstream,
     lb: SelectionLB,
+
+    runtime: Option<Runtime>,
+    watch: Option<watch::Sender<bool>>,
 }
 
 impl TryFrom<Upstream> for ProxyUpstream {
@@ -41,11 +81,37 @@ impl TryFrom<Upstream> for ProxyUpstream {
         Ok(Self {
             inner: value.clone(),
             lb: SelectionLB::try_from(value)?,
+            runtime: None,
+            watch: None,
         })
     }
 }
 
 impl ProxyUpstream {
+    /// Starts the health check service, runs only once.
+    pub fn start_health_check(&mut self, work_stealing: bool) {
+        if let Some(mut service) = self.take_background_service() {
+            let (tx, rx) = watch::channel(false);
+            self.watch = Some(tx);
+
+            let threads = service.threads().unwrap_or(1);
+
+            let runtime = if work_stealing {
+                Runtime::new_steal(threads, service.name())
+            } else {
+                Runtime::new_no_steal(threads, service.name())
+            };
+
+            runtime.get_handle().spawn(async move {
+                service.start_service(None, rx).await;
+                info!("service exited.")
+            });
+
+            // set runtime lifecycle with ProxyUpstream
+            self.runtime = Some(runtime);
+        }
+    }
+
     /// Selects a backend server for a given session.
     pub fn select_backend<'a>(&'a self, session: &'a mut Session) -> Option<Backend> {
         let key = self.request_selector_key(session);
@@ -79,8 +145,15 @@ impl ProxyUpstream {
         }
     }
 
+    /// Stops the health check service.
+    fn stop_health_check(&mut self) {
+        if let Some(tx) = self.watch.take() {
+            let _ = tx.send(true);
+        }
+    }
+
     /// Takes the background service if it exists.
-    pub fn take_background_service(&mut self) -> Option<Box<dyn Service + 'static>> {
+    fn take_background_service(&mut self) -> Option<Box<dyn Service + 'static>> {
         match self.lb {
             SelectionLB::RoundRobin(ref mut lb) => lb.service.take(),
             SelectionLB::Random(ref mut lb) => lb.service.take(),
@@ -165,6 +238,13 @@ impl ProxyUpstream {
                 .map_or_else(|| "".to_string(), |addr| addr.to_string()),
             _ => "".to_string(),
         }
+    }
+}
+
+impl Drop for ProxyUpstream {
+    /// Stops the health check service if it exists.
+    fn drop(&mut self) {
+        self.stop_health_check();
     }
 }
 
