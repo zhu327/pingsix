@@ -36,6 +36,10 @@ static UPSTREAM_MAP: Lazy<RwLock<HashMap<String, Arc<ProxyUpstream>>>> =
 
 /// Loads upstreams from the given configuration.
 pub fn load_upstreams(config: &Config) -> Result<()> {
+    let mut map = UPSTREAM_MAP
+        .write()
+        .expect("Failed to acquire write lock on the upstream map");
+
     for upstream in config.upstreams.iter() {
         info!(
             "Configuring Upstream: {}",
@@ -45,9 +49,6 @@ pub fn load_upstreams(config: &Config) -> Result<()> {
         let mut proxy_upstream = ProxyUpstream::try_from(upstream.clone())?;
         proxy_upstream.start_health_check(config.pingora.work_stealing);
 
-        let mut map = UPSTREAM_MAP
-            .write()
-            .expect("Failed to acquire write lock on the upstream map");
         map.insert(upstream.id.clone().unwrap(), Arc::new(proxy_upstream));
     }
 

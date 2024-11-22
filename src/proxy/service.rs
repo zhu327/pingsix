@@ -42,6 +42,10 @@ static SERVICE_MAP: Lazy<RwLock<HashMap<String, Arc<ProxyService>>>> =
 
 /// Loads services from the given configuration.
 pub fn load_services(config: &Config) -> Result<()> {
+    let mut map = SERVICE_MAP
+        .write()
+        .expect("Failed to acquire write lock on the service map");
+
     for service in config.services.iter() {
         log::info!("Configuring Service: {}", service.id);
         let mut proxy_service = ProxyService::from(service.clone());
@@ -51,9 +55,8 @@ pub fn load_services(config: &Config) -> Result<()> {
             proxy_upstream.start_health_check(config.pingora.work_stealing);
 
             proxy_service.upstream = Some(Arc::new(proxy_upstream));
-        };
+        }
 
-        let mut map = SERVICE_MAP.write().unwrap();
         map.insert(service.id.clone(), Arc::new(proxy_service));
     }
 
