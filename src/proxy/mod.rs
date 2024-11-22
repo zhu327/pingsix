@@ -1,19 +1,23 @@
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
+use std::{collections::BTreeMap, time::Duration};
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use http::StatusCode;
 use pingora_core::upstreams::peer::HttpPeer;
 use pingora_error::{Error, Result};
+use pingora_http::ResponseHeader;
 use pingora_proxy::{ProxyHttp, Session};
 
+use plugin::{PluginExecutor, ProxyPlugin};
 use router::{MatchEntry, ProxyRouter};
 use upstream::ProxyUpstream;
 
 use crate::config::Config;
 
 pub mod discovery;
+pub mod plugin;
 pub mod router;
 pub mod service;
 pub mod upstream;
@@ -25,6 +29,8 @@ pub struct ProxyContext {
     pub router: Option<Arc<ProxyRouter>>,
     pub router_params: BTreeMap<String, String>,
 
+    pub plugin: Arc<PluginExecutor>,
+
     pub tries: usize,
     pub request_start: Instant,
 }
@@ -34,6 +40,7 @@ impl Default for ProxyContext {
         Self {
             router: None,
             router_params: BTreeMap::new(),
+            plugin: Arc::new(PluginExecutor::default()),
             tries: 0,
             request_start: Instant::now(),
         }
@@ -66,12 +73,28 @@ impl ProxyHttp for ProxyService {
         if let Some((router_params, router)) = self.matcher.match_request(session) {
             ctx.router_params = router_params;
             ctx.router = Some(router);
+            // TODO: match router plugins
         } else {
             let _ = session.respond_error(StatusCode::NOT_FOUND.as_u16()).await;
             return Ok(true);
         }
 
-        Ok(false)
+        // execute plugins
+        ctx.plugin.clone().request_filter(session, ctx).await
+    }
+
+    async fn request_body_filter(
+        &self,
+        session: &mut Session,
+        body: &mut Option<Bytes>,
+        end_of_stream: bool,
+        ctx: &mut ProxyContext,
+    ) -> Result<()> {
+        // execute plugins
+        ctx.plugin
+            .clone()
+            .request_body_filter(session, body, end_of_stream, ctx)
+            .await
     }
 
     /// This filter is called when there is an error in the process of establishing a connection to the upstream.
@@ -117,14 +140,52 @@ impl ProxyHttp for ProxyService {
     // Modify the request before it is sent to the upstream
     async fn upstream_request_filter(
         &self,
-        _session: &mut Session,
+        session: &mut Session,
         upstream_request: &mut pingora_http::RequestHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
-        // TODO: plugin may rewrite the host header, so we should check the order of the headers
+        // execute plugins
+        ctx.plugin
+            .clone()
+            .upstream_request_filter(session, upstream_request, ctx)
+            .await?;
+
+        // rewrite host header
         let upstream = ctx.router.as_ref().unwrap().get_upstream().unwrap();
         upstream.upstream_host_rewrite(upstream_request);
         Ok(())
+    }
+
+    async fn response_filter(
+        &self,
+        session: &mut Session,
+        upstream_response: &mut ResponseHeader,
+        ctx: &mut Self::CTX,
+    ) -> Result<()> {
+        // execute plugins
+        ctx.plugin
+            .clone()
+            .response_filter(session, upstream_response, ctx)
+            .await
+    }
+
+    fn response_body_filter(
+        &self,
+        session: &mut Session,
+        body: &mut Option<Bytes>,
+        end_of_stream: bool,
+        ctx: &mut Self::CTX,
+    ) -> Result<Option<Duration>> {
+        // execute plugins
+        ctx.plugin
+            .clone()
+            .response_body_filter(session, body, end_of_stream, ctx)?;
+        Ok(None)
+    }
+
+    async fn logging(&self, session: &mut Session, e: Option<&Error>, ctx: &mut Self::CTX) {
+        // execute plugins
+        ctx.plugin.clone().logging(session, e, ctx).await;
     }
 }
 

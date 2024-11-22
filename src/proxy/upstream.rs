@@ -115,7 +115,7 @@ impl ProxyUpstream {
 
     /// Selects a backend server for a given session.
     pub fn select_backend<'a>(&'a self, session: &'a mut Session) -> Option<Backend> {
-        let key = self.request_selector_key(session);
+        let key = request_selector_key(session, &self.inner.hash_on, self.inner.key.as_str());
         log::debug!("proxy lb key: {}", &key);
 
         let mut backend = match &self.lb {
@@ -184,60 +184,6 @@ impl ProxyUpstream {
             p.options.connection_timeout = Some(time::Duration::from_secs(connect));
             p.options.read_timeout = Some(time::Duration::from_secs(read));
             p.options.write_timeout = Some(time::Duration::from_secs(send));
-        }
-    }
-
-    /// Generates the key for request selection based on the upstream configuration.
-    fn request_selector_key<'a>(&'a self, session: &'a mut Session) -> String {
-        match self.inner.hash_on {
-            UpstreamHashOn::VARS => self.handle_vars(session),
-            UpstreamHashOn::HEAD => {
-                get_req_header_value(session.req_header(), self.inner.key.as_str())
-                    .unwrap_or_default()
-                    .to_string()
-            }
-            UpstreamHashOn::COOKIE => {
-                get_cookie_value(session.req_header(), self.inner.key.as_str())
-                    .unwrap_or_default()
-                    .to_string()
-            }
-        }
-    }
-
-    /// Handles variable-based request selection.
-    fn handle_vars<'a>(&'a self, session: &'a mut Session) -> String {
-        if self.inner.key.as_str().starts_with("arg_") {
-            if let Some(name) = self.inner.key.as_str().strip_prefix("arg_") {
-                return get_query_value(session.req_header(), name)
-                    .unwrap_or_default()
-                    .to_string();
-            }
-        }
-
-        match self.inner.key.as_str() {
-            "uri" => session.req_header().uri.path().to_string(),
-            "request_uri" => session
-                .req_header()
-                .uri
-                .path_and_query()
-                .map_or_else(|| "".to_string(), |pq| pq.to_string()),
-            "query_string" => session
-                .req_header()
-                .uri
-                .query()
-                .unwrap_or_default()
-                .to_string(),
-            "remote_addr" => session
-                .client_addr()
-                .map_or_else(|| "".to_string(), |addr| addr.to_string()),
-            "remote_port" => session
-                .client_addr()
-                .and_then(|s| s.as_inet())
-                .map_or_else(|| "".to_string(), |i| i.port().to_string()),
-            "server_addr" => session
-                .server_addr()
-                .map_or_else(|| "".to_string(), |addr| addr.to_string()),
-            _ => "".to_string(),
         }
     }
 }
@@ -433,4 +379,53 @@ fn get_cookie_value<'a>(req_header: &'a RequestHeader, cookie_name: &str) -> Opt
         }
     }
     None
+}
+
+pub fn request_selector_key(session: &mut Session, hash_on: &UpstreamHashOn, key: &str) -> String {
+    match hash_on {
+        UpstreamHashOn::VARS => handle_vars(session, key),
+        UpstreamHashOn::HEAD => get_req_header_value(session.req_header(), key)
+            .unwrap_or_default()
+            .to_string(),
+        UpstreamHashOn::COOKIE => get_cookie_value(session.req_header(), key)
+            .unwrap_or_default()
+            .to_string(),
+    }
+}
+
+/// Handles variable-based request selection.
+fn handle_vars(session: &mut Session, key: &str) -> String {
+    if key.starts_with("arg_") {
+        if let Some(name) = key.strip_prefix("arg_") {
+            return get_query_value(session.req_header(), name)
+                .unwrap_or_default()
+                .to_string();
+        }
+    }
+
+    match key {
+        "uri" => session.req_header().uri.path().to_string(),
+        "request_uri" => session
+            .req_header()
+            .uri
+            .path_and_query()
+            .map_or_else(|| "".to_string(), |pq| pq.to_string()),
+        "query_string" => session
+            .req_header()
+            .uri
+            .query()
+            .unwrap_or_default()
+            .to_string(),
+        "remote_addr" => session
+            .client_addr()
+            .map_or_else(|| "".to_string(), |addr| addr.to_string()),
+        "remote_port" => session
+            .client_addr()
+            .and_then(|s| s.as_inet())
+            .map_or_else(|| "".to_string(), |i| i.port().to_string()),
+        "server_addr" => session
+            .server_addr()
+            .map_or_else(|| "".to_string(), |addr| addr.to_string()),
+        _ => "".to_string(),
+    }
 }
