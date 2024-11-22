@@ -72,28 +72,24 @@ pub fn build_plugin(name: &str, cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> 
 /// # Notes
 /// - This function ensures that plugins from the router take precedence over those from the service in case of naming conflicts.
 pub fn build_plugin_executor(router: Arc<ProxyRouter>) -> Arc<ProxyPluginExecutor> {
-    let router_plugins = router.plugins.clone();
-    let mut service_plugins = Vec::new();
-
-    if let Some(service_id) = router.inner.service_id.clone() {
-        if let Some(service) = service_fetch(&service_id) {
-            service_plugins = service.plugins.clone();
-        }
-    }
-
     let mut plugin_map: HashMap<String, Arc<dyn ProxyPlugin>> = HashMap::new();
 
-    for plugin in router_plugins {
-        plugin_map.insert(plugin.name().to_string(), plugin);
-    }
+    // 合并 router 和 service 的插件
+    let service_plugins = router
+        .inner
+        .service_id
+        .as_deref() // 将 Option<String> 转换为 Option<&str>
+        .and_then(service_fetch)
+        .map_or_else(Vec::new, |service| service.plugins.clone());
 
-    for plugin in service_plugins {
+    for plugin in router.plugins.iter().chain(service_plugins.iter()) {
         plugin_map
             .entry(plugin.name().to_string())
-            .or_insert(plugin);
+            .or_insert_with(|| plugin.clone());
     }
 
-    let mut merged_plugins: Vec<Arc<dyn ProxyPlugin>> = plugin_map.into_values().collect();
+    // 按优先级逆序排序
+    let mut merged_plugins: Vec<_> = plugin_map.into_values().collect();
     merged_plugins.sort_by_key(|b| std::cmp::Reverse(b.priority()));
 
     Arc::new(ProxyPluginExecutor {
