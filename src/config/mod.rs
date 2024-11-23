@@ -99,6 +99,8 @@ pub struct Listener {
     pub tls: Option<Tls>,
     #[serde(default)]
     pub offer_h2: bool,
+    #[serde(default)]
+    pub offer_h2c: bool,
 }
 
 impl Listener {
