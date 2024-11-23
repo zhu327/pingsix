@@ -32,7 +32,7 @@ pub struct Config {
 
 // Config file load and validation
 impl Config {
-    // Does not has to be async until we want runtime reload
+    // Does not have to be async until we want runtime reload
     pub fn load_from_yaml<P>(path: P) -> Result<Self>
     where
         P: AsRef<std::path::Path> + std::fmt::Display,

@@ -32,6 +32,15 @@ impl ProxyHttp for HttpService {
         Self::CTX::default()
     }
 
+    /// Selects an upstream peer for the request
+    async fn upstream_peer(
+        &self,
+        session: &mut Session,
+        ctx: &mut Self::CTX,
+    ) -> Result<Box<HttpPeer>> {
+        ctx.router.as_ref().unwrap().select_http_peer(session)
+    }
+
     /// Filters incoming requests
     async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool>
     where
@@ -63,46 +72,6 @@ impl ProxyHttp for HttpService {
             .clone()
             .request_body_filter(session, body, end_of_stream, ctx)
             .await
-    }
-
-    /// This filter is called when there is an error in the process of establishing a connection to the upstream.
-    fn fail_to_connect(
-        &self,
-        _session: &mut Session,
-        _peer: &HttpPeer,
-        ctx: &mut Self::CTX,
-        mut e: Box<Error>,
-    ) -> Box<Error> {
-        if let Some(router) = ctx.router.as_ref() {
-            let upstream = router.get_upstream().unwrap();
-
-            if let Some(retries) = upstream.get_retries() {
-                if retries == 0 || ctx.tries >= retries {
-                    return e;
-                }
-
-                if let Some(timeout) = upstream.get_retry_timeout() {
-                    if ctx.request_start.elapsed().as_millis() > (timeout * 1000) as u128 {
-                        return e;
-                    }
-                }
-
-                ctx.tries += 1;
-                e.set_retry(true);
-                return e;
-            }
-        }
-
-        e
-    }
-
-    /// Selects an upstream peer for the request
-    async fn upstream_peer(
-        &self,
-        session: &mut Session,
-        ctx: &mut Self::CTX,
-    ) -> Result<Box<HttpPeer>> {
-        ctx.router.as_ref().unwrap().select_http_peer(session)
     }
 
     // Modify the request before it is sent to the upstream
@@ -154,6 +123,37 @@ impl ProxyHttp for HttpService {
     async fn logging(&self, session: &mut Session, e: Option<&Error>, ctx: &mut Self::CTX) {
         // execute plugins
         ctx.plugin.clone().logging(session, e, ctx).await;
+    }
+
+    /// This filter is called when there is an error in the process of establishing a connection to the upstream.
+    fn fail_to_connect(
+        &self,
+        _session: &mut Session,
+        _peer: &HttpPeer,
+        ctx: &mut Self::CTX,
+        mut e: Box<Error>,
+    ) -> Box<Error> {
+        if let Some(router) = ctx.router.as_ref() {
+            let upstream = router.get_upstream().unwrap();
+
+            if let Some(retries) = upstream.get_retries() {
+                if retries == 0 || ctx.tries >= retries {
+                    return e;
+                }
+
+                if let Some(timeout) = upstream.get_retry_timeout() {
+                    if ctx.request_start.elapsed().as_millis() > (timeout * 1000) as u128 {
+                        return e;
+                    }
+                }
+
+                ctx.tries += 1;
+                e.set_retry(true);
+                return e;
+            }
+        }
+
+        e
     }
 }
 
