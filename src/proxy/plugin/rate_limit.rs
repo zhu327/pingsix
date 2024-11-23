@@ -18,8 +18,8 @@ use super::ProxyPlugin;
 pub const PLUGIN_NAME: &str = "rate_limit";
 
 pub fn create_rate_limit_plugin(cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> {
-    let config: PluginRaLimitConfig =
-        serde_yaml::from_value(cfg).or_err_with(ReadError, || "Invalid echo plugin config")?;
+    let config: PluginRaLimitConfig = serde_yaml::from_value(cfg)
+        .or_err_with(ReadError, || "Invalid rate limit plugin config")?;
 
     let rate = Rate::new(Duration::from_secs(config.window_sec as u64));
 

@@ -1,14 +1,13 @@
 use std::{collections::HashMap, sync::Arc};
 
+use async_trait::async_trait;
+use bytes::Bytes;
 use once_cell::sync::Lazy;
 use pingora::OkOrErr;
 use pingora_error::{Error, ErrorType::ReadError, Result};
-use serde_yaml::Value as YamlValue;
-
-use async_trait::async_trait;
-use bytes::Bytes;
 use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_proxy::Session;
+use serde_yaml::Value as YamlValue;
 
 use crate::proxy::ProxyContext;
 
