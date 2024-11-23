@@ -163,7 +163,7 @@ impl TryFrom<Upstream> for HybridDiscovery {
                 let mut backend = Backend::new(addr).unwrap();
                 backend.weight = *weight as usize;
 
-                // !! for now we don't support TLS for static upstream
+                // !! for now, we don't support TLS for static upstream
                 let uppy = HttpPeer::new(addr, false, "".to_string());
                 assert!(backend.ext.insert::<HttpPeer>(uppy).is_none());
                 backends.insert(backend);

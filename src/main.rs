@@ -1,5 +1,6 @@
 #![allow(clippy::upper_case_acronyms)]
 
+use pingora_core::apps::HttpServerOptions;
 use pingora_core::listeners::tls::TlsSettings;
 use pingora_core::server::configuration::Opt;
 use pingora_core::server::Server;
@@ -58,6 +59,12 @@ fn main() {
                 http_service.add_tls_with_settings(&list_cfg.address.to_string(), None, settings);
             }
             None => {
+                if list_cfg.offer_h2c {
+                    let http_logic = http_service.app_logic_mut().unwrap();
+                    let mut http_server_options = HttpServerOptions::default();
+                    http_server_options.h2c = true;
+                    http_logic.server_options = Some(http_server_options);
+                }
                 http_service.add_tcp(&list_cfg.address.to_string());
             }
         }

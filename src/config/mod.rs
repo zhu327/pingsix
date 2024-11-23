@@ -32,7 +32,7 @@ pub struct Config {
 
 // Config file load and validation
 impl Config {
-    // Does not has to be async until we want runtime reload
+    // Does not have to be async until we want runtime reload
     pub fn load_from_yaml<P>(path: P) -> Result<Self>
     where
         P: AsRef<std::path::Path> + std::fmt::Display,
@@ -99,6 +99,8 @@ pub struct Listener {
     pub tls: Option<Tls>,
     #[serde(default)]
     pub offer_h2: bool,
+    #[serde(default)]
+    pub offer_h2c: bool,
 }
 
 impl Listener {
@@ -467,6 +469,63 @@ services:
         assert_eq!(2, conf.listeners.len());
         assert_eq!(1, conf.routers.len());
         assert_eq!(1, conf.upstreams.len());
+        assert_eq!(1, conf.services.len());
+        print!("{}", conf.to_yaml());
+    }
+
+    #[test]
+    fn test_load_file_upstream_id() {
+        init_log();
+        let conf_str = r#"
+---
+pingora:
+  version: 1
+  client_bind_to_ipv4:
+      - 1.2.3.4
+      - 5.6.7.8
+  client_bind_to_ipv6: []
+
+listeners:
+  - address: 0.0.0.0:8080
+    offer_h2c: true
+  - address: "[::1]:8080"
+    tls:
+      cert_path: /etc/ssl/server.crt
+      key_path: /etc/ssl/server.key
+    offer_h2: true
+
+routers:
+  - id: 1
+    uri: /
+    upstream_id: 1
+
+upstreams:
+  - nodes:
+      "127.0.0.1:1980": 1
+    id: 1
+    checks:
+      active:
+        type: http
+  - nodes:
+      "127.0.0.1:1981": 1
+    id: 2
+    checks:
+      active:
+        type: http
+
+services:
+  - id: 1
+    upstream_id: 1
+    hosts: ["example.com"]
+        "#
+        .to_string();
+        let conf = Config::from_yaml(&conf_str).unwrap();
+        assert_eq!(2, conf.pingora.client_bind_to_ipv4.len());
+        assert_eq!(0, conf.pingora.client_bind_to_ipv6.len());
+        assert_eq!(1, conf.pingora.version);
+        assert_eq!(2, conf.listeners.len());
+        assert_eq!(1, conf.routers.len());
+        assert_eq!(2, conf.upstreams.len());
         assert_eq!(1, conf.services.len());
         print!("{}", conf.to_yaml());
     }
