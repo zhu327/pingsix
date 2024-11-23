@@ -92,8 +92,7 @@ impl ServiceDiscovery for DnsDiscovery {
 /// Combines static and DNS-based service discovery.
 #[derive(Default)]
 pub struct HybridDiscovery {
-    static_discovery: Option<Box<Static>>,
-    dns_discoveries: Vec<DnsDiscovery>,
+    discoveries: Vec<Box<dyn ServiceDiscovery + Send + Sync>>,
 }
 
 #[async_trait]
@@ -105,24 +104,16 @@ impl ServiceDiscovery for HybridDiscovery {
         let mut backends = BTreeSet::new();
         let mut health_checks = HashMap::new();
 
-        // 1. Process static discovery first (if available)
-        if let Some(static_discovery) = &self.static_discovery {
-            let (static_backends, static_health_checks) = static_discovery.discover().await?;
-            backends.extend(static_backends);
-            health_checks.extend(static_health_checks);
-        }
-
-        // 2. Process DNS discoveries concurrently, ignoring errors
-        let dns_futures = self.dns_discoveries.iter().map(|discovery| async move {
+        let futures = self.discoveries.iter().map(|discovery| async move {
             discovery.discover().await.map_err(|e| {
-                log::warn!("DNS discovery for '{}' failed: {}", &discovery.name, e);
+                log::warn!("Hydrid discovery failed: {}", e);
                 e
             })
         });
 
-        let dns_results = join_all(dns_futures).await;
+        let results = join_all(futures).await;
 
-        for (dns_backends, dns_health_checks) in dns_results.into_iter().flatten() {
+        for (dns_backends, dns_health_checks) in results.into_iter().flatten() {
             backends.extend(dns_backends);
             health_checks.extend(dns_health_checks);
         }
@@ -149,13 +140,13 @@ impl TryFrom<Upstream> for HybridDiscovery {
             if host.parse::<IpAddr>().is_err() {
                 // host is a domain name
                 let resolver = get_global_resolver();
-                this.dns_discoveries.push(DnsDiscovery::new(
+                this.discoveries.push(Box::new(DnsDiscovery::new(
                     host,
                     port,
                     upstream.scheme,
                     *weight,
                     resolver,
-                ));
+                )));
             } else {
                 let addr =
                     &SocketAddr::new(host.parse::<IpAddr>().unwrap(), port as u16).to_string();
@@ -171,7 +162,7 @@ impl TryFrom<Upstream> for HybridDiscovery {
         }
 
         if !backends.is_empty() {
-            this.static_discovery = Some(Static::new(backends));
+            this.discoveries.push(Static::new(backends));
         }
 
         Ok(this)
