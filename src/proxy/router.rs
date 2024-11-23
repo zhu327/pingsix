@@ -191,18 +191,20 @@ impl MatchEntry {
             method
         );
 
-        if host.map_or(true, |v| v.is_empty()) {
-            // Match non-host uri
-            return Self::match_uri(&self.non_host_uri, uri, method);
-        } else {
-            // Match host uri
-            let reversed_host = host.unwrap().chars().rev().collect::<String>();
-            if let Ok(v) = self.host_uris.at(reversed_host.as_str()) {
-                return Self::match_uri(v.value, uri, method);
+        // Attempt to match using host_uris if a valid host is provided
+        if let Some(reversed_host) = host
+            .filter(|h| !h.is_empty())
+            .map(|h| h.chars().rev().collect::<String>())
+        {
+            if let Ok(v) = self.host_uris.at(&reversed_host) {
+                if let Some(result) = Self::match_uri(v.value, uri, method) {
+                    return Some(result);
+                }
             }
         }
 
-        None
+        // Fall back to non-host URI matching
+        Self::match_uri(&self.non_host_uri, uri, method)
     }
 
     /// Matches a URI to a router.

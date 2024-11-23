@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, sync::Arc, time::Instant};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+    time::Instant,
+};
 
 use pingora_http::RequestHeader;
 use pingora_proxy::Session;
@@ -20,10 +24,14 @@ pub struct ProxyContext {
     pub router: Option<Arc<ProxyRouter>>,
     pub router_params: BTreeMap<String, String>,
 
-    pub plugin: Arc<ProxyPluginExecutor>,
-
     pub tries: usize,
     pub request_start: Instant,
+
+    pub plugin: Arc<ProxyPluginExecutor>,
+
+    // Share custom vars between plugins
+    #[allow(dead_code)]
+    pub vars: HashMap<String, String>,
 }
 
 impl Default for ProxyContext {
@@ -31,9 +39,10 @@ impl Default for ProxyContext {
         Self {
             router: None,
             router_params: BTreeMap::new(),
-            plugin: Arc::new(ProxyPluginExecutor::default()),
             tries: 0,
             request_start: Instant::now(),
+            plugin: Arc::new(ProxyPluginExecutor::default()),
+            vars: HashMap::new(),
         }
     }
 }

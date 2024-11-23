@@ -5,6 +5,7 @@ use std::{collections::HashMap, fmt};
 use log::{debug, trace};
 use pingora::server::configuration::{Opt, ServerConf};
 use pingora_error::{Error, ErrorType::*, OrErr, Result};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value as YamlValue;
 use validator::{Validate, ValidationError};
@@ -223,7 +224,7 @@ pub struct Upstream {
     pub retry_timeout: Option<u64>,
     #[validate(nested)]
     pub timeout: Option<Timeout>,
-    #[validate(length(min = 1))]
+    #[validate(length(min = 1), custom(function = "Upstream::validate_nodes_keys"))]
     pub nodes: HashMap<String, u32>,
     #[serde(default)]
     pub r#type: SelectionType,
@@ -251,6 +252,23 @@ impl Upstream {
         } else {
             Ok(())
         }
+    }
+
+    // Custom validation function for `nodes` keys
+    fn validate_nodes_keys(nodes: &HashMap<String, u32>) -> Result<(), ValidationError> {
+        // Define the regular expression for valid keys
+        let re =
+            Regex::new(r"(?i)^(?:(?:\d{1,3}\.){3}\d{1,3}|\[[0-9a-f:]+\]|[a-z0-9.-]+)(?::\d+)?$")
+                .unwrap();
+
+        for key in nodes.keys() {
+            if !re.is_match(key) {
+                let mut err = ValidationError::new("invalid_node_key");
+                err.add_param("key".into(), &key.to_string());
+                return Err(err);
+            }
+        }
+        Ok(())
     }
 }
 
