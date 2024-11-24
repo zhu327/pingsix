@@ -61,20 +61,20 @@ impl ProxyRouter {
     }
 
     /// Gets the list of hosts for the router.
-    fn get_hosts(&self) -> Option<Vec<String>> {
+    fn get_hosts(&self) -> Vec<String> {
         let hosts = self.inner.get_hosts();
-        if hosts.is_some() {
+        if !hosts.is_empty() {
             return hosts;
         }
 
         if self.inner.service_id.is_some() {
             let service = service_fetch(&self.inner.service_id.clone().unwrap());
             if let Some(service) = service {
-                return Some(service.inner.hosts.clone());
+                return service.inner.hosts.clone();
             }
         }
 
-        None
+        vec![]
     }
 }
 
@@ -126,8 +126,8 @@ pub struct MatchEntry {
 impl MatchEntry {
     /// Inserts a router into the match entry.
     pub fn insert_router(&mut self, proxy_router: ProxyRouter) -> Result<(), InsertError> {
-        let hosts = proxy_router.get_hosts().unwrap_or_default();
-        let uris = proxy_router.inner.get_uris().unwrap_or_default();
+        let hosts = proxy_router.get_hosts();
+        let uris = proxy_router.inner.get_uris();
         let proxy_router = Arc::new(proxy_router);
 
         if hosts.is_empty() {
@@ -221,7 +221,7 @@ impl MatchEntry {
                 .collect();
 
             for router in v.value.iter() {
-                if router.inner.methods.is_none() {
+                if router.inner.methods.is_empty() {
                     return Some((params, router.clone()));
                 }
 
@@ -229,8 +229,6 @@ impl MatchEntry {
                 if router
                     .inner
                     .methods
-                    .clone()
-                    .unwrap()
                     .iter()
                     .map(|method| method.to_string())
                     .collect::<Vec<String>>()

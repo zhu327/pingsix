@@ -14,7 +14,7 @@ use pingora_load_balancing::{
 };
 use regex::Regex;
 
-use crate::config::{Upstream, UpstreamScheme};
+use crate::config::{Upstream, UpstreamPassHost, UpstreamScheme};
 
 static GLOBAL_RESOLVER: OnceCell<Arc<TokioAsyncResolver>> = OnceCell::new();
 
@@ -154,8 +154,14 @@ impl TryFrom<Upstream> for HybridDiscovery {
                 let mut backend = Backend::new(addr).unwrap();
                 backend.weight = *weight as usize;
 
-                // !! for now, we don't support TLS for static upstream
-                let uppy = HttpPeer::new(addr, false, "".to_string());
+                let tls = upstream.scheme == UpstreamScheme::HTTPS;
+                let sni = if upstream.pass_host == UpstreamPassHost::REWRITE {
+                    upstream.upstream_host.clone().unwrap()
+                } else {
+                    host
+                };
+
+                let uppy = HttpPeer::new(addr, tls, sni);
                 assert!(backend.ext.insert::<HttpPeer>(uppy).is_none());
                 backends.insert(backend);
             }

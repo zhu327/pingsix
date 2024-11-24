@@ -133,10 +133,13 @@ pub struct Router {
     pub id: String,
 
     pub uri: Option<String>,
-    pub uris: Option<Vec<String>>,
-    pub methods: Option<Vec<HttpMethod>>,
+    #[serde(default)]
+    pub uris: Vec<String>,
+    #[serde(default)]
+    pub methods: Vec<HttpMethod>,
     pub host: Option<String>,
-    pub hosts: Option<Vec<String>>,
+    #[serde(default)]
+    pub hosts: Vec<String>,
     #[serde(default = "Router::default_priority")]
     pub priority: u32,
 
@@ -152,7 +155,7 @@ pub struct Router {
 
 impl Router {
     fn validate(&self) -> Result<(), ValidationError> {
-        if self.uri.is_none() && self.uris.as_ref().map_or(true, |v| v.is_empty()) {
+        if self.uri.is_none() && self.uris.is_empty() {
             return Err(ValidationError::new("uri_or_uris_required"));
         }
 
@@ -163,17 +166,17 @@ impl Router {
         Ok(())
     }
 
-    pub fn get_hosts(&self) -> Option<Vec<String>> {
+    pub fn get_hosts(&self) -> Vec<String> {
         if let Some(host) = &self.host {
-            Some(vec![host.to_string()])
+            vec![host.to_string()]
         } else {
             self.hosts.clone()
         }
     }
 
-    pub fn get_uris(&self) -> Option<Vec<String>> {
+    pub fn get_uris(&self) -> Vec<String> {
         if let Some(uri) = &self.uri {
-            Some(vec![uri.to_string()])
+            vec![uri.to_string()]
         } else {
             self.uris.clone()
         }
