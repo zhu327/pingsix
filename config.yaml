@@ -109,8 +109,10 @@ services:
       type: roundrobin
       scheme: http
     plugins:
-      rate_limit:
-        hash_on: head
+      limit-count:
+        key_type: head
         key: Host
-        window_sec: 1
-        max_req_per_sec: 1
+        time_window: 1
+        count: 1
+        rejected_code: 429
+        rejected_msg: "Pleas slow down!"

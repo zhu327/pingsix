@@ -16,19 +16,19 @@ use super::ProxyPlugin;
 pub const PLUGIN_NAME: &str = "echo";
 
 pub fn create_echo_plugin(cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> {
-    let config: PluginEchoConfig =
+    let config: PluginConfig =
         serde_yaml::from_value(cfg).or_err_with(ReadError, || "Invalid echo plugin config")?;
     Ok(Arc::new(PluginEcho { config }))
 }
 
 #[derive(Default, Debug, Serialize, Deserialize, Validate)]
-struct PluginEchoConfig {
+struct PluginConfig {
     body: String,
     headers: Option<HashMap<String, String>>,
 }
 
 pub struct PluginEcho {
-    config: PluginEchoConfig,
+    config: PluginConfig,
 }
 
 #[async_trait]
@@ -51,15 +51,11 @@ impl ProxyPlugin for PluginEcho {
         resp.insert_header(header::CONTENT_LENGTH, self.config.body.len().to_string())
             .unwrap();
 
-        session
-            .write_response_header(Box::new(resp), false)
-            .await
-            .unwrap();
+        session.write_response_header(Box::new(resp), false).await?;
 
         session
             .write_response_body(Some(self.config.body.clone().into()), true)
-            .await
-            .unwrap();
+            .await?;
 
         Ok(true)
     }

@@ -119,9 +119,9 @@ impl ServiceDiscovery for HybridDiscovery {
 
         let results = join_all(futures).await;
 
-        for (dns_backends, dns_health_checks) in results.into_iter().flatten() {
-            backends.extend(dns_backends);
-            health_checks.extend(dns_health_checks);
+        for (part_backends, part_health_checks) in results.into_iter().flatten() {
+            backends.extend(part_backends);
+            health_checks.extend(part_health_checks);
         }
 
         Ok((backends, health_checks))

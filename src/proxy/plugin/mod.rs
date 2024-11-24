@@ -14,7 +14,7 @@ use crate::proxy::ProxyContext;
 use super::{router::ProxyRouter, service::service_fetch};
 
 pub mod echo;
-pub mod rate_limit;
+pub mod limit_count;
 
 /// Type alias for plugin initialization functions
 pub type PluginCreateFn = Arc<dyn Fn(YamlValue) -> Result<Arc<dyn ProxyPlugin>> + Send + Sync>;
@@ -24,8 +24,8 @@ static PLUGIN_BUILDER_REGISTRY: Lazy<HashMap<&'static str, PluginCreateFn>> = La
     let arr: Vec<(&str, PluginCreateFn)> = vec![
         (echo::PLUGIN_NAME, Arc::new(echo::create_echo_plugin)),
         (
-            rate_limit::PLUGIN_NAME,
-            Arc::new(rate_limit::create_rate_limit_plugin),
+            limit_count::PLUGIN_NAME,
+            Arc::new(limit_count::create_limit_count_plugin),
         ),
     ];
     arr.into_iter().collect()
