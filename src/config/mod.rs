@@ -391,6 +391,8 @@ pub enum UpstreamScheme {
     #[default]
     HTTP,
     HTTPS,
+    GRPC,
+    GRPCS,
 }
 
 #[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]

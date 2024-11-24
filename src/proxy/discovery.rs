@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use futures::future::join_all;
 use hickory_resolver::TokioAsyncResolver;
 use once_cell::sync::OnceCell;
+use pingora::protocols::ALPN;
 use pingora::upstreams::peer::HttpPeer;
 use pingora_error::{Error, ErrorType::InternalError, OrErr, Result};
 use pingora_load_balancing::{
@@ -76,8 +77,13 @@ impl ServiceDiscovery for DnsDiscovery {
                 let mut backend = Backend::new(addr).unwrap();
                 backend.weight = self.weight as usize;
 
-                let tls = self.scheme == UpstreamScheme::HTTPS;
-                let uppy = HttpPeer::new(addr, tls, self.name.clone());
+                let tls =
+                    self.scheme == UpstreamScheme::HTTPS || self.scheme == UpstreamScheme::GRPCS;
+                let mut uppy = HttpPeer::new(addr, tls, self.name.clone());
+                if self.scheme == UpstreamScheme::GRPC || self.scheme == UpstreamScheme::GRPCS {
+                    uppy.options.alpn = ALPN::H2;
+                };
+
                 assert!(backend.ext.insert::<HttpPeer>(uppy).is_none());
 
                 backend
@@ -154,14 +160,20 @@ impl TryFrom<Upstream> for HybridDiscovery {
                 let mut backend = Backend::new(addr).unwrap();
                 backend.weight = *weight as usize;
 
-                let tls = upstream.scheme == UpstreamScheme::HTTPS;
+                let tls = upstream.scheme == UpstreamScheme::HTTPS
+                    || upstream.scheme == UpstreamScheme::GRPCS;
                 let sni = if upstream.pass_host == UpstreamPassHost::REWRITE {
                     upstream.upstream_host.clone().unwrap()
                 } else {
                     host
                 };
 
-                let uppy = HttpPeer::new(addr, tls, sni);
+                let mut uppy = HttpPeer::new(addr, tls, sni);
+                if upstream.scheme == UpstreamScheme::GRPC
+                    || upstream.scheme == UpstreamScheme::GRPCS
+                {
+                    uppy.options.alpn = ALPN::H2;
+                };
                 assert!(backend.ext.insert::<HttpPeer>(uppy).is_none());
                 backends.insert(backend);
             }
