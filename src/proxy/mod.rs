@@ -1,19 +1,18 @@
-use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::time::Instant;
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+    time::Instant,
+};
 
-use async_trait::async_trait;
-use http::StatusCode;
-use pingora_core::upstreams::peer::HttpPeer;
-use pingora_error::{Error, Result};
-use pingora_proxy::{ProxyHttp, Session};
+use pingora_http::RequestHeader;
+use pingora_proxy::Session;
+use plugin::ProxyPluginExecutor;
+use router::ProxyRouter;
 
-use router::{MatchEntry, ProxyRouter};
-use upstream::ProxyUpstream;
-
-use crate::config::Config;
+use crate::config;
 
 pub mod discovery;
+pub mod plugin;
 pub mod router;
 pub mod service;
 pub mod upstream;
@@ -27,6 +26,12 @@ pub struct ProxyContext {
 
     pub tries: usize,
     pub request_start: Instant,
+
+    pub plugin: Arc<ProxyPluginExecutor>,
+
+    // Share custom vars between plugins
+    #[allow(dead_code)]
+    pub vars: HashMap<String, String>,
 }
 
 impl Default for ProxyContext {
@@ -36,114 +41,97 @@ impl Default for ProxyContext {
             router_params: BTreeMap::new(),
             tries: 0,
             request_start: Instant::now(),
+            plugin: Arc::new(ProxyPluginExecutor::default()),
+            vars: HashMap::new(),
         }
     }
 }
 
-/// Proxy service.
-///
-/// Manages the proxying of requests to upstream servers.
-#[derive(Default)]
-pub struct ProxyService {
-    pub matcher: MatchEntry,
+/// Build request selector key.
+pub fn request_selector_key(
+    session: &mut Session,
+    hash_on: &config::UpstreamHashOn,
+    key: &str,
+) -> String {
+    match hash_on {
+        config::UpstreamHashOn::VARS => handle_vars(session, key),
+        config::UpstreamHashOn::HEAD => get_req_header_value(session.req_header(), key)
+            .unwrap_or_default()
+            .to_string(),
+        config::UpstreamHashOn::COOKIE => get_cookie_value(session.req_header(), key)
+            .unwrap_or_default()
+            .to_string(),
+    }
 }
 
-#[async_trait]
-impl ProxyHttp for ProxyService {
-    type CTX = ProxyContext;
-
-    /// Creates a new context for each request
-    fn new_ctx(&self) -> Self::CTX {
-        Self::CTX::default()
-    }
-
-    /// Filters incoming requests
-    async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool>
-    where
-        Self::CTX: Send + Sync,
-    {
-        // Match request to pipeline
-        if let Some((router_params, router)) = self.matcher.match_request(session) {
-            ctx.router_params = router_params;
-            ctx.router = Some(router);
-        } else {
-            let _ = session.respond_error(StatusCode::NOT_FOUND.as_u16()).await;
-            return Ok(true);
+/// Handles variable-based request selection.
+fn handle_vars(session: &mut Session, key: &str) -> String {
+    if key.starts_with("arg_") {
+        if let Some(name) = key.strip_prefix("arg_") {
+            return get_query_value(session.req_header(), name)
+                .unwrap_or_default()
+                .to_string();
         }
-
-        Ok(false)
     }
 
-    /// This filter is called when there is an error in the process of establishing a connection to the upstream.
-    fn fail_to_connect(
-        &self,
-        _session: &mut Session,
-        _peer: &HttpPeer,
-        ctx: &mut Self::CTX,
-        mut e: Box<Error>,
-    ) -> Box<Error> {
-        if let Some(router) = ctx.router.as_ref() {
-            let upstream = router.get_upstream().unwrap();
+    match key {
+        "uri" => session.req_header().uri.path().to_string(),
+        "request_uri" => session
+            .req_header()
+            .uri
+            .path_and_query()
+            .map_or_else(|| "".to_string(), |pq| pq.to_string()),
+        "query_string" => session
+            .req_header()
+            .uri
+            .query()
+            .unwrap_or_default()
+            .to_string(),
+        "remote_addr" => session
+            .client_addr()
+            .map_or_else(|| "".to_string(), |addr| addr.to_string()),
+        "remote_port" => session
+            .client_addr()
+            .and_then(|s| s.as_inet())
+            .map_or_else(|| "".to_string(), |i| i.port().to_string()),
+        "server_addr" => session
+            .server_addr()
+            .map_or_else(|| "".to_string(), |addr| addr.to_string()),
+        _ => "".to_string(),
+    }
+}
 
-            if let Some(retries) = upstream.get_retries() {
-                if retries == 0 || ctx.tries >= retries {
-                    return e;
+fn get_query_value<'a>(req_header: &'a RequestHeader, name: &str) -> Option<&'a str> {
+    if let Some(query) = req_header.uri.query() {
+        for item in query.split('&') {
+            if let Some((k, v)) = item.split_once('=') {
+                if k == name {
+                    return Some(v.trim());
                 }
-
-                if let Some(timeout) = upstream.get_retry_timeout() {
-                    if ctx.request_start.elapsed().as_millis() > (timeout * 1000) as u128 {
-                        return e;
-                    }
-                }
-
-                ctx.tries += 1;
-                e.set_retry(true);
-                return e;
             }
         }
-
-        e
     }
-
-    /// Selects an upstream peer for the request
-    async fn upstream_peer(
-        &self,
-        session: &mut Session,
-        ctx: &mut Self::CTX,
-    ) -> Result<Box<HttpPeer>> {
-        ctx.router.as_ref().unwrap().select_http_peer(session)
-    }
-
-    // Modify the request before it is sent to the upstream
-    async fn upstream_request_filter(
-        &self,
-        _session: &mut Session,
-        upstream_request: &mut pingora_http::RequestHeader,
-        ctx: &mut Self::CTX,
-    ) -> Result<()> {
-        // TODO: plugin may rewrite the host header, so we should check the order of the headers
-        let upstream = ctx.router.as_ref().unwrap().get_upstream().unwrap();
-        upstream.upstream_host_rewrite(upstream_request);
-        Ok(())
-    }
+    None
 }
 
-/// Initializes a proxy service from the given configuration.
-pub fn init_proxy_service(config: &Config) -> Result<ProxyService> {
-    let mut proxy_service = ProxyService::default();
-    for router in config.routers.iter() {
-        log::info!("Configuring Router: {}", router.id);
-        let mut proxy_router = ProxyRouter::from(router.clone());
-
-        if let Some(upstream) = router.upstream.clone() {
-            let mut proxy_upstream = ProxyUpstream::try_from(upstream)?;
-            proxy_upstream.start_health_check(config.pingora.work_stealing);
-
-            proxy_router.upstream = Some(Arc::new(proxy_upstream));
+fn get_req_header_value<'a>(req_header: &'a RequestHeader, key: &str) -> Option<&'a str> {
+    if let Some(value) = req_header.headers.get(key) {
+        if let Ok(value) = value.to_str() {
+            return Some(value);
         }
-
-        proxy_service.matcher.insert_router(proxy_router).unwrap();
     }
+    None
+}
 
-    Ok(proxy_service)
+fn get_cookie_value<'a>(req_header: &'a RequestHeader, cookie_name: &str) -> Option<&'a str> {
+    if let Some(cookie_value) = get_req_header_value(req_header, "Cookie") {
+        for item in cookie_value.split(';') {
+            if let Some((k, v)) = item.split_once('=') {
+                if k == cookie_name {
+                    return Some(v.trim());
+                }
+            }
+        }
+    }
+    None
 }

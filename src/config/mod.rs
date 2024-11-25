@@ -5,7 +5,9 @@ use std::{collections::HashMap, fmt};
 use log::{debug, trace};
 use pingora::server::configuration::{Opt, ServerConf};
 use pingora_error::{Error, ErrorType::*, OrErr, Result};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
+use serde_yaml::Value as YamlValue;
 use validator::{Validate, ValidationError};
 
 #[derive(Default, Debug, Serialize, Deserialize, Validate)]
@@ -31,7 +33,7 @@ pub struct Config {
 
 // Config file load and validation
 impl Config {
-    // Does not has to be async until we want runtime reload
+    // Does not have to be async until we want runtime reload
     pub fn load_from_yaml<P>(path: P) -> Result<Self>
     where
         P: AsRef<std::path::Path> + std::fmt::Display,
@@ -98,6 +100,8 @@ pub struct Listener {
     pub tls: Option<Tls>,
     #[serde(default)]
     pub offer_h2: bool,
+    #[serde(default)]
+    pub offer_h2c: bool,
 }
 
 impl Listener {
@@ -129,14 +133,18 @@ pub struct Router {
     pub id: String,
 
     pub uri: Option<String>,
-    pub uris: Option<Vec<String>>,
-    pub methods: Option<Vec<HttpMethod>>,
+    #[serde(default)]
+    pub uris: Vec<String>,
+    #[serde(default)]
+    pub methods: Vec<HttpMethod>,
     pub host: Option<String>,
-    pub hosts: Option<Vec<String>>,
+    #[serde(default)]
+    pub hosts: Vec<String>,
     #[serde(default = "Router::default_priority")]
     pub priority: u32,
 
-    // TODO: pub plugins
+    #[serde(default)]
+    pub plugins: HashMap<String, YamlValue>,
     #[validate(nested)]
     pub upstream: Option<Upstream>,
     pub upstream_id: Option<String>,
@@ -147,7 +155,7 @@ pub struct Router {
 
 impl Router {
     fn validate(&self) -> Result<(), ValidationError> {
-        if self.uri.is_none() && self.uris.as_ref().map_or(true, |v| v.is_empty()) {
+        if self.uri.is_none() && self.uris.is_empty() {
             return Err(ValidationError::new("uri_or_uris_required"));
         }
 
@@ -158,17 +166,17 @@ impl Router {
         Ok(())
     }
 
-    pub fn get_hosts(&self) -> Option<Vec<String>> {
+    pub fn get_hosts(&self) -> Vec<String> {
         if let Some(host) = &self.host {
-            Some(vec![host.to_string()])
+            vec![host.to_string()]
         } else {
             self.hosts.clone()
         }
     }
 
-    pub fn get_uris(&self) -> Option<Vec<String>> {
+    pub fn get_uris(&self) -> Vec<String> {
         if let Some(uri) = &self.uri {
-            Some(vec![uri.to_string()])
+            vec![uri.to_string()]
         } else {
             self.uris.clone()
         }
@@ -219,7 +227,7 @@ pub struct Upstream {
     pub retry_timeout: Option<u64>,
     #[validate(nested)]
     pub timeout: Option<Timeout>,
-    #[validate(length(min = 1))]
+    #[validate(length(min = 1), custom(function = "Upstream::validate_nodes_keys"))]
     pub nodes: HashMap<String, u32>,
     #[serde(default)]
     pub r#type: SelectionType,
@@ -247,6 +255,23 @@ impl Upstream {
         } else {
             Ok(())
         }
+    }
+
+    // Custom validation function for `nodes` keys
+    fn validate_nodes_keys(nodes: &HashMap<String, u32>) -> Result<(), ValidationError> {
+        // Define the regular expression for valid keys
+        let re =
+            Regex::new(r"(?i)^(?:(?:\d{1,3}\.){3}\d{1,3}|\[[0-9a-f:]+\]|[a-z0-9.-]+)(?::\d+)?$")
+                .unwrap();
+
+        for key in nodes.keys() {
+            if !re.is_match(key) {
+                let mut err = ValidationError::new("invalid_node_key");
+                err.add_param("key".into(), &key.to_string());
+                return Err(err);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -366,6 +391,8 @@ pub enum UpstreamScheme {
     #[default]
     HTTP,
     HTTPS,
+    GRPC,
+    GRPCS,
 }
 
 #[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
@@ -380,7 +407,8 @@ pub enum UpstreamPassHost {
 #[validate(schema(function = "Service::validate_upstream"))]
 pub struct Service {
     pub id: String,
-    // TODO: pub plugins
+    #[serde(default)]
+    pub plugins: HashMap<String, YamlValue>,
     pub upstream: Option<Upstream>,
     pub upstream_id: Option<String>,
     #[serde(default)]
@@ -464,6 +492,63 @@ services:
         assert_eq!(2, conf.listeners.len());
         assert_eq!(1, conf.routers.len());
         assert_eq!(1, conf.upstreams.len());
+        assert_eq!(1, conf.services.len());
+        print!("{}", conf.to_yaml());
+    }
+
+    #[test]
+    fn test_load_file_upstream_id() {
+        init_log();
+        let conf_str = r#"
+---
+pingora:
+  version: 1
+  client_bind_to_ipv4:
+      - 1.2.3.4
+      - 5.6.7.8
+  client_bind_to_ipv6: []
+
+listeners:
+  - address: 0.0.0.0:8080
+    offer_h2c: true
+  - address: "[::1]:8080"
+    tls:
+      cert_path: /etc/ssl/server.crt
+      key_path: /etc/ssl/server.key
+    offer_h2: true
+
+routers:
+  - id: 1
+    uri: /
+    upstream_id: 1
+
+upstreams:
+  - nodes:
+      "127.0.0.1:1980": 1
+    id: 1
+    checks:
+      active:
+        type: http
+  - nodes:
+      "127.0.0.1:1981": 1
+    id: 2
+    checks:
+      active:
+        type: http
+
+services:
+  - id: 1
+    upstream_id: 1
+    hosts: ["example.com"]
+        "#
+        .to_string();
+        let conf = Config::from_yaml(&conf_str).unwrap();
+        assert_eq!(2, conf.pingora.client_bind_to_ipv4.len());
+        assert_eq!(0, conf.pingora.client_bind_to_ipv6.len());
+        assert_eq!(1, conf.pingora.version);
+        assert_eq!(2, conf.listeners.len());
+        assert_eq!(1, conf.routers.len());
+        assert_eq!(2, conf.upstreams.len());
         assert_eq!(1, conf.services.len());
         print!("{}", conf.to_yaml());
     }

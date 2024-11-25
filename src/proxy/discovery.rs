@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use futures::future::join_all;
 use hickory_resolver::TokioAsyncResolver;
 use once_cell::sync::OnceCell;
+use pingora::protocols::ALPN;
 use pingora::upstreams::peer::HttpPeer;
 use pingora_error::{Error, ErrorType::InternalError, OrErr, Result};
 use pingora_load_balancing::{
@@ -14,7 +15,7 @@ use pingora_load_balancing::{
 };
 use regex::Regex;
 
-use crate::config::{Upstream, UpstreamScheme};
+use crate::config::{Upstream, UpstreamPassHost, UpstreamScheme};
 
 static GLOBAL_RESOLVER: OnceCell<Arc<TokioAsyncResolver>> = OnceCell::new();
 
@@ -76,8 +77,13 @@ impl ServiceDiscovery for DnsDiscovery {
                 let mut backend = Backend::new(addr).unwrap();
                 backend.weight = self.weight as usize;
 
-                let tls = self.scheme == UpstreamScheme::HTTPS;
-                let uppy = HttpPeer::new(addr, tls, self.name.clone());
+                let tls =
+                    self.scheme == UpstreamScheme::HTTPS || self.scheme == UpstreamScheme::GRPCS;
+                let mut uppy = HttpPeer::new(addr, tls, self.name.clone());
+                if self.scheme == UpstreamScheme::GRPC || self.scheme == UpstreamScheme::GRPCS {
+                    uppy.options.alpn = ALPN::H2;
+                };
+
                 assert!(backend.ext.insert::<HttpPeer>(uppy).is_none());
 
                 backend
@@ -92,8 +98,7 @@ impl ServiceDiscovery for DnsDiscovery {
 /// Combines static and DNS-based service discovery.
 #[derive(Default)]
 pub struct HybridDiscovery {
-    static_discovery: Option<Box<Static>>,
-    dns_discoveries: Vec<DnsDiscovery>,
+    discoveries: Vec<Box<dyn ServiceDiscovery + Send + Sync>>,
 }
 
 #[async_trait]
@@ -105,26 +110,18 @@ impl ServiceDiscovery for HybridDiscovery {
         let mut backends = BTreeSet::new();
         let mut health_checks = HashMap::new();
 
-        // 1. Process static discovery first (if available)
-        if let Some(static_discovery) = &self.static_discovery {
-            let (static_backends, static_health_checks) = static_discovery.discover().await?;
-            backends.extend(static_backends);
-            health_checks.extend(static_health_checks);
-        }
-
-        // 2. Process DNS discoveries concurrently, ignoring errors
-        let dns_futures = self.dns_discoveries.iter().map(|discovery| async move {
+        let futures = self.discoveries.iter().map(|discovery| async move {
             discovery.discover().await.map_err(|e| {
-                log::warn!("DNS discovery for '{}' failed: {}", &discovery.name, e);
+                log::warn!("Hydrid discovery failed: {}", e);
                 e
             })
         });
 
-        let dns_results = join_all(dns_futures).await;
+        let results = join_all(futures).await;
 
-        for (dns_backends, dns_health_checks) in dns_results.into_iter().flatten() {
-            backends.extend(dns_backends);
-            health_checks.extend(dns_health_checks);
+        for (part_backends, part_health_checks) in results.into_iter().flatten() {
+            backends.extend(part_backends);
+            health_checks.extend(part_health_checks);
         }
 
         Ok((backends, health_checks))
@@ -149,13 +146,13 @@ impl TryFrom<Upstream> for HybridDiscovery {
             if host.parse::<IpAddr>().is_err() {
                 // host is a domain name
                 let resolver = get_global_resolver();
-                this.dns_discoveries.push(DnsDiscovery::new(
+                this.discoveries.push(Box::new(DnsDiscovery::new(
                     host,
                     port,
                     upstream.scheme,
                     *weight,
                     resolver,
-                ));
+                )));
             } else {
                 let addr =
                     &SocketAddr::new(host.parse::<IpAddr>().unwrap(), port as u16).to_string();
@@ -163,15 +160,27 @@ impl TryFrom<Upstream> for HybridDiscovery {
                 let mut backend = Backend::new(addr).unwrap();
                 backend.weight = *weight as usize;
 
-                // !! for now we don't support TLS for static upstream
-                let uppy = HttpPeer::new(addr, false, "".to_string());
+                let tls = upstream.scheme == UpstreamScheme::HTTPS
+                    || upstream.scheme == UpstreamScheme::GRPCS;
+                let sni = if upstream.pass_host == UpstreamPassHost::REWRITE {
+                    upstream.upstream_host.clone().unwrap()
+                } else {
+                    host
+                };
+
+                let mut uppy = HttpPeer::new(addr, tls, sni);
+                if upstream.scheme == UpstreamScheme::GRPC
+                    || upstream.scheme == UpstreamScheme::GRPCS
+                {
+                    uppy.options.alpn = ALPN::H2;
+                };
                 assert!(backend.ext.insert::<HttpPeer>(uppy).is_none());
                 backends.insert(backend);
             }
         }
 
         if !backends.is_empty() {
-            this.static_discovery = Some(Static::new(backends));
+            this.discoveries.push(Static::new(backends));
         }
 
         Ok(this)
