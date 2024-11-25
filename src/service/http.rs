@@ -4,6 +4,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use bytes::Bytes;
 use http::StatusCode;
+use pingora::modules::http::HttpModules;
+use pingora::modules::http::{compression::ResponseCompressionBuilder, grpc_web::GrpcWeb};
 use pingora_core::upstreams::peer::HttpPeer;
 use pingora_error::{Error, Result};
 use pingora_http::ResponseHeader;
@@ -41,23 +43,39 @@ impl ProxyHttp for HttpService {
         ctx.router.as_ref().unwrap().select_http_peer(session)
     }
 
+    /// Set up downstream modules.
+    ///
+    /// set up [ResponseCompressionBuilder] for gzip and brotli compression.
+    /// set up [GrpcWeb] for grpc-web protocol.
+    fn init_downstream_modules(&self, modules: &mut HttpModules) {
+        // Add disabled downstream compression module by default
+        modules.add_module(ResponseCompressionBuilder::enable(0));
+        // Add the gRPC web module
+        modules.add_module(Box::new(GrpcWeb));
+    }
+
     /// Filters incoming requests
-    async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool>
-    where
-        Self::CTX: Send + Sync,
-    {
-        // Match request to pipeline
-        if let Some((router_params, router)) = self.matcher.match_request(session) {
-            ctx.router_params = router_params;
-            ctx.router = Some(router.clone());
-            ctx.plugin = build_plugin_executor(router);
-        } else {
+    async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
+        if ctx.router.is_none() {
             let _ = session.respond_error(StatusCode::NOT_FOUND.as_u16()).await;
             return Ok(true);
         }
 
         // execute plugins
         ctx.plugin.clone().request_filter(session, ctx).await
+    }
+
+    /// Handle the incoming request before any downstream module is executed.
+    async fn early_request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<()> {
+        // Match request to pipeline
+        if let Some((router_params, router)) = self.matcher.match_request(session) {
+            ctx.router_params = router_params;
+            ctx.router = Some(router.clone());
+            ctx.plugin = build_plugin_executor(router);
+        }
+
+        // execute plugins
+        ctx.plugin.clone().early_request_filter(session, ctx).await
     }
 
     async fn request_body_filter(
