@@ -58,7 +58,7 @@ routers:
           unhealthy:
             http_failures: 5
             tcp_failures: 2
-      hash_on: vars # supported types: vars, cookie, header
+      hash_on: vars # supported types: vars, cookie, head
       key: uri
       pass_host: rewrite
       upstream_host: www.baidu.com
@@ -74,6 +74,15 @@ routers:
     uri: /
     host: www.163.com
     service_id: 2
+  - id: 5
+    uri: /echo
+    host: www.163.com
+    service_id: 2
+    plugins:
+      echo:
+        body: "Hello world!"
+        headers:
+          X-TEST: demo
 
 upstreams:
   - id: 1
@@ -99,3 +108,11 @@ services:
         "www.163.com": 1
       type: roundrobin
       scheme: http
+    plugins:
+      limit-count:
+        key_type: head
+        key: Host
+        time_window: 1
+        count: 1
+        rejected_code: 429
+        rejected_msg: "Pleas slow down!"

@@ -5,12 +5,13 @@ use std::time;
 use matchit::{InsertError, Router as MatchRouter};
 use pingora_core::upstreams::peer::HttpPeer;
 use pingora_error::{Error, Result};
-use pingora_http::RequestHeader;
 use pingora_proxy::Session;
 
-use crate::config::{Router, Timeout};
+use crate::config;
 
 use super::{
+    get_request_host,
+    plugin::ProxyPlugin,
     service::service_fetch,
     upstream::{upstream_fetch, ProxyUpstream},
 };
@@ -19,16 +20,18 @@ use super::{
 ///
 /// Manages routing of requests to appropriate proxy load balancers.
 pub struct ProxyRouter {
-    pub inner: Router,
+    pub inner: config::Router,
     pub upstream: Option<Arc<ProxyUpstream>>,
+    pub plugins: Vec<Arc<dyn ProxyPlugin>>,
 }
 
-impl From<Router> for ProxyRouter {
+impl From<config::Router> for ProxyRouter {
     /// Creates a new `ProxyRouter` instance from a `Router` configuration.
-    fn from(value: Router) -> Self {
+    fn from(value: config::Router) -> Self {
         Self {
             inner: value,
             upstream: None,
+            plugins: Vec::new(),
         }
     }
 }
@@ -58,20 +61,20 @@ impl ProxyRouter {
     }
 
     /// Gets the list of hosts for the router.
-    fn get_hosts(&self) -> Option<Vec<String>> {
+    fn get_hosts(&self) -> Vec<String> {
         let hosts = self.inner.get_hosts();
-        if hosts.is_some() {
+        if !hosts.is_empty() {
             return hosts;
         }
 
         if self.inner.service_id.is_some() {
             let service = service_fetch(&self.inner.service_id.clone().unwrap());
             if let Some(service) = service {
-                return Some(service.inner.hosts.clone());
+                return service.inner.hosts.clone();
             }
         }
 
-        None
+        vec![]
     }
 }
 
@@ -99,7 +102,7 @@ impl ProxyRouter {
 
     /// Sets the timeout for an `HttpPeer` based on the router configuration.
     fn set_timeout(&self, p: &mut HttpPeer) {
-        if let Some(Timeout {
+        if let Some(config::Timeout {
             connect,
             read,
             send,
@@ -123,8 +126,8 @@ pub struct MatchEntry {
 impl MatchEntry {
     /// Inserts a router into the match entry.
     pub fn insert_router(&mut self, proxy_router: ProxyRouter) -> Result<(), InsertError> {
-        let hosts = proxy_router.get_hosts().unwrap_or_default();
-        let uris = proxy_router.inner.get_uris().unwrap_or_default();
+        let hosts = proxy_router.get_hosts();
+        let uris = proxy_router.inner.get_uris();
         let proxy_router = Arc::new(proxy_router);
 
         if hosts.is_empty() {
@@ -188,18 +191,20 @@ impl MatchEntry {
             method
         );
 
-        if host.map_or(true, |v| v.is_empty()) {
-            // Match non-host uri
-            return Self::match_uri(&self.non_host_uri, uri, method);
-        } else {
-            // Match host uri
-            let reversed_host = host.unwrap().chars().rev().collect::<String>();
-            if let Ok(v) = self.host_uris.at(reversed_host.as_str()) {
-                return Self::match_uri(v.value, uri, method);
+        // Attempt to match using host_uris if a valid host is provided
+        if let Some(reversed_host) = host
+            .filter(|h| !h.is_empty())
+            .map(|h| h.chars().rev().collect::<String>())
+        {
+            if let Ok(v) = self.host_uris.at(&reversed_host) {
+                if let Some(result) = Self::match_uri(v.value, uri, method) {
+                    return Some(result);
+                }
             }
         }
 
-        None
+        // Fall back to non-host URI matching
+        Self::match_uri(&self.non_host_uri, uri, method)
     }
 
     /// Matches a URI to a router.
@@ -216,7 +221,7 @@ impl MatchEntry {
                 .collect();
 
             for router in v.value.iter() {
-                if router.inner.methods.is_none() {
+                if router.inner.methods.is_empty() {
                     return Some((params, router.clone()));
                 }
 
@@ -224,8 +229,6 @@ impl MatchEntry {
                 if router
                     .inner
                     .methods
-                    .clone()
-                    .unwrap()
                     .iter()
                     .map(|method| method.to_string())
                     .collect::<Vec<String>>()
@@ -237,17 +240,4 @@ impl MatchEntry {
         }
         None
     }
-}
-
-/// Retrieves the request host from the request header.
-fn get_request_host(header: &RequestHeader) -> Option<&str> {
-    if let Some(host) = header.uri.host() {
-        return Some(host);
-    }
-    if let Some(host) = header.headers.get(http::header::HOST) {
-        if let Ok(value) = host.to_str().map(|host| host.split(':').next()) {
-            return value;
-        }
-    }
-    None
 }

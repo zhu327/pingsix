@@ -23,62 +23,27 @@ use pingora_proxy::Session;
 use pingora_runtime::Runtime;
 use tokio::sync::watch;
 
-use crate::config::{
-    ActiveCheckType, Config, HealthCheck, SelectionType, Timeout, Upstream, UpstreamHashOn,
-    UpstreamPassHost,
-};
+use crate::config;
 
 use super::discovery::HybridDiscovery;
-
-// Define a global upstream map, initialized lazily
-static UPSTREAM_MAP: Lazy<RwLock<HashMap<String, Arc<ProxyUpstream>>>> =
-    Lazy::new(|| RwLock::new(HashMap::new()));
-
-/// Loads upstreams from the given configuration.
-pub fn load_upstreams(config: &Config) -> Result<()> {
-    let mut map = UPSTREAM_MAP
-        .write()
-        .expect("Failed to acquire write lock on the upstream map");
-
-    for upstream in config.upstreams.iter() {
-        info!(
-            "Configuring Upstream: {}",
-            upstream.id.clone().expect("Upstream ID is missing")
-        );
-
-        let mut proxy_upstream = ProxyUpstream::try_from(upstream.clone())?;
-        proxy_upstream.start_health_check(config.pingora.work_stealing);
-
-        map.insert(upstream.id.clone().unwrap(), Arc::new(proxy_upstream));
-    }
-
-    Ok(())
-}
-
-/// Fetches an upstream by its ID.
-pub fn upstream_fetch(id: &str) -> Option<Arc<ProxyUpstream>> {
-    let map = UPSTREAM_MAP
-        .read()
-        .expect("Failed to acquire read lock on the upstream map");
-    map.get(id).cloned()
-}
+use super::request_selector_key;
 
 /// Proxy load balancer.
 ///
 /// Manages the load balancing of requests to upstream servers.
 pub struct ProxyUpstream {
-    pub inner: Upstream,
+    pub inner: config::Upstream,
     lb: SelectionLB,
 
     runtime: Option<Runtime>,
     watch: Option<watch::Sender<bool>>,
 }
 
-impl TryFrom<Upstream> for ProxyUpstream {
+impl TryFrom<config::Upstream> for ProxyUpstream {
     type Error = Box<Error>;
 
     /// Creates a new `ProxyLB` instance from an `Upstream` configuration.
-    fn try_from(value: Upstream) -> Result<Self> {
+    fn try_from(value: config::Upstream) -> Result<Self> {
         Ok(Self {
             inner: value.clone(),
             lb: SelectionLB::try_from(value)?,
@@ -137,7 +102,7 @@ impl ProxyUpstream {
 
     /// Rewrites the upstream host in the request header if needed.
     pub fn upstream_host_rewrite(&self, upstream_request: &mut RequestHeader) {
-        if self.inner.pass_host == UpstreamPassHost::REWRITE {
+        if self.inner.pass_host == config::UpstreamPassHost::REWRITE {
             if let Some(host) = &self.inner.upstream_host {
                 upstream_request
                     .insert_header(http::header::HOST, host)
@@ -175,7 +140,7 @@ impl ProxyUpstream {
 
     /// Sets the timeout for an `HttpPeer`.
     fn set_timeout(&self, p: &mut HttpPeer) {
-        if let Some(Timeout {
+        if let Some(config::Timeout {
             connect,
             read,
             send,
@@ -202,17 +167,21 @@ enum SelectionLB {
     Ketama(LB<KetamaHashing>),
 }
 
-impl TryFrom<Upstream> for SelectionLB {
+impl TryFrom<config::Upstream> for SelectionLB {
     type Error = Box<Error>;
 
-    fn try_from(value: Upstream) -> Result<Self> {
+    fn try_from(value: config::Upstream) -> Result<Self> {
         match value.r#type {
-            SelectionType::RoundRobin => {
+            config::SelectionType::RoundRobin => {
                 Ok(SelectionLB::RoundRobin(LB::<RoundRobin>::try_from(value)?))
             }
-            SelectionType::Random => Ok(SelectionLB::Random(LB::<Random>::try_from(value)?)),
-            SelectionType::Fnv => Ok(SelectionLB::Fnv(LB::<FVNHash>::try_from(value)?)),
-            SelectionType::Ketama => Ok(SelectionLB::Ketama(LB::<KetamaHashing>::try_from(value)?)),
+            config::SelectionType::Random => {
+                Ok(SelectionLB::Random(LB::<Random>::try_from(value)?))
+            }
+            config::SelectionType::Fnv => Ok(SelectionLB::Fnv(LB::<FVNHash>::try_from(value)?)),
+            config::SelectionType::Ketama => {
+                Ok(SelectionLB::Ketama(LB::<KetamaHashing>::try_from(value)?))
+            }
         }
     }
 }
@@ -222,14 +191,14 @@ struct LB<BS: BackendSelection> {
     service: Option<Box<dyn Service + 'static>>,
 }
 
-impl<BS> TryFrom<Upstream> for LB<BS>
+impl<BS> TryFrom<config::Upstream> for LB<BS>
 where
     BS: BackendSelection + Send + Sync + 'static,
     BS::Iter: BackendIter,
 {
     type Error = Box<Error>;
 
-    fn try_from(upstream: Upstream) -> Result<Self> {
+    fn try_from(upstream: config::Upstream) -> Result<Self> {
         let discovery: HybridDiscovery = upstream.clone().try_into()?;
         let mut upstreams = LoadBalancer::<BS>::from_backends(Backends::new(Box::new(discovery)));
 
@@ -257,14 +226,14 @@ where
     }
 }
 
-impl From<HealthCheck> for Box<(dyn HealthCheckTrait + Send + Sync + 'static)> {
-    fn from(value: HealthCheck) -> Self {
+impl From<config::HealthCheck> for Box<(dyn HealthCheckTrait + Send + Sync + 'static)> {
+    fn from(value: config::HealthCheck) -> Self {
         match value.active.r#type {
-            ActiveCheckType::TCP => {
+            config::ActiveCheckType::TCP => {
                 let health_check: Box<TcpHealthCheck> = value.into();
                 health_check
             }
-            ActiveCheckType::HTTP | ActiveCheckType::HTTPS => {
+            config::ActiveCheckType::HTTP | config::ActiveCheckType::HTTPS => {
                 let health_check: Box<HttpHealthCheck> = value.into();
                 health_check
             }
@@ -272,8 +241,8 @@ impl From<HealthCheck> for Box<(dyn HealthCheckTrait + Send + Sync + 'static)> {
     }
 }
 
-impl From<HealthCheck> for Box<TcpHealthCheck> {
-    fn from(value: HealthCheck) -> Self {
+impl From<config::HealthCheck> for Box<TcpHealthCheck> {
+    fn from(value: config::HealthCheck) -> Self {
         let mut health_check = TcpHealthCheck::new();
         health_check.peer_template.options.total_connection_timeout =
             Some(Duration::from_secs(value.active.timeout as u64));
@@ -290,10 +259,10 @@ impl From<HealthCheck> for Box<TcpHealthCheck> {
     }
 }
 
-impl From<HealthCheck> for Box<HttpHealthCheck> {
-    fn from(value: HealthCheck) -> Self {
+impl From<config::HealthCheck> for Box<HttpHealthCheck> {
+    fn from(value: config::HealthCheck) -> Self {
         let host = value.active.host.unwrap_or_default();
-        let tls = value.active.r#type == ActiveCheckType::HTTPS;
+        let tls = value.active.r#type == config::ActiveCheckType::HTTPS;
         let mut health_check = HttpHealthCheck::new(host.as_str(), tls);
 
         health_check.peer_template.options.total_connection_timeout =
@@ -346,86 +315,35 @@ impl From<HealthCheck> for Box<HttpHealthCheck> {
     }
 }
 
-fn get_query_value<'a>(req_header: &'a RequestHeader, name: &str) -> Option<&'a str> {
-    if let Some(query) = req_header.uri.query() {
-        for item in query.split('&') {
-            if let Some((k, v)) = item.split_once('=') {
-                if k == name {
-                    return Some(v.trim());
-                }
-            }
-        }
+// Define a global upstream map, initialized lazily
+static UPSTREAM_MAP: Lazy<RwLock<HashMap<String, Arc<ProxyUpstream>>>> =
+    Lazy::new(|| RwLock::new(HashMap::new()));
+
+/// Loads upstreams from the given configuration.
+pub fn load_upstreams(config: &config::Config) -> Result<()> {
+    let mut map = UPSTREAM_MAP
+        .write()
+        .expect("Failed to acquire write lock on the upstream map");
+
+    for upstream in config.upstreams.iter() {
+        info!(
+            "Configuring Upstream: {}",
+            upstream.id.clone().expect("Upstream ID is missing")
+        );
+
+        let mut proxy_upstream = ProxyUpstream::try_from(upstream.clone())?;
+        proxy_upstream.start_health_check(config.pingora.work_stealing);
+
+        map.insert(upstream.id.clone().unwrap(), Arc::new(proxy_upstream));
     }
-    None
+
+    Ok(())
 }
 
-fn get_req_header_value<'a>(req_header: &'a RequestHeader, key: &str) -> Option<&'a str> {
-    if let Some(value) = req_header.headers.get(key) {
-        if let Ok(value) = value.to_str() {
-            return Some(value);
-        }
-    }
-    None
-}
-
-fn get_cookie_value<'a>(req_header: &'a RequestHeader, cookie_name: &str) -> Option<&'a str> {
-    if let Some(cookie_value) = get_req_header_value(req_header, "Cookie") {
-        for item in cookie_value.split(';') {
-            if let Some((k, v)) = item.split_once('=') {
-                if k == cookie_name {
-                    return Some(v.trim());
-                }
-            }
-        }
-    }
-    None
-}
-
-pub fn request_selector_key(session: &mut Session, hash_on: &UpstreamHashOn, key: &str) -> String {
-    match hash_on {
-        UpstreamHashOn::VARS => handle_vars(session, key),
-        UpstreamHashOn::HEAD => get_req_header_value(session.req_header(), key)
-            .unwrap_or_default()
-            .to_string(),
-        UpstreamHashOn::COOKIE => get_cookie_value(session.req_header(), key)
-            .unwrap_or_default()
-            .to_string(),
-    }
-}
-
-/// Handles variable-based request selection.
-fn handle_vars(session: &mut Session, key: &str) -> String {
-    if key.starts_with("arg_") {
-        if let Some(name) = key.strip_prefix("arg_") {
-            return get_query_value(session.req_header(), name)
-                .unwrap_or_default()
-                .to_string();
-        }
-    }
-
-    match key {
-        "uri" => session.req_header().uri.path().to_string(),
-        "request_uri" => session
-            .req_header()
-            .uri
-            .path_and_query()
-            .map_or_else(|| "".to_string(), |pq| pq.to_string()),
-        "query_string" => session
-            .req_header()
-            .uri
-            .query()
-            .unwrap_or_default()
-            .to_string(),
-        "remote_addr" => session
-            .client_addr()
-            .map_or_else(|| "".to_string(), |addr| addr.to_string()),
-        "remote_port" => session
-            .client_addr()
-            .and_then(|s| s.as_inet())
-            .map_or_else(|| "".to_string(), |i| i.port().to_string()),
-        "server_addr" => session
-            .server_addr()
-            .map_or_else(|| "".to_string(), |addr| addr.to_string()),
-        _ => "".to_string(),
-    }
+/// Fetches an upstream by its ID.
+pub fn upstream_fetch(id: &str) -> Option<Arc<ProxyUpstream>> {
+    let map = UPSTREAM_MAP
+        .read()
+        .expect("Failed to acquire read lock on the upstream map");
+    map.get(id).cloned()
 }
