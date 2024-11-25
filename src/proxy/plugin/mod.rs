@@ -13,7 +13,10 @@ use crate::proxy::ProxyContext;
 
 use super::{router::ProxyRouter, service::service_fetch};
 
+pub mod brotli;
 pub mod echo;
+pub mod grpc_web;
+pub mod gzip;
 pub mod limit_count;
 
 /// Type alias for plugin initialization functions
@@ -27,6 +30,12 @@ static PLUGIN_BUILDER_REGISTRY: Lazy<HashMap<&'static str, PluginCreateFn>> = La
             limit_count::PLUGIN_NAME,
             Arc::new(limit_count::create_limit_count_plugin),
         ),
+        (
+            grpc_web::PLUGIN_NAME,
+            Arc::new(grpc_web::create_grpc_web_plugin),
+        ),
+        (gzip::PLUGIN_NAME, Arc::new(gzip::create_gzip_plugin)),
+        (brotli::PLUGIN_NAME, Arc::new(brotli::create_brotli_plugin)),
     ];
     arr.into_iter().collect()
 });
@@ -131,6 +140,15 @@ pub trait ProxyPlugin: Send + Sync {
         _ctx: &mut ProxyContext,
     ) -> Result<bool> {
         Ok(false)
+    }
+
+    /// Handle the incoming request before any downstream module is executed.
+    async fn early_request_filter(
+        &self,
+        _session: &mut Session,
+        _ctx: &mut ProxyContext,
+    ) -> Result<()> {
+        Ok(())
     }
 
     /// Handle the incoming request body.
@@ -251,6 +269,17 @@ impl ProxyPlugin for ProxyPluginExecutor {
             }
         }
         Ok(false)
+    }
+
+    async fn early_request_filter(
+        &self,
+        session: &mut Session,
+        ctx: &mut ProxyContext,
+    ) -> Result<()> {
+        for plugin in self.plugins.iter() {
+            plugin.early_request_filter(session, ctx).await?;
+        }
+        Ok(())
     }
 
     async fn request_body_filter(

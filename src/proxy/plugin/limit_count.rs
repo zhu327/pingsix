@@ -8,7 +8,6 @@ use pingora_limits::rate::Rate;
 use pingora_proxy::Session;
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value as YamlValue;
-use validator::Validate;
 
 use crate::config::UpstreamHashOn;
 use crate::proxy::request_selector_key;
@@ -27,7 +26,7 @@ pub fn create_limit_count_plugin(cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>>
     Ok(Arc::new(PluginRateLimit { config, rate }))
 }
 
-#[derive(Default, Debug, Serialize, Deserialize, Validate)]
+#[derive(Default, Debug, Serialize, Deserialize)]
 struct PluginConfig {
     key_type: UpstreamHashOn,
     key: String,
@@ -73,21 +72,17 @@ impl ProxyPlugin for PluginRateLimit {
         // retrieve the current window requests
         let curr_window_requests = self.rate.observe(&key, 1);
         if curr_window_requests > self.config.count as isize {
-            let mut header = ResponseHeader::build(self.config.rejected_code, None).unwrap();
+            let mut header = ResponseHeader::build(self.config.rejected_code, None)?;
             if self.config.show_limit_quota_header {
-                header
-                    .insert_header("X-Rate-Limit-Limit", self.config.count.to_string())
-                    .unwrap();
-                header.insert_header("X-Rate-Limit-Remaining", "0").unwrap();
-                header.insert_header("X-Rate-Limit-Reset", "1").unwrap();
+                header.insert_header("X-Rate-Limit-Limit", self.config.count.to_string())?;
+                header.insert_header("X-Rate-Limit-Remaining", "0")?;
+                header.insert_header("X-Rate-Limit-Reset", "1")?;
             }
 
             session.set_keepalive(None);
 
             if let Some(msg) = self.config.rejected_msg.clone() {
-                header
-                    .insert_header(header::CONTENT_LENGTH, msg.len().to_string())
-                    .unwrap();
+                header.insert_header(header::CONTENT_LENGTH, msg.len().to_string())?;
                 session
                     .write_response_header(Box::new(header), false)
                     .await?;
