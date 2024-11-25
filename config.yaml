@@ -7,6 +7,12 @@ pingora:
   user: nobody
   group: webusers
 
+prometheus:
+  address: 0.0.0.0:8081
+
+sentry:
+  dsn: https://1234567890@sentry.io/123456
+
 # listener on TCP or TLS
 listeners:
   - address: 0.0.0.0:8080
