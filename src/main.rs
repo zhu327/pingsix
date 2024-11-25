@@ -1,10 +1,12 @@
 #![allow(clippy::upper_case_acronyms)]
 
+use pingora::services::listening::Service;
 use pingora_core::apps::HttpServerOptions;
 use pingora_core::listeners::tls::TlsSettings;
 use pingora_core::server::configuration::Opt;
 use pingora_core::server::Server;
 use pingora_proxy::http_proxy_service_with_name;
+use sentry::IntoDsn;
 
 use config::{Config, Tls};
 use proxy::{service::load_services, upstream::load_upstreams};
@@ -70,12 +72,27 @@ fn main() {
         }
     }
 
+    if let Some(ref sentry_cfg) = config.sentry {
+        log::info!("Adding Sentry config...");
+        pingsix_server.sentry = Some(sentry::ClientOptions {
+            dsn: sentry_cfg.dsn.clone().into_dsn().unwrap(),
+            ..Default::default()
+        });
+    }
+
     // Bootstrapping and server startup
     log::info!("Bootstrapping...");
     pingsix_server.bootstrap();
 
     log::info!("Bootstrapped. Adding Services...");
     pingsix_server.add_service(http_service);
+
+    if let Some(ref prometheus_cfg) = config.prometheus {
+        log::info!("Adding Prometheus Service...");
+        let mut prometheus_service_http = Service::prometheus_http_service();
+        prometheus_service_http.add_tcp(&prometheus_cfg.address.to_string());
+        pingsix_server.add_service(prometheus_service_http);
+    }
 
     log::info!("Starting Server...");
     pingsix_server.run_forever();

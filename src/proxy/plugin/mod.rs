@@ -18,6 +18,7 @@ pub mod echo;
 pub mod grpc_web;
 pub mod gzip;
 pub mod limit_count;
+pub mod prometheus;
 
 /// Type alias for plugin initialization functions
 pub type PluginCreateFn = Arc<dyn Fn(YamlValue) -> Result<Arc<dyn ProxyPlugin>> + Send + Sync>;
@@ -36,6 +37,10 @@ static PLUGIN_BUILDER_REGISTRY: Lazy<HashMap<&'static str, PluginCreateFn>> = La
         ),
         (gzip::PLUGIN_NAME, Arc::new(gzip::create_gzip_plugin)),
         (brotli::PLUGIN_NAME, Arc::new(brotli::create_brotli_plugin)),
+        (
+            prometheus::PLUGIN_NAME,
+            Arc::new(prometheus::create_prometheus_plugin),
+        ),
     ];
     arr.into_iter().collect()
 });
