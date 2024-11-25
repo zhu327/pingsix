@@ -86,9 +86,8 @@ impl ProxyPlugin for PluginPrometheus {
         let uri = ctx
             .router
             .clone()
-            .clone()
             .map_or("", |_| session.req_header().uri.path());
-        let host = ctx.router.clone().clone().map_or("", |_| {
+        let host = ctx.router.clone().map_or("", |_| {
             get_request_host(session.req_header()).unwrap_or_default()
         });
         let service = ctx.router.clone().map_or(String::new(), |r| {
