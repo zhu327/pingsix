@@ -135,3 +135,16 @@ fn get_cookie_value<'a>(req_header: &'a RequestHeader, cookie_name: &str) -> Opt
     }
     None
 }
+
+/// Retrieves the request host from the request header.
+pub fn get_request_host(header: &RequestHeader) -> Option<&str> {
+    if let Some(host) = header.uri.host() {
+        return Some(host);
+    }
+    if let Some(host) = header.headers.get(http::header::HOST) {
+        if let Ok(value) = host.to_str().map(|host| host.split(':').next()) {
+            return value;
+        }
+    }
+    None
+}

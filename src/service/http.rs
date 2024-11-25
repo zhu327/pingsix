@@ -8,7 +8,7 @@ use pingora::modules::http::HttpModules;
 use pingora::modules::http::{compression::ResponseCompressionBuilder, grpc_web::GrpcWeb};
 use pingora_core::upstreams::peer::HttpPeer;
 use pingora_error::{Error, Result};
-use pingora_http::ResponseHeader;
+use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_proxy::{ProxyHttp, Session};
 
 use crate::config::Config;
@@ -57,7 +57,9 @@ impl ProxyHttp for HttpService {
     /// Filters incoming requests
     async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
         if ctx.router.is_none() {
-            let _ = session.respond_error(StatusCode::NOT_FOUND.as_u16()).await;
+            session
+                .respond_error(StatusCode::NOT_FOUND.as_u16())
+                .await?;
             return Ok(true);
         }
 
@@ -96,7 +98,7 @@ impl ProxyHttp for HttpService {
     async fn upstream_request_filter(
         &self,
         session: &mut Session,
-        upstream_request: &mut pingora_http::RequestHeader,
+        upstream_request: &mut RequestHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
         // execute plugins

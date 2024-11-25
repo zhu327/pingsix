@@ -5,12 +5,12 @@ use std::time;
 use matchit::{InsertError, Router as MatchRouter};
 use pingora_core::upstreams::peer::HttpPeer;
 use pingora_error::{Error, Result};
-use pingora_http::RequestHeader;
 use pingora_proxy::Session;
 
 use crate::config;
 
 use super::{
+    get_request_host,
     plugin::ProxyPlugin,
     service::service_fetch,
     upstream::{upstream_fetch, ProxyUpstream},
@@ -240,17 +240,4 @@ impl MatchEntry {
         }
         None
     }
-}
-
-/// Retrieves the request host from the request header.
-fn get_request_host(header: &RequestHeader) -> Option<&str> {
-    if let Some(host) = header.uri.host() {
-        return Some(host);
-    }
-    if let Some(host) = header.headers.get(http::header::HOST) {
-        if let Ok(value) = host.to_str().map(|host| host.split(':').next()) {
-            return value;
-        }
-    }
-    None
 }
