@@ -16,6 +16,14 @@ pub struct Config {
     #[serde(default)]
     pub pingora: ServerConf,
 
+    #[validate(nested)]
+    #[serde(default)]
+    pub prometheus: Option<Prometheus>,
+
+    #[validate(nested)]
+    #[serde(default)]
+    pub sentry: Option<Sentry>,
+
     #[validate(length(min = 1))]
     #[validate(nested)]
     pub listeners: Vec<Listener>,
@@ -91,6 +99,16 @@ impl Config {
 
         Ok(())
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Validate)]
+pub struct Prometheus {
+    pub address: SocketAddr,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Validate)]
+pub struct Sentry {
+    pub dsn: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Validate)]
