@@ -57,24 +57,32 @@ impl ProxyUpstream {
     /// Starts the health check service, runs only once.
     pub fn start_health_check(&mut self, work_stealing: bool) {
         if let Some(mut service) = self.take_background_service() {
-            let (tx, rx) = watch::channel(false);
-            self.watch = Some(tx);
+            // Create a channel for watching the health check status
+            let (watch_tx, watch_rx) = watch::channel(false);
+            self.watch = Some(watch_tx);
 
+            // Determine the number of threads for the service
             let threads = service.threads().unwrap_or(1);
 
-            let runtime = if work_stealing {
-                Runtime::new_steal(threads, service.name())
-            } else {
-                Runtime::new_no_steal(threads, service.name())
-            };
+            // Create a runtime based on the work_stealing flag
+            let runtime = self.create_runtime(work_stealing, threads, service.name());
 
+            // Spawn the service on the runtime
             runtime.get_handle().spawn(async move {
-                service.start_service(None, rx).await;
-                info!("service exited.")
+                service.start_service(None, watch_rx).await;
+                info!("Service exited.");
             });
 
-            // set runtime lifecycle with ProxyUpstream
+            // Set the runtime lifecycle with ProxyUpstream
             self.runtime = Some(runtime);
+        }
+    }
+
+    fn create_runtime(&self, work_stealing: bool, threads: usize, service_name: &str) -> Runtime {
+        if work_stealing {
+            Runtime::new_steal(threads, service_name)
+        } else {
+            Runtime::new_no_steal(threads, service_name)
         }
     }
 
@@ -90,12 +98,11 @@ impl ProxyUpstream {
             SelectionLB::Ketama(lb) => lb.upstreams.select(key.as_bytes(), 256),
         };
 
-        if let Some(ref mut b) = backend {
-            if let Some(p) = b.ext.get_mut::<HttpPeer>() {
-                // set timeout from upstream
+        backend.as_mut().and_then(|b| {
+            b.ext.get_mut::<HttpPeer>().map(|p| {
                 self.set_timeout(p);
-            };
-        }
+            })
+        });
 
         backend
     }
@@ -207,10 +214,12 @@ where
                 check.clone().into();
             upstreams.set_health_check(health_check);
 
-            let mut health_check_frequency = Duration::from_secs(1);
-            if let Some(healthy) = check.active.healthy {
-                health_check_frequency = Duration::from_secs(healthy.interval as u64);
-            }
+            let health_check_frequency = check
+                .active
+                .healthy
+                .map(|healthy| Duration::from_secs(healthy.interval as u64))
+                .unwrap_or(Duration::from_secs(1));
+
             upstreams.health_check_frequency = Some(health_check_frequency);
         }
 
@@ -261,42 +270,55 @@ impl From<config::HealthCheck> for Box<TcpHealthCheck> {
 
 impl From<config::HealthCheck> for Box<HttpHealthCheck> {
     fn from(value: config::HealthCheck) -> Self {
-        let host = value.active.host.unwrap_or_default();
+        let host = value
+            .active
+            .host
+            .unwrap_or_else(|| String::from("localhost")); // Set a reasonable default
         let tls = value.active.r#type == config::ActiveCheckType::HTTPS;
         let mut health_check = HttpHealthCheck::new(host.as_str(), tls);
 
+        // Set total connection timeout if provided
         health_check.peer_template.options.total_connection_timeout =
             Some(Duration::from_secs(value.active.timeout as u64));
-        if tls {
-            health_check.peer_template.options.verify_cert = value.active.https_verify_certificate;
-        }
 
+        // Set certificate verification if TLS is enabled
+        health_check.peer_template.options.verify_cert = value.active.https_verify_certificate;
+
+        // Build URI for HTTP health check path, log failure if any
         if let Ok(uri) = Uri::builder()
-            .path_and_query(value.active.http_path)
+            .path_and_query(&value.active.http_path)
             .build()
         {
             health_check.req.set_uri(uri);
+        } else {
+            log::warn!(
+                "Invalid URI path provided for health check: {}",
+                value.active.http_path
+            );
         }
 
+        // Insert headers, ensure they are properly formatted
         for header in value.active.req_headers.iter() {
             let mut parts = header.splitn(2, ":");
             if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
                 let key = key.trim().to_string();
                 let value = value.trim().to_string();
-                let _ = health_check.req.insert_header(key, value);
+                let _ = health_check.req.insert_header(key, &value);
             }
         }
 
+        // Handle port override
         if let Some(port) = value.active.port {
             health_check.port_override = Some(port as u16);
         }
 
+        // Set the success conditions
         if let Some(healthy) = value.active.healthy {
             health_check.consecutive_success = healthy.successes as usize;
 
+            // Validator for HTTP status codes
             if !healthy.http_statuses.is_empty() {
-                let http_statuses = healthy.http_statuses;
-
+                let http_statuses = healthy.http_statuses.clone(); // Clone to move into closure
                 health_check.validator = Some(Box::new(move |header: &ResponseHeader| {
                     if http_statuses.contains(&(header.status.as_u16() as u32)) {
                         Ok(())
@@ -307,10 +329,12 @@ impl From<config::HealthCheck> for Box<HttpHealthCheck> {
             }
         }
 
+        // Set the failure conditions
         if let Some(unhealthy) = value.active.unhealthy {
             health_check.consecutive_failure = unhealthy.http_failures as usize;
         }
 
+        // Return the Boxed health check
         Box::new(health_check)
     }
 }

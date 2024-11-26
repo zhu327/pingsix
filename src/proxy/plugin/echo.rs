@@ -44,13 +44,19 @@ impl ProxyPlugin for PluginEcho {
 
     async fn request_filter(&self, session: &mut Session, _ctx: &mut ProxyContext) -> Result<bool> {
         let mut resp = ResponseHeader::build(StatusCode::OK, Some(4))?;
-        for (k, v) in self.config.headers.iter() {
-            resp.insert_header(k.to_string(), v)?;
+
+        // Insert headers from the config
+        for (k, v) in &self.config.headers {
+            resp.insert_header(k.clone(), v.clone())?;
         }
+
+        // Insert Content-Length header
         resp.insert_header(header::CONTENT_LENGTH, self.config.body.len().to_string())?;
 
+        // Write response header to the session
         session.write_response_header(Box::new(resp), false).await?;
 
+        // Write response body to the session
         session
             .write_response_body(Some(self.config.body.clone().into()), true)
             .await?;

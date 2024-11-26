@@ -27,16 +27,16 @@ pub fn load_services(config: &config::Config) -> Result<()> {
         log::info!("Configuring Service: {}", service.id);
         let mut proxy_service = ProxyService::from(service.clone());
 
-        if let Some(upstream) = service.upstream.clone() {
-            let mut proxy_upstream = ProxyUpstream::try_from(upstream)?;
+        if let Some(ref upstream) = service.upstream {
+            let mut proxy_upstream = ProxyUpstream::try_from(upstream.clone())?;
             proxy_upstream.start_health_check(config.pingora.work_stealing);
 
             proxy_service.upstream = Some(Arc::new(proxy_upstream));
         }
 
         // load service plugins
-        for (name, value) in service.plugins.iter() {
-            let plugin = build_plugin(name, value.clone())?;
+        for (name, value) in service.plugins.clone() {
+            let plugin = build_plugin(&name, value)?;
             proxy_service.plugins.push(plugin);
         }
 

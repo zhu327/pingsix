@@ -39,42 +39,37 @@ impl From<config::Router> for ProxyRouter {
 impl ProxyRouter {
     /// Gets the upstream for the router.
     pub fn get_upstream(&self) -> Option<Arc<ProxyUpstream>> {
-        if self.upstream.is_some() {
-            return self.upstream.clone();
-        }
-
-        if self.inner.upstream_id.is_some() {
-            let upstream = upstream_fetch(&self.inner.upstream_id.clone().unwrap());
-            if upstream.is_some() {
-                return upstream;
-            }
-        }
-
-        if self.inner.service_id.is_some() {
-            let service = service_fetch(&self.inner.service_id.clone().unwrap());
-            if let Some(service) = service {
-                return service.get_upstream();
-            }
-        }
-
-        None
+        self.upstream
+            .clone()
+            .or_else(|| {
+                self.inner
+                    .upstream_id
+                    .as_ref()
+                    .and_then(|id| upstream_fetch(id.as_str()))
+            })
+            .or_else(|| {
+                self.inner
+                    .service_id
+                    .as_ref()
+                    .and_then(|id| service_fetch(id).and_then(|s| s.get_upstream()))
+            })
     }
 
     /// Gets the list of hosts for the router.
     fn get_hosts(&self) -> Vec<String> {
         let hosts = self.inner.get_hosts();
         if !hosts.is_empty() {
-            return hosts;
+            hosts
+        } else if let Some(service) = self
+            .inner
+            .service_id
+            .as_ref()
+            .and_then(|id| service_fetch(id.as_str()))
+        {
+            service.inner.hosts.clone()
+        } else {
+            vec![]
         }
-
-        if self.inner.service_id.is_some() {
-            let service = service_fetch(&self.inner.service_id.clone().unwrap());
-            if let Some(service) = service {
-                return service.inner.hosts.clone();
-            }
-        }
-
-        vec![]
     }
 }
 
@@ -85,17 +80,19 @@ impl ProxyRouter {
             .get_upstream()
             .ok_or_else(|| Error::new_str("No upstream configured"))?;
 
-        let backend = upstream.select_backend(session);
-        let mut backend = backend.ok_or_else(|| Error::new_str("Unable to determine backend"))?;
+        // Select the backend and handle the error immediately if None is returned
+        let mut backend = upstream
+            .select_backend(session)
+            .ok_or_else(|| Error::new_str("Unable to determine backend"))?;
 
+        // Try to get the HttpPeer from the backend's extension and handle the error
         backend
             .ext
             .get_mut::<HttpPeer>()
-            .map(|p| {
-                // set timeout from router
-                self.set_timeout(p);
-
-                Box::new(p.clone())
+            .map(|peer| {
+                // Set timeout from the router
+                self.set_timeout(peer);
+                Box::new(peer.clone())
             })
             .ok_or_else(|| Error::new_str("Fatal: Missing selected backend metadata"))
     }

@@ -63,32 +63,38 @@ impl ServiceDiscovery for DnsDiscovery {
         let name = self.name.as_str();
         log::debug!("Resolving DNS for domain: {}", name);
 
-        let backends = self
+        let backends: BTreeSet<Backend> = self
             .resolver
             .lookup_ip(name)
             .await
             .or_err_with(InternalError, || {
-                format!("Dns discovery failed for domain {name}")
+                format!("DNS discovery failed for domain: {}", name)
             })?
             .iter()
             .map(|ip| {
-                let addr = &SocketAddr::new(ip, self.port as u16).to_string();
+                let addr = SocketAddr::new(ip, self.port as u16).to_string();
 
-                let mut backend = Backend::new(addr).unwrap();
+                // Creating backend
+                let mut backend = Backend::new(&addr).unwrap();
                 backend.weight = self.weight as usize;
 
-                let tls =
-                    self.scheme == UpstreamScheme::HTTPS || self.scheme == UpstreamScheme::GRPCS;
-                let mut uppy = HttpPeer::new(addr, tls, self.name.clone());
-                if self.scheme == UpstreamScheme::GRPC || self.scheme == UpstreamScheme::GRPCS {
-                    uppy.options.alpn = ALPN::H2;
-                };
+                // Determine if TLS is needed
+                let tls = matches!(self.scheme, UpstreamScheme::HTTPS | UpstreamScheme::GRPCS);
 
-                assert!(backend.ext.insert::<HttpPeer>(uppy).is_none());
+                // Create HttpPeer
+                let mut peer = HttpPeer::new(&addr, tls, self.name.clone());
+                if matches!(self.scheme, UpstreamScheme::GRPC | UpstreamScheme::GRPCS) {
+                    peer.options.alpn = ALPN::H2;
+                }
+
+                // Insert HttpPeer into the backend
+                assert!(backend.ext.insert::<HttpPeer>(peer).is_none());
 
                 backend
             })
             .collect();
+
+        // Return backends and an empty HashMap for now
         Ok((backends, HashMap::new()))
     }
 }
@@ -133,48 +139,52 @@ impl TryFrom<Upstream> for HybridDiscovery {
 
     fn try_from(upstream: Upstream) -> Result<Self> {
         let mut this = Self::default();
-
         let mut backends = BTreeSet::new();
+
+        // Process each node in upstream
         for (addr, weight) in upstream.nodes.iter() {
             let (host, port) = parse_host_and_port(addr)?;
-            let port = port.unwrap_or(if upstream.scheme == UpstreamScheme::HTTPS {
-                443
-            } else {
-                80
+            let port = port.unwrap_or(match upstream.scheme {
+                UpstreamScheme::HTTPS => 443,
+                _ => 80,
             });
 
             if host.parse::<IpAddr>().is_err() {
-                // host is a domain name
+                // It's a domain name
+                // Handle DNS discovery for domain names
                 let resolver = get_global_resolver();
-                this.discoveries.push(Box::new(DnsDiscovery::new(
-                    host,
-                    port,
-                    upstream.scheme,
-                    *weight,
-                    resolver,
-                )));
+                let discovery = DnsDiscovery::new(host, port, upstream.scheme, *weight, resolver);
+                this.discoveries.push(Box::new(discovery));
             } else {
+                // It's an IP address
+                // Handle backend creation for IP addresses
                 let addr =
                     &SocketAddr::new(host.parse::<IpAddr>().unwrap(), port as u16).to_string();
-
                 let mut backend = Backend::new(addr).unwrap();
                 backend.weight = *weight as usize;
 
-                let tls = upstream.scheme == UpstreamScheme::HTTPS
-                    || upstream.scheme == UpstreamScheme::GRPCS;
+                let tls = matches!(
+                    upstream.scheme,
+                    UpstreamScheme::HTTPS | UpstreamScheme::GRPCS
+                );
                 let sni = if upstream.pass_host == UpstreamPassHost::REWRITE {
-                    upstream.upstream_host.clone().unwrap()
+                    upstream
+                        .upstream_host
+                        .clone()
+                        .unwrap_or_else(|| host.to_string())
                 } else {
-                    host
+                    host.to_string()
                 };
 
-                let mut uppy = HttpPeer::new(addr, tls, sni);
-                if upstream.scheme == UpstreamScheme::GRPC
-                    || upstream.scheme == UpstreamScheme::GRPCS
-                {
-                    uppy.options.alpn = ALPN::H2;
-                };
-                assert!(backend.ext.insert::<HttpPeer>(uppy).is_none());
+                let mut peer = HttpPeer::new(addr, tls, sni);
+                if matches!(
+                    upstream.scheme,
+                    UpstreamScheme::GRPC | UpstreamScheme::GRPCS
+                ) {
+                    peer.options.alpn = ALPN::H2;
+                }
+                assert!(backend.ext.insert::<HttpPeer>(peer).is_none());
+
                 backends.insert(backend);
             }
         }

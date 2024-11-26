@@ -91,40 +91,49 @@ impl ProxyPlugin for PluginPrometheus {
     async fn logging(&self, session: &mut Session, _e: Option<&Error>, ctx: &mut ProxyContext) {
         REQUESTS.inc();
 
+        // Clone router only once
+        let router = ctx.router.clone();
+
+        // Extract response code
         let code = session
             .response_written()
             .map_or("", |resp| resp.status.as_str());
 
-        let route = ctx
-            .router
-            .clone()
-            .map_or(String::new(), |r| r.inner.id.clone());
-        let uri = ctx
-            .router
-            .clone()
+        // Extract route information, falling back to empty string if not present
+        let route = router.as_ref().map_or_else(|| "", |r| r.inner.id.as_str());
+
+        // Extract URI and host, falling back to empty string or default values
+        let uri = router
+            .as_ref()
             .map_or("", |_| session.req_header().uri.path());
-        let host = ctx.router.clone().map_or("", |_| {
+
+        let host = router.as_ref().map_or("", |_| {
             get_request_host(session.req_header()).unwrap_or_default()
         });
-        let service = ctx.router.clone().map_or(String::new(), |r| {
-            r.inner.service_id.clone().unwrap_or(host.to_string())
-        });
+
+        // Extract service, falling back to host if service_id is None
+        let service = router
+            .as_ref()
+            .map_or_else(|| host, |r| r.inner.service_id.as_deref().unwrap_or(host));
+
+        // Extract node from context variables
         let node = ctx.vars.get("upstream").map_or("", |s| s.as_str());
 
+        // Update Prometheus metrics
         STATUS
-            .with_label_values(&[code, &route, uri, host, &service, node])
+            .with_label_values(&[code, route, uri, host, service, node])
             .inc();
 
         LATENCY
-            .with_label_values(&["request", &route, &service, node])
+            .with_label_values(&["request", route, service, node])
             .observe(ctx.request_start.elapsed().as_millis() as f64);
 
         BANDWIDTH
-            .with_label_values(&["ingress", &route, &service, node])
+            .with_label_values(&["ingress", route, service, node])
             .inc_by(session.body_bytes_read() as u64);
 
         BANDWIDTH
-            .with_label_values(&["egress", &route, &service, node])
+            .with_label_values(&["egress", route, service, node])
             .inc_by(session.body_bytes_sent() as u64);
     }
 }

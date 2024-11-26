@@ -94,13 +94,12 @@ impl Config {
     }
 
     fn validate_upstreams_id(&self) -> Result<(), ValidationError> {
-        for upstream in &self.upstreams {
-            if upstream.id.is_none() {
-                return Err(ValidationError::new("upstream_id_required"));
-            }
-        }
-
-        Ok(())
+        self.upstreams
+            .iter()
+            .find(|upstream| upstream.id.is_none())
+            .map_or(Ok(()), |_| {
+                Err(ValidationError::new("upstream_id_required"))
+            })
     }
 }
 
@@ -127,11 +126,9 @@ pub struct Listener {
 
 impl Listener {
     fn validate_tls_for_offer_h2(&self) -> Result<(), ValidationError> {
-        if self.offer_h2 && self.tls.is_none() {
-            Err(ValidationError::new("tls_required_for_h2"))
-        } else {
-            Ok(())
-        }
+        (self.offer_h2 && self.tls.is_none())
+            .then(|| Err(ValidationError::new("tls_required_for_h2")))
+            .map_or(Ok(()), |err| err)
     }
 }
 
@@ -188,19 +185,15 @@ impl Router {
     }
 
     pub fn get_hosts(&self) -> Vec<String> {
-        if let Some(host) = &self.host {
-            vec![host.to_string()]
-        } else {
-            self.hosts.clone()
-        }
+        self.host
+            .clone()
+            .map_or_else(|| self.hosts.clone(), |host| vec![host.to_string()])
     }
 
     pub fn get_uris(&self) -> Vec<String> {
-        if let Some(uri) = &self.uri {
-            vec![uri.to_string()]
-        } else {
-            self.uris.clone()
-        }
+        self.uri
+            .clone()
+            .map_or_else(|| self.uris.clone(), |uri| vec![uri.to_string()])
     }
 
     fn default_priority() -> u32 {
@@ -271,8 +264,11 @@ impl Upstream {
     }
 
     fn validate_upstream_host(&self) -> Result<(), ValidationError> {
-        if self.pass_host == UpstreamPassHost::REWRITE && self.upstream_host.is_none() {
-            Err(ValidationError::new("upstream_host_required_for_rewrite"))
+        if self.pass_host == UpstreamPassHost::REWRITE {
+            self.upstream_host.as_ref().map_or_else(
+                || Err(ValidationError::new("upstream_host_required_for_rewrite")),
+                |_| Ok(()),
+            )
         } else {
             Ok(())
         }
@@ -280,7 +276,6 @@ impl Upstream {
 
     // Custom validation function for `nodes` keys
     fn validate_nodes_keys(nodes: &HashMap<String, u32>) -> Result<(), ValidationError> {
-        // Define the regular expression for valid keys
         let re =
             Regex::new(r"(?i)^(?:(?:\d{1,3}\.){3}\d{1,3}|\[[0-9a-f:]+\]|[a-z0-9.-]+)(?::\d+)?$")
                 .unwrap();
@@ -288,10 +283,11 @@ impl Upstream {
         for key in nodes.keys() {
             if !re.is_match(key) {
                 let mut err = ValidationError::new("invalid_node_key");
-                err.add_param("key".into(), &key.to_string());
+                err.add_param("key".into(), key);
                 return Err(err);
             }
         }
+
         Ok(())
     }
 }
