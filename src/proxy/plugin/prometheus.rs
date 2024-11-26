@@ -55,6 +55,21 @@ static LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(opts, &["type", "route", "service", "node"]).unwrap()
 });
 
+// Bandwidth counter
+static BANDWIDTH: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "bandwidth",
+        "Total bandwidth in bytes consumed per service in pingsix",
+        &[
+            "type",    // HTTP status code
+            "route",   // Route ID
+            "service", // Service ID
+            "node",    // Node ID
+        ]
+    )
+    .unwrap()
+});
+
 pub const PLUGIN_NAME: &str = "prometheus";
 
 pub fn create_prometheus_plugin(_cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> {
@@ -103,5 +118,13 @@ impl ProxyPlugin for PluginPrometheus {
         LATENCY
             .with_label_values(&["request", &route, &service, node])
             .observe(ctx.request_start.elapsed().as_millis() as f64);
+
+        BANDWIDTH
+            .with_label_values(&["ingress", &route, &service, node])
+            .inc_by(session.body_bytes_read() as u64);
+
+        BANDWIDTH
+            .with_label_values(&["egress", &route, &service, node])
+            .inc_by(session.body_bytes_sent() as u64);
     }
 }
