@@ -39,6 +39,7 @@ static STATUS: Lazy<IntCounterVec> = Lazy::new(|| {
             "matched_uri",  // Matched URI
             "matched_host", // Matched Host
             "service",      // Service ID
+            "node",         // Node ID
         ]
     )
     .unwrap()
@@ -51,7 +52,7 @@ static LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
         "HTTP request latency in milliseconds per service in pingsix",
     )
     .buckets(DEFAULT_BUCKETS.to_vec());
-    register_histogram_vec!(opts, &["type", "route", "service"]).unwrap()
+    register_histogram_vec!(opts, &["type", "route", "service", "node"]).unwrap()
 });
 
 pub const PLUGIN_NAME: &str = "prometheus";
@@ -93,13 +94,14 @@ impl ProxyPlugin for PluginPrometheus {
         let service = ctx.router.clone().map_or(String::new(), |r| {
             r.inner.service_id.clone().unwrap_or(host.to_string())
         });
+        let node = ctx.vars.get("upstream").map_or("", |s| s.as_str());
 
         STATUS
-            .with_label_values(&[code, &route, uri, host, &service])
+            .with_label_values(&[code, &route, uri, host, &service, node])
             .inc();
 
         LATENCY
-            .with_label_values(&["request", &route, &service])
+            .with_label_values(&["request", &route, &service, node])
             .observe(ctx.request_start.elapsed().as_millis() as f64);
     }
 }

@@ -40,7 +40,12 @@ impl ProxyHttp for HttpService {
         session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
-        ctx.router.as_ref().unwrap().select_http_peer(session)
+        let peer = ctx.router.as_ref().unwrap().select_http_peer(session);
+        if let Ok(ref p) = peer {
+            ctx.vars
+                .insert("upstream".to_string(), p._address.to_string());
+        }
+        peer
     }
 
     /// Set up downstream modules.
