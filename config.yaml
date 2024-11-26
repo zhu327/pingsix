@@ -122,3 +122,8 @@ services:
         count: 1
         rejected_code: 429
         rejected_msg: "Pleas slow down!"
+
+global_rules:
+  - id: 1
+    plugins:
+      prometheus: {}

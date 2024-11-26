@@ -12,7 +12,10 @@ use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_proxy::{ProxyHttp, Session};
 
 use crate::config::Config;
-use crate::proxy::plugin::{build_plugin, build_plugin_executor, ProxyPlugin};
+use crate::proxy::plugin::{
+    build_global_plugin_executor, build_plugin, build_plugin_executor, ProxyPlugin,
+    ProxyPluginExecutor,
+};
 use crate::proxy::router::{MatchEntry, ProxyRouter};
 use crate::proxy::upstream::ProxyUpstream;
 use crate::proxy::ProxyContext;
@@ -23,6 +26,8 @@ use crate::proxy::ProxyContext;
 #[derive(Default)]
 pub struct HttpService {
     pub matcher: MatchEntry,
+    // global rule plugins
+    pub global_plugin: Box<ProxyPluginExecutor>,
 }
 
 #[async_trait]
@@ -68,6 +73,11 @@ impl ProxyHttp for HttpService {
             return Ok(true);
         }
 
+        // execute global rule plugins
+        if self.global_plugin.request_filter(session, ctx).await? {
+            return Ok(true);
+        };
+
         // execute plugins
         ctx.plugin.clone().request_filter(session, ctx).await
     }
@@ -81,6 +91,11 @@ impl ProxyHttp for HttpService {
             ctx.plugin = build_plugin_executor(router);
         }
 
+        // execute global rule plugins
+        self.global_plugin
+            .early_request_filter(session, ctx)
+            .await?;
+
         // execute plugins
         ctx.plugin.clone().early_request_filter(session, ctx).await
     }
@@ -92,6 +107,11 @@ impl ProxyHttp for HttpService {
         end_of_stream: bool,
         ctx: &mut ProxyContext,
     ) -> Result<()> {
+        // execute global rule plugins
+        self.global_plugin
+            .request_body_filter(session, body, end_of_stream, ctx)
+            .await?;
+
         // execute plugins
         ctx.plugin
             .clone()
@@ -106,6 +126,11 @@ impl ProxyHttp for HttpService {
         upstream_request: &mut RequestHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
+        // execute global rule plugins
+        self.global_plugin
+            .upstream_request_filter(session, upstream_request, ctx)
+            .await?;
+
         // execute plugins
         ctx.plugin
             .clone()
@@ -124,6 +149,11 @@ impl ProxyHttp for HttpService {
         upstream_response: &mut ResponseHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
+        // execute global rule plugins
+        self.global_plugin
+            .response_filter(session, upstream_response, ctx)
+            .await?;
+
         // execute plugins
         ctx.plugin
             .clone()
@@ -138,6 +168,10 @@ impl ProxyHttp for HttpService {
         end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> Result<Option<Duration>> {
+        // execute global rule plugins
+        self.global_plugin
+            .response_body_filter(session, body, end_of_stream, ctx)?;
+
         // execute plugins
         ctx.plugin
             .clone()
@@ -146,6 +180,9 @@ impl ProxyHttp for HttpService {
     }
 
     async fn logging(&self, session: &mut Session, e: Option<&Error>, ctx: &mut Self::CTX) {
+        // execute global rule plugins
+        self.global_plugin.logging(session, e, ctx).await;
+
         // execute plugins
         ctx.plugin.clone().logging(session, e, ctx).await;
     }
@@ -204,6 +241,9 @@ pub fn build_http_service(config: &Config) -> Result<HttpService> {
 
         http_service.matcher.insert_router(proxy_router).unwrap();
     }
+
+    // load global plugins
+    http_service.global_plugin = build_global_plugin_executor(config.global_rules.clone())?;
 
     Ok(http_service)
 }

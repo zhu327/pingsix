@@ -37,6 +37,9 @@ pub struct Config {
     #[validate(nested)]
     #[serde(default)]
     pub services: Vec<Service>,
+    #[validate(nested)]
+    #[serde(default)]
+    pub global_rules: Vec<GlobalRule>,
 }
 
 // Config file load and validation
@@ -441,6 +444,13 @@ impl Service {
             Ok(())
         }
     }
+}
+
+#[derive(Clone, Default, Debug, Serialize, Deserialize, Validate)]
+pub struct GlobalRule {
+    pub id: String,
+    #[serde(default)]
+    pub plugins: HashMap<String, YamlValue>,
 }
 
 #[cfg(test)]
