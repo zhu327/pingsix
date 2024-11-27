@@ -187,26 +187,6 @@ pub trait ProxyPlugin: Send + Sync {
         Ok(())
     }
 
-    /// Handle the incoming request body.
-    ///
-    /// This function will be called every time a piece of request body is received.
-    ///
-    /// # Arguments
-    ///
-    /// * `_session` - Mutable reference to the current session
-    /// * `_body` - Mutable reference to an optional Bytes containing the body chunk
-    /// * `_end_of_stream` - Boolean indicating if this is the last chunk
-    /// * `_ctx` - Mutable reference to the plugin context
-    async fn request_body_filter(
-        &self,
-        _session: &mut Session,
-        _body: &mut Option<Bytes>,
-        _end_of_stream: bool,
-        _ctx: &mut ProxyContext,
-    ) -> Result<()> {
-        Ok(())
-    }
-
     /// Modify the request before it is sent to the upstream
     ///
     /// # Arguments
@@ -314,21 +294,6 @@ impl ProxyPlugin for ProxyPluginExecutor {
     ) -> Result<()> {
         for plugin in self.plugins.iter() {
             plugin.early_request_filter(session, ctx).await?;
-        }
-        Ok(())
-    }
-
-    async fn request_body_filter(
-        &self,
-        session: &mut Session,
-        body: &mut Option<Bytes>,
-        end_of_stream: bool,
-        ctx: &mut ProxyContext,
-    ) -> Result<()> {
-        for plugin in self.plugins.iter() {
-            plugin
-                .request_body_filter(session, body, end_of_stream, ctx)
-                .await?;
         }
         Ok(())
     }

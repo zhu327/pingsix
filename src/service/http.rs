@@ -100,25 +100,6 @@ impl ProxyHttp for HttpService {
         ctx.plugin.clone().early_request_filter(session, ctx).await
     }
 
-    async fn request_body_filter(
-        &self,
-        session: &mut Session,
-        body: &mut Option<Bytes>,
-        end_of_stream: bool,
-        ctx: &mut ProxyContext,
-    ) -> Result<()> {
-        // execute global rule plugins
-        self.global_plugin
-            .request_body_filter(session, body, end_of_stream, ctx)
-            .await?;
-
-        // execute plugins
-        ctx.plugin
-            .clone()
-            .request_body_filter(session, body, end_of_stream, ctx)
-            .await
-    }
-
     // Modify the request before it is sent to the upstream
     async fn upstream_request_filter(
         &self,

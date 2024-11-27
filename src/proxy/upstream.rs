@@ -270,10 +270,7 @@ impl From<config::HealthCheck> for Box<TcpHealthCheck> {
 
 impl From<config::HealthCheck> for Box<HttpHealthCheck> {
     fn from(value: config::HealthCheck) -> Self {
-        let host = value
-            .active
-            .host
-            .unwrap_or_else(|| String::from("localhost")); // Set a reasonable default
+        let host = value.active.host.unwrap_or_default();
         let tls = value.active.r#type == config::ActiveCheckType::HTTPS;
         let mut health_check = HttpHealthCheck::new(host.as_str(), tls);
 
