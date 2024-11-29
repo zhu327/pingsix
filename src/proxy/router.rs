@@ -1,14 +1,19 @@
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time;
+use std::{collections::BTreeMap, sync::RwLock};
 
+use arc_swap::ArcSwap;
 use matchit::{InsertError, Router as MatchRouter};
+use once_cell::sync::Lazy;
 use pingora_core::upstreams::peer::HttpPeer;
 use pingora_error::{Error, Result};
 use pingora_proxy::Session;
 
 use crate::config;
+use crate::proxy::plugin::build_plugin;
 
+use super::Identifiable;
 use super::{
     get_request_host,
     plugin::ProxyPlugin,
@@ -33,6 +38,12 @@ impl From<config::Router> for ProxyRouter {
             upstream: None,
             plugins: Vec::new(),
         }
+    }
+}
+
+impl Identifiable for ProxyRouter {
+    fn id(&self) -> String {
+        self.inner.id.clone()
     }
 }
 
@@ -122,10 +133,9 @@ pub struct MatchEntry {
 
 impl MatchEntry {
     /// Inserts a router into the match entry.
-    pub fn insert_router(&mut self, proxy_router: ProxyRouter) -> Result<(), InsertError> {
+    pub fn insert_router(&mut self, proxy_router: Arc<ProxyRouter>) -> Result<(), InsertError> {
         let hosts = proxy_router.get_hosts();
         let uris = proxy_router.inner.get_uris();
-        let proxy_router = Arc::new(proxy_router);
 
         if hosts.is_empty() {
             // Insert for non-host URIs
@@ -237,4 +247,60 @@ impl MatchEntry {
         }
         None
     }
+}
+
+/// Global map to store global rules, initialized lazily.
+static ROUTER_MAP: Lazy<RwLock<HashMap<String, Arc<ProxyRouter>>>> =
+    Lazy::new(|| RwLock::new(HashMap::new()));
+static GLOBAL_MATCH: Lazy<ArcSwap<MatchEntry>> =
+    Lazy::new(|| ArcSwap::new(Arc::new(MatchEntry::default())));
+
+pub fn global_match_fetch() -> Arc<MatchEntry> {
+    GLOBAL_MATCH.load().clone()
+}
+
+pub fn reload_global_match() {
+    let mut matcher = MatchEntry::default();
+
+    let routers = ROUTER_MAP.read().unwrap();
+    for router in routers.values() {
+        matcher.insert_router(router.clone()).unwrap();
+    }
+
+    GLOBAL_MATCH.store(Arc::new(matcher));
+}
+
+/// Loads services from the given configuration.
+pub fn load_routers(config: &config::Config) -> Result<()> {
+    {
+        let mut map = ROUTER_MAP
+            .write()
+            .expect("Failed to acquire write lock on the router map");
+
+        for router in config.routers.iter() {
+            log::info!("Configuring Router: {}", router.id);
+            let mut proxy_router = ProxyRouter::from(router.clone());
+
+            if let Some(upstream) = router.upstream.clone() {
+                let mut proxy_upstream = ProxyUpstream::try_from(upstream)?;
+                proxy_upstream.start_health_check(config.pingora.work_stealing);
+
+                proxy_router.upstream = Some(Arc::new(proxy_upstream));
+            }
+
+            // load router plugins
+            for (name, value) in router.plugins.iter() {
+                let plugin = build_plugin(name, value.clone())?;
+                proxy_router.plugins.push(plugin);
+            }
+
+            map.insert(router.id.clone(), Arc::new(proxy_router));
+        }
+
+        // release the write lock
+    }
+
+    reload_global_match();
+
+    Ok(())
 }

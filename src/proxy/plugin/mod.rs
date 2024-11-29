@@ -9,7 +9,7 @@ use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_proxy::Session;
 use serde_yaml::Value as YamlValue;
 
-use crate::{config::GlobalRule, proxy::ProxyContext};
+use crate::proxy::ProxyContext;
 
 use super::{router::ProxyRouter, service::service_fetch};
 
@@ -108,37 +108,6 @@ pub fn build_plugin_executor(router: Arc<ProxyRouter>) -> Arc<ProxyPluginExecuto
     Arc::new(ProxyPluginExecutor {
         plugins: merged_plugins,
     })
-}
-
-/// Constructs a `ProxyPluginExecutor` by merging and sorting global plugin configurations.
-///
-/// # Arguments
-///
-/// * `global_rules_cfg` - A vector of `GlobalRule`, where each rule contains plugin configurations.
-///
-/// # Returns
-///
-/// * `Result<Box<ProxyPluginExecutor>>` - A boxed `ProxyPluginExecutor` containing a sorted list of plugins,
-///   ordered by their priority in descending order.
-///
-/// This function processes the plugin configurations from the provided global rules,
-/// replacing any existing plugin with the same name, and ensures the resulting executor
-/// has plugins sorted by priority (higher priority first).
-pub fn build_global_plugin_executor(
-    global_rules_cfg: Vec<GlobalRule>,
-) -> Result<Box<ProxyPluginExecutor>> {
-    let plugins = global_rules_cfg
-        .into_iter()
-        .flat_map(|rule| rule.plugins)
-        .map(|(name, value)| build_plugin(&name, value).map(|plugin| (name, plugin)))
-        .collect::<Result<HashMap<_, _>>>()?; // Collect directly into a HashMap, replacing duplicates
-
-    let mut merged_plugins: Vec<_> = plugins.into_values().collect();
-    merged_plugins.sort_by_key(|b| std::cmp::Reverse(b.priority())); // Sort by priority descending
-
-    Ok(Box::new(ProxyPluginExecutor {
-        plugins: merged_plugins,
-    }))
 }
 
 #[async_trait]

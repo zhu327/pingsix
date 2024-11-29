@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -11,24 +10,16 @@ use pingora_error::{Error, Result};
 use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_proxy::{ProxyHttp, Session};
 
-use crate::config::Config;
-use crate::proxy::plugin::{
-    build_global_plugin_executor, build_plugin, build_plugin_executor, ProxyPlugin,
-    ProxyPluginExecutor,
-};
-use crate::proxy::router::{MatchEntry, ProxyRouter};
-use crate::proxy::upstream::ProxyUpstream;
+use crate::proxy::global_rule::global_plugin_fetch;
+use crate::proxy::plugin::{build_plugin_executor, ProxyPlugin};
+use crate::proxy::router::global_match_fetch;
 use crate::proxy::ProxyContext;
 
 /// Proxy service.
 ///
 /// Manages the proxying of requests to upstream servers.
 #[derive(Default)]
-pub struct HttpService {
-    pub matcher: MatchEntry,
-    // global rule plugins
-    pub global_plugin: Box<ProxyPluginExecutor>,
-}
+pub struct HttpService;
 
 #[async_trait]
 impl ProxyHttp for HttpService {
@@ -74,7 +65,7 @@ impl ProxyHttp for HttpService {
         }
 
         // execute global rule plugins
-        if self.global_plugin.request_filter(session, ctx).await? {
+        if global_plugin_fetch().request_filter(session, ctx).await? {
             return Ok(true);
         };
 
@@ -85,14 +76,14 @@ impl ProxyHttp for HttpService {
     /// Handle the incoming request before any downstream module is executed.
     async fn early_request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<()> {
         // Match request to pipeline
-        if let Some((router_params, router)) = self.matcher.match_request(session) {
-            ctx.router_params = router_params;
+        if let Some((router_params, router)) = global_match_fetch().match_request(session) {
+            ctx.router_params = Some(router_params);
             ctx.router = Some(router.clone());
             ctx.plugin = build_plugin_executor(router);
         }
 
         // execute global rule plugins
-        self.global_plugin
+        global_plugin_fetch()
             .early_request_filter(session, ctx)
             .await?;
 
@@ -108,7 +99,7 @@ impl ProxyHttp for HttpService {
         ctx: &mut Self::CTX,
     ) -> Result<()> {
         // execute global rule plugins
-        self.global_plugin
+        global_plugin_fetch()
             .upstream_request_filter(session, upstream_request, ctx)
             .await?;
 
@@ -131,7 +122,7 @@ impl ProxyHttp for HttpService {
         ctx: &mut Self::CTX,
     ) -> Result<()> {
         // execute global rule plugins
-        self.global_plugin
+        global_plugin_fetch()
             .response_filter(session, upstream_response, ctx)
             .await?;
 
@@ -150,8 +141,7 @@ impl ProxyHttp for HttpService {
         ctx: &mut Self::CTX,
     ) -> Result<Option<Duration>> {
         // execute global rule plugins
-        self.global_plugin
-            .response_body_filter(session, body, end_of_stream, ctx)?;
+        global_plugin_fetch().response_body_filter(session, body, end_of_stream, ctx)?;
 
         // execute plugins
         ctx.plugin
@@ -162,7 +152,7 @@ impl ProxyHttp for HttpService {
 
     async fn logging(&self, session: &mut Session, e: Option<&Error>, ctx: &mut Self::CTX) {
         // execute global rule plugins
-        self.global_plugin.logging(session, e, ctx).await;
+        global_plugin_fetch().logging(session, e, ctx).await;
 
         // execute plugins
         ctx.plugin.clone().logging(session, e, ctx).await;
@@ -198,33 +188,4 @@ impl ProxyHttp for HttpService {
 
         e
     }
-}
-
-/// Initializes a proxy service from the given configuration.
-pub fn build_http_service(config: &Config) -> Result<HttpService> {
-    let mut http_service = HttpService::default();
-    for router in config.routers.iter() {
-        log::info!("Configuring Router: {}", router.id);
-        let mut proxy_router = ProxyRouter::from(router.clone());
-
-        if let Some(upstream) = router.upstream.clone() {
-            let mut proxy_upstream = ProxyUpstream::try_from(upstream)?;
-            proxy_upstream.start_health_check(config.pingora.work_stealing);
-
-            proxy_router.upstream = Some(Arc::new(proxy_upstream));
-        }
-
-        // load router plugins
-        for (name, value) in router.plugins.iter() {
-            let plugin = build_plugin(name, value.clone())?;
-            proxy_router.plugins.push(plugin);
-        }
-
-        http_service.matcher.insert_router(proxy_router).unwrap();
-    }
-
-    // load global plugins
-    http_service.global_plugin = build_global_plugin_executor(config.global_rules.clone())?;
-
-    Ok(http_service)
 }

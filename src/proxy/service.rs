@@ -11,6 +11,7 @@ use crate::config;
 use super::{
     plugin::{build_plugin, ProxyPlugin},
     upstream::{upstream_fetch, ProxyUpstream},
+    Identifiable,
 };
 
 /// Global map to store services, initialized lazily.
@@ -66,6 +67,12 @@ impl From<config::Service> for ProxyService {
             upstream: None,
             plugins: Vec::new(),
         }
+    }
+}
+
+impl Identifiable for ProxyService {
+    fn id(&self) -> String {
+        self.inner.id.clone()
     }
 }
 

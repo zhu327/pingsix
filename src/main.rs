@@ -9,8 +9,10 @@ use pingora_proxy::http_proxy_service_with_name;
 use sentry::IntoDsn;
 
 use config::{Config, Tls};
-use proxy::{service::load_services, upstream::load_upstreams};
-use service::http::build_http_service;
+use proxy::{
+    global_rule::load_global_rules, router::load_routers, service::load_services,
+    upstream::load_upstreams,
+};
 
 mod config;
 mod proxy;
@@ -26,9 +28,11 @@ fn main() {
 
     // Log loading stages and initialize necessary services
     log::info!("Loading services, upstreams, and routers...");
-    load_services(&config).expect("Failed to load services");
     load_upstreams(&config).expect("Failed to load upstreams");
-    let http_service = build_http_service(&config).expect("Failed to initialize proxy service");
+    load_services(&config).expect("Failed to load services");
+    load_routers(&config).expect("Failed to load routers");
+    load_global_rules(&config).expect("Failed to load global rules");
+    let http_service = service::http::HttpService {};
 
     // Create Pingora server with optional config and add HTTP service
     let mut pingsix_server = Server::new_with_opt_and_conf(Some(opt), config.pingora);

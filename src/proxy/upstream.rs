@@ -25,8 +25,8 @@ use tokio::sync::watch;
 
 use crate::config;
 
-use super::discovery::HybridDiscovery;
 use super::request_selector_key;
+use super::{discovery::HybridDiscovery, Identifiable};
 
 /// Proxy load balancer.
 ///
@@ -50,6 +50,12 @@ impl TryFrom<config::Upstream> for ProxyUpstream {
             runtime: None,
             watch: None,
         })
+    }
+}
+
+impl Identifiable for ProxyUpstream {
+    fn id(&self) -> String {
+        self.inner.id.clone().unwrap_or_default()
     }
 }
 
