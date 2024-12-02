@@ -36,7 +36,7 @@ impl From<config::GlobalRule> for ProxyGlobalRule {
 }
 
 /// Global map to store global rules, initialized lazily.
-static GLOBAL_RULE_MAP: Lazy<RwLock<HashMap<String, Arc<ProxyGlobalRule>>>> =
+pub static GLOBAL_RULE_MAP: Lazy<RwLock<HashMap<String, Arc<ProxyGlobalRule>>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
 static GLOBAL_PLUGIN: Lazy<ArcSwap<ProxyPluginExecutor>> =
     Lazy::new(|| ArcSwap::new(Arc::new(ProxyPluginExecutor::default())));
@@ -74,7 +74,7 @@ pub fn reload_global_plugin() {
 
 /// Loads services from the given configuration.
 pub fn load_global_rules(config: &config::Config) -> Result<()> {
-    let proxy_global_rules: Vec<ProxyGlobalRule> = config
+    let proxy_global_rules: Vec<Arc<ProxyGlobalRule>> = config
         .global_rules
         .iter()
         .map(|rule| {
@@ -87,7 +87,7 @@ pub fn load_global_rules(config: &config::Config) -> Result<()> {
                 proxy_global_rule.plugins.push(plugin);
             }
 
-            Ok(proxy_global_rule)
+            Ok(Arc::new(proxy_global_rule))
         })
         .collect::<Result<Vec<_>>>()?;
 
@@ -96,4 +96,8 @@ pub fn load_global_rules(config: &config::Config) -> Result<()> {
     reload_global_plugin();
 
     Ok(())
+}
+
+pub fn global_rule_fetch(id: &str) -> Option<Arc<ProxyGlobalRule>> {
+    GLOBAL_RULE_MAP.get(id)
 }

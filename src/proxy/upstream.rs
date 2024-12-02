@@ -53,7 +53,7 @@ impl TryFrom<config::Upstream> for ProxyUpstream {
 
 impl Identifiable for ProxyUpstream {
     fn id(&self) -> String {
-        self.inner.id.clone().unwrap_or_default()
+        self.inner.id.clone()
     }
 }
 
@@ -341,23 +341,23 @@ impl From<config::HealthCheck> for Box<HttpHealthCheck> {
 }
 
 // Define a global upstream map, initialized lazily
-static UPSTREAM_MAP: Lazy<RwLock<HashMap<String, Arc<ProxyUpstream>>>> =
+pub static UPSTREAM_MAP: Lazy<RwLock<HashMap<String, Arc<ProxyUpstream>>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
 
 /// Loads upstreams from the given configuration.
 pub fn load_upstreams(config: &config::Config) -> Result<()> {
     // Collect all ProxyUpstream instances into a vector.
-    let proxy_upstreams: Vec<ProxyUpstream> = config
+    let proxy_upstreams: Vec<Arc<ProxyUpstream>> = config
         .upstreams
         .iter()
         .map(|upstream| {
-            let upstream_id = upstream.id.clone().expect("Upstream ID is missing");
+            let upstream_id = upstream.id.clone();
             info!("Configuring Upstream: {}", upstream_id);
 
             let mut proxy_upstream = ProxyUpstream::try_from(upstream.clone())?;
             proxy_upstream.start_health_check(config.pingora.work_stealing);
 
-            Ok(proxy_upstream)
+            Ok(Arc::new(proxy_upstream))
         })
         .collect::<Result<Vec<_>>>()?;
 

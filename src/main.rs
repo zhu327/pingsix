@@ -3,7 +3,7 @@ mod config;
 mod proxy;
 mod service;
 
-use pingora::services::listening::Service;
+use pingora::services::{background::background_service, listening::Service};
 use pingora_core::{
     apps::HttpServerOptions,
     listeners::tls::TlsSettings,
@@ -12,10 +12,10 @@ use pingora_core::{
 use pingora_proxy::http_proxy_service_with_name;
 use sentry::IntoDsn;
 
-use config::{Config, Tls};
+use config::{etcd::EtcdConfigSync, Config, Tls};
 use proxy::{
     global_rule::load_global_rules, router::load_routers, service::load_services,
-    upstream::load_upstreams,
+    sync::ProxySyncHandler, upstream::load_upstreams,
 };
 
 fn main() {
@@ -26,12 +26,22 @@ fn main() {
     let opt = Opt::parse_args();
     let config = Config::load_yaml_with_opt_override(&opt).expect("Failed to load configuration");
 
-    // Log loading stages and initialize necessary services
-    log::info!("Loading services, upstreams, and routers...");
-    load_upstreams(&config).expect("Failed to load upstreams");
-    load_services(&config).expect("Failed to load services");
-    load_routers(&config).expect("Failed to load routers");
-    load_global_rules(&config).expect("Failed to load global rules");
+    let mut etcd_config_sync: Option<EtcdConfigSync> = None;
+    if let Some(etcd_cfg) = &config.etcd {
+        let sync_handler = ProxySyncHandler::new(config.pingora.work_stealing);
+        etcd_config_sync = Some(EtcdConfigSync::new(
+            etcd_cfg.clone(),
+            Box::new(sync_handler),
+        ));
+    } else {
+        // Log loading stages and initialize necessary services
+        log::info!("Loading services, upstreams, and routers...");
+        load_upstreams(&config).expect("Failed to load upstreams");
+        load_services(&config).expect("Failed to load services");
+        load_routers(&config).expect("Failed to load routers");
+        load_global_rules(&config).expect("Failed to load global rules");
+    }
+
     let http_service = service::http::HttpService {};
 
     // Create Pingora server with optional config and add HTTP service
@@ -88,6 +98,11 @@ fn main() {
     pingsix_server.bootstrap();
     log::info!("Bootstrapped. Adding Services...");
     pingsix_server.add_service(http_service);
+
+    if let Some(etcd_config_sync) = etcd_config_sync {
+        let etcd_service = background_service("etcd config sync", etcd_config_sync);
+        pingsix_server.add_service(etcd_service);
+    };
 
     log::info!("Starting Server...");
     pingsix_server.run_forever();

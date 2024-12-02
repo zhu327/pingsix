@@ -54,12 +54,12 @@ impl ProxyService {
 }
 
 /// Global map to store services, initialized lazily.
-static SERVICE_MAP: Lazy<RwLock<HashMap<String, Arc<ProxyService>>>> =
+pub static SERVICE_MAP: Lazy<RwLock<HashMap<String, Arc<ProxyService>>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
 
 /// Loads services from the given configuration.
 pub fn load_services(config: &config::Config) -> Result<()> {
-    let proxy_services: Vec<ProxyService> = config
+    let proxy_services: Vec<Arc<ProxyService>> = config
         .services
         .iter()
         .map(|service| {
@@ -79,7 +79,7 @@ pub fn load_services(config: &config::Config) -> Result<()> {
                 proxy_service.plugins.push(plugin);
             }
 
-            Ok(proxy_service)
+            Ok(Arc::new(proxy_service))
         })
         .collect::<Result<Vec<_>>>()?;
 

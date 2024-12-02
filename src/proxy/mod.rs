@@ -3,6 +3,7 @@ pub mod global_rule;
 pub mod plugin;
 pub mod router;
 pub mod service;
+pub mod sync;
 pub mod upstream;
 
 use std::{
@@ -156,10 +157,10 @@ pub trait Identifiable {
 }
 
 pub trait MapOperations<T> {
-    fn reload_resource(&self, resources: Vec<T>);
+    fn reload_resource(&self, resources: Vec<Arc<T>>);
 
     fn remove(&self, id: &str);
-    fn insert(&self, resource: T);
+    fn insert(&self, resource: Arc<T>);
     fn get(&self, id: &str) -> Option<Arc<T>>;
 }
 
@@ -168,7 +169,7 @@ where
     T: Identifiable,
 {
     // reload_resource：根据新的资源更新 map，删除不在 resources 中的条目
-    fn reload_resource(&self, resources: Vec<T>) {
+    fn reload_resource(&self, resources: Vec<Arc<T>>) {
         let mut map = self.write().unwrap();
 
         // 先从 resources 中提取所有 id
@@ -180,8 +181,7 @@ where
         // 用新的资源更新 map
         for resource in resources {
             let key = resource.id();
-            let value = Arc::new(resource);
-            map.insert(key, value);
+            map.insert(key, resource);
         }
     }
 
@@ -192,11 +192,10 @@ where
     }
 
     // insert：插入新的资源
-    fn insert(&self, resource: T) {
+    fn insert(&self, resource: Arc<T>) {
         let mut map = self.write().unwrap();
         let key = resource.id();
-        let value = Arc::new(resource);
-        map.insert(key, value);
+        map.insert(key, resource);
     }
 
     // get：根据 id 从 map 中获取资源

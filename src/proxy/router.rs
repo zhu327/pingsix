@@ -250,7 +250,7 @@ impl MatchEntry {
 }
 
 /// Global map to store global rules, initialized lazily.
-static ROUTER_MAP: Lazy<RwLock<HashMap<String, Arc<ProxyRouter>>>> =
+pub static ROUTER_MAP: Lazy<RwLock<HashMap<String, Arc<ProxyRouter>>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
 static GLOBAL_MATCH: Lazy<ArcSwap<MatchEntry>> =
     Lazy::new(|| ArcSwap::new(Arc::new(MatchEntry::default())));
@@ -272,7 +272,7 @@ pub fn reload_global_match() {
 
 /// Loads routers from the given configuration.
 pub fn load_routers(config: &config::Config) -> Result<()> {
-    let proxy_routers: Vec<ProxyRouter> = config
+    let proxy_routers: Vec<Arc<ProxyRouter>> = config
         .routers
         .iter()
         .map(|router| {
@@ -292,7 +292,7 @@ pub fn load_routers(config: &config::Config) -> Result<()> {
                 proxy_router.plugins.push(plugin);
             }
 
-            Ok(proxy_router)
+            Ok(Arc::new(proxy_router))
         })
         .collect::<Result<Vec<_>>>()?;
 
@@ -301,4 +301,9 @@ pub fn load_routers(config: &config::Config) -> Result<()> {
     reload_global_match();
 
     Ok(())
+}
+
+/// Fetches an upstream by its ID.
+pub fn router_fetch(id: &str) -> Option<Arc<ProxyRouter>> {
+    ROUTER_MAP.get(id)
 }

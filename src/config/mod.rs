@@ -1,3 +1,5 @@
+pub mod etcd;
+
 use std::fs;
 use std::net::SocketAddr;
 use std::{collections::HashMap, fmt};
@@ -15,6 +17,9 @@ use validator::{Validate, ValidationError};
 pub struct Config {
     #[serde(default)]
     pub pingora: ServerConf,
+
+    #[validate(nested)]
+    pub etcd: Option<Etcd>,
 
     #[validate(nested)]
     #[serde(default)]
@@ -96,11 +101,22 @@ impl Config {
     fn validate_upstreams_id(&self) -> Result<(), ValidationError> {
         self.upstreams
             .iter()
-            .find(|upstream| upstream.id.is_none())
+            .find(|upstream| upstream.id.is_empty())
             .map_or(Ok(()), |_| {
                 Err(ValidationError::new("upstream_id_required"))
             })
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Validate)]
+pub struct Etcd {
+    #[validate(length(min = 1))]
+    pub host: Vec<String>,
+    pub prefix: String,
+    pub timeout: Option<u32>,
+    pub connect_timeout: Option<u32>,
+    pub user: Option<String>,
+    pub password: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Validate)]
@@ -148,6 +164,7 @@ pub struct Timeout {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
 #[validate(schema(function = "Router::validate"))]
 pub struct Router {
+    #[serde(default)]
     pub id: String,
 
     pub uri: Option<String>,
@@ -236,7 +253,8 @@ impl std::fmt::Display for HttpMethod {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
 #[validate(schema(function = "Upstream::validate_upstream_host"))]
 pub struct Upstream {
-    pub id: Option<String>,
+    #[serde(default)]
+    pub id: String,
     pub retries: Option<u32>,
     pub retry_timeout: Option<u64>,
     #[validate(nested)]
@@ -423,6 +441,7 @@ pub enum UpstreamPassHost {
 #[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
 #[validate(schema(function = "Service::validate_upstream"))]
 pub struct Service {
+    #[serde(default)]
     pub id: String,
     #[serde(default)]
     pub plugins: HashMap<String, YamlValue>,
@@ -444,6 +463,7 @@ impl Service {
 
 #[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
 pub struct GlobalRule {
+    #[serde(default)]
     pub id: String,
     #[serde(default)]
     pub plugins: HashMap<String, YamlValue>,
