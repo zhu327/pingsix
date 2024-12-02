@@ -201,11 +201,11 @@ impl ProxySyncHandler {
 
         let proxy_global_rules: Vec<Arc<ProxyGlobalRule>> = global_rules
             .iter()
-            .filter_map(|rule| {
+            .map(|rule| {
                 // 尝试从缓存或其他地方获取现有的 ProxyRouter
                 if let Some(proxy_global_rule) = global_rule_fetch(&rule.id) {
                     if proxy_global_rule.inner == *rule {
-                        return Some(proxy_global_rule); // 如果已经有匹配的ProxyRouter则直接返回
+                        return proxy_global_rule; // 如果已经有匹配的ProxyRouter则直接返回
                     }
                 }
 
@@ -220,7 +220,7 @@ impl ProxySyncHandler {
                     }
                 }
 
-                Some(Arc::new(proxy_global_rule))
+                Arc::new(proxy_global_rule)
             })
             .collect();
 

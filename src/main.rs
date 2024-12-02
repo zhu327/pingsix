@@ -26,14 +26,13 @@ fn main() {
     let opt = Opt::parse_args();
     let config = Config::load_yaml_with_opt_override(&opt).expect("Failed to load configuration");
 
-    let mut etcd_config_sync: Option<EtcdConfigSync> = None;
-    if let Some(etcd_cfg) = &config.etcd {
+    let etcd_config_sync = config.etcd.as_ref().map(|etcd_cfg| {
+        log::info!("Adding etcd config sync...");
         let sync_handler = ProxySyncHandler::new(config.pingora.work_stealing);
-        etcd_config_sync = Some(EtcdConfigSync::new(
-            etcd_cfg.clone(),
-            Box::new(sync_handler),
-        ));
-    } else {
+        EtcdConfigSync::new(etcd_cfg.clone(), Box::new(sync_handler))
+    });
+
+    if etcd_config_sync.is_none() {
         // Log loading stages and initialize necessary services
         log::info!("Loading services, upstreams, and routers...");
         load_upstreams(&config).expect("Failed to load upstreams");
@@ -100,6 +99,7 @@ fn main() {
     pingsix_server.add_service(http_service);
 
     if let Some(etcd_config_sync) = etcd_config_sync {
+        log::info!("Adding etcd config sync service...");
         let etcd_service = background_service("etcd config sync", etcd_config_sync);
         pingsix_server.add_service(etcd_service);
     };

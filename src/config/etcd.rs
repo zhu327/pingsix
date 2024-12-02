@@ -21,7 +21,7 @@ impl EtcdConfigSync {
             config,
             client: Arc::new(Mutex::new(None)),
             revision: Arc::new(Mutex::new(0)),
-            handler: handler,
+            handler,
         }
     }
 
