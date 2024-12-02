@@ -118,7 +118,7 @@ impl BackgroundService for EtcdConfigSync {
             // 确保客户端存在
             if let Err(err) = self.ensure_client().await {
                 println!("Failed to create etcd client: {:?}", err);
-                sleep(Duration::from_secs(5)).await;
+                sleep(Duration::from_secs(3)).await;
                 continue;
             }
 
@@ -126,7 +126,7 @@ impl BackgroundService for EtcdConfigSync {
             if let Err(err) = self.list().await {
                 println!("List operation failed: {:?}", err);
                 *self.client.lock().await = None; // 重置客户端以便重试
-                sleep(Duration::from_secs(5)).await;
+                sleep(Duration::from_secs(3)).await;
                 continue;
             }
 
@@ -134,7 +134,7 @@ impl BackgroundService for EtcdConfigSync {
             if let Err(err) = self.watch().await {
                 println!("Watch operation failed: {:?}", err);
                 *self.client.lock().await = None; // 重置客户端以便重试
-                sleep(Duration::from_secs(5)).await;
+                sleep(Duration::from_secs(1)).await;
             }
         }
     }
