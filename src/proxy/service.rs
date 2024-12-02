@@ -43,6 +43,28 @@ impl Identifiable for ProxyService {
 }
 
 impl ProxyService {
+    pub fn new_with_upstream_and_plugins(
+        service: config::Service,
+        work_stealing: bool,
+    ) -> Result<Self> {
+        let mut proxy_service = Self::from(service.clone());
+
+        // 配置 upstream
+        if let Some(ref upstream_config) = service.upstream {
+            let mut proxy_upstream = ProxyUpstream::try_from(upstream_config.clone())?;
+            proxy_upstream.start_health_check(work_stealing);
+            proxy_service.upstream = Some(Arc::new(proxy_upstream));
+        }
+
+        // 加载插件
+        for (name, value) in service.plugins {
+            let plugin = build_plugin(&name, value)?;
+            proxy_service.plugins.push(plugin);
+        }
+
+        Ok(proxy_service)
+    }
+
     /// Gets the upstream for the service.
     pub fn get_upstream(&self) -> Option<Arc<ProxyUpstream>> {
         if self.upstream.is_some() {
@@ -64,20 +86,10 @@ pub fn load_services(config: &config::Config) -> Result<()> {
         .iter()
         .map(|service| {
             log::info!("Configuring Service: {}", service.id);
-            let mut proxy_service = ProxyService::from(service.clone());
-
-            if let Some(ref upstream) = service.upstream {
-                let mut proxy_upstream = ProxyUpstream::try_from(upstream.clone())?;
-                proxy_upstream.start_health_check(config.pingora.work_stealing);
-
-                proxy_service.upstream = Some(Arc::new(proxy_upstream));
-            }
-
-            // load service plugins
-            for (name, value) in service.plugins.clone() {
-                let plugin = build_plugin(&name, value)?;
-                proxy_service.plugins.push(plugin);
-            }
+            let proxy_service = ProxyService::new_with_upstream_and_plugins(
+                service.clone(),
+                config.pingora.work_stealing,
+            )?;
 
             Ok(Arc::new(proxy_service))
         })

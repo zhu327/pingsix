@@ -48,6 +48,28 @@ impl Identifiable for ProxyRouter {
 }
 
 impl ProxyRouter {
+    pub fn new_with_upstream_and_plugins(
+        router: config::Router,
+        work_stealing: bool,
+    ) -> Result<Self> {
+        let mut proxy_router = Self::from(router.clone());
+
+        // 配置 upstream
+        if let Some(upstream_config) = router.upstream {
+            let mut proxy_upstream = ProxyUpstream::try_from(upstream_config)?;
+            proxy_upstream.start_health_check(work_stealing);
+            proxy_router.upstream = Some(Arc::new(proxy_upstream));
+        }
+
+        // 加载插件
+        for (name, value) in router.plugins {
+            let plugin = build_plugin(&name, value)?;
+            proxy_router.plugins.push(plugin);
+        }
+
+        Ok(proxy_router)
+    }
+
     /// Gets the upstream for the router.
     pub fn get_upstream(&self) -> Option<Arc<ProxyUpstream>> {
         self.upstream
@@ -277,20 +299,10 @@ pub fn load_routers(config: &config::Config) -> Result<()> {
         .iter()
         .map(|router| {
             log::info!("Configuring Router: {}", router.id);
-            let mut proxy_router = ProxyRouter::from(router.clone());
-
-            if let Some(upstream) = router.upstream.clone() {
-                let mut proxy_upstream = ProxyUpstream::try_from(upstream)?;
-                proxy_upstream.start_health_check(config.pingora.work_stealing);
-
-                proxy_router.upstream = Some(Arc::new(proxy_upstream));
-            }
-
-            // load router plugins
-            for (name, value) in router.plugins.iter() {
-                let plugin = build_plugin(name, value.clone())?;
-                proxy_router.plugins.push(plugin);
-            }
+            let proxy_router = ProxyRouter::new_with_upstream_and_plugins(
+                router.clone(),
+                config.pingora.work_stealing,
+            )?;
 
             Ok(Arc::new(proxy_router))
         })

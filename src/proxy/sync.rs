@@ -6,7 +6,6 @@ use crate::config::{etcd::EtcdSyncHandler, GlobalRule, Router, Service, Upstream
 
 use super::{
     global_rule::{global_rule_fetch, reload_global_plugin, ProxyGlobalRule, GLOBAL_RULE_MAP},
-    plugin::build_plugin,
     router::{reload_global_match, router_fetch, ProxyRouter, ROUTER_MAP},
     service::{service_fetch, ProxyService, SERVICE_MAP},
     upstream::{upstream_fetch, ProxyUpstream, UPSTREAM_MAP},
@@ -53,27 +52,9 @@ impl ProxySyncHandler {
                 log::info!("Configuring Router: {}", router.id);
 
                 // 创建新的 ProxyRouter
-                let mut proxy_router = ProxyRouter::from(router.clone());
-
-                // 配置上游 (upstream)
-                if let Some(upstream) = router.upstream.clone() {
-                    let mut proxy_upstream = match ProxyUpstream::try_from(upstream) {
-                        Ok(proxy_upstream) => proxy_upstream,
-                        Err(_) => return None,
-                    };
-                    proxy_upstream.start_health_check(self.work_stealing);
-
-                    proxy_router.upstream = Some(Arc::new(proxy_upstream));
-                }
-
-                // 配置路由插件
-                for (name, value) in router.plugins.iter() {
-                    if let Ok(plugin) = build_plugin(name, value.clone()) {
-                        proxy_router.plugins.push(plugin);
-                    }
-                }
-
-                Some(Arc::new(proxy_router))
+                ProxyRouter::new_with_upstream_and_plugins(router.clone(), self.work_stealing)
+                    .ok()
+                    .map(Arc::new)
             })
             .collect();
 
@@ -110,14 +91,9 @@ impl ProxySyncHandler {
                 }
 
                 log::info!("Configuring Upstream: {}", upstream.id);
-
-                let mut proxy_upstream = match ProxyUpstream::try_from(upstream.clone()) {
-                    Ok(proxy_upstream) => proxy_upstream,
-                    Err(_) => return None,
-                };
-                proxy_upstream.start_health_check(self.work_stealing);
-
-                Some(Arc::new(proxy_upstream))
+                ProxyUpstream::new_with_health_check(upstream.clone(), self.work_stealing)
+                    .ok()
+                    .map(Arc::new)
             })
             .collect();
 
@@ -153,28 +129,9 @@ impl ProxySyncHandler {
                 }
 
                 log::info!("Configuring Service: {}", service.id);
-
-                let mut proxy_service = ProxyService::from(service.clone());
-
-                // 配置上游 (upstream)
-                if let Some(upstream) = service.upstream.clone() {
-                    let mut proxy_upstream = match ProxyUpstream::try_from(upstream) {
-                        Ok(proxy_upstream) => proxy_upstream,
-                        Err(_) => return None,
-                    };
-                    proxy_upstream.start_health_check(self.work_stealing);
-
-                    proxy_service.upstream = Some(Arc::new(proxy_upstream));
-                }
-
-                // 配置路由插件
-                for (name, value) in service.plugins.iter() {
-                    if let Ok(plugin) = build_plugin(name, value.clone()) {
-                        proxy_service.plugins.push(plugin);
-                    }
-                }
-
-                Some(Arc::new(proxy_service))
+                ProxyService::new_with_upstream_and_plugins(service.clone(), self.work_stealing)
+                    .ok()
+                    .map(Arc::new)
             })
             .collect();
 
@@ -201,26 +158,18 @@ impl ProxySyncHandler {
 
         let proxy_global_rules: Vec<Arc<ProxyGlobalRule>> = global_rules
             .iter()
-            .map(|rule| {
+            .filter_map(|rule| {
                 // 尝试从缓存或其他地方获取现有的 ProxyRouter
                 if let Some(proxy_global_rule) = global_rule_fetch(&rule.id) {
                     if proxy_global_rule.inner == *rule {
-                        return proxy_global_rule; // 如果已经有匹配的ProxyRouter则直接返回
+                        return Some(proxy_global_rule); // 如果已经有匹配的ProxyRouter则直接返回
                     }
                 }
 
                 log::info!("Configuring Global Rule: {}", rule.id);
-
-                let mut proxy_global_rule = ProxyGlobalRule::from(rule.clone());
-
-                // load service plugins
-                for (name, value) in rule.plugins.iter() {
-                    if let Ok(plugin) = build_plugin(name, value.clone()) {
-                        proxy_global_rule.plugins.push(plugin);
-                    }
-                }
-
-                Arc::new(proxy_global_rule)
+                ProxyGlobalRule::new_with_plugins(rule.clone())
+                    .ok()
+                    .map(Arc::new)
             })
             .collect();
 
@@ -253,84 +202,41 @@ impl ProxySyncHandler {
 
     fn handle_router_event(&self, event: &Event) {
         self.handle_resource::<Router, _>(event, "routers", |handler, router| {
-            // 处理路由器的逻辑
-            let mut proxy_router = ProxyRouter::from(router.clone());
-
-            if let Some(upstream) = router.upstream.clone() {
-                let proxy_upstream = ProxyUpstream::try_from(upstream).ok();
-                if let Some(mut proxy_upstream) = proxy_upstream {
-                    proxy_upstream.start_health_check(handler.work_stealing);
-                    proxy_router.upstream = Some(Arc::new(proxy_upstream));
-                }
+            if let Ok(proxy_router) =
+                ProxyRouter::new_with_upstream_and_plugins(router.clone(), handler.work_stealing)
+            {
+                ROUTER_MAP.insert(Arc::new(proxy_router));
+                reload_global_match();
             }
-
-            for (name, value) in router.plugins.iter() {
-                if let Ok(plugin) = build_plugin(name, value.clone()) {
-                    proxy_router.plugins.push(plugin);
-                }
-            }
-
-            // 更新路由器的映射
-            let proxy_router = Arc::new(proxy_router);
-            ROUTER_MAP.insert(proxy_router);
-            reload_global_match();
         });
     }
 
     fn handle_upstream_event(&self, event: &Event) {
         self.handle_resource::<Upstream, _>(event, "upstreams", |handler, upstream| {
-            // 处理上游的逻辑
-            let proxy_upstream = ProxyUpstream::try_from(upstream.clone()).ok();
-            if let Some(mut proxy_upstream) = proxy_upstream {
-                proxy_upstream.start_health_check(handler.work_stealing);
-
-                let proxy_upstream = Arc::new(proxy_upstream);
-                UPSTREAM_MAP.insert(proxy_upstream);
+            if let Ok(proxy_upstream) =
+                ProxyUpstream::new_with_health_check(upstream.clone(), handler.work_stealing)
+            {
+                UPSTREAM_MAP.insert(Arc::new(proxy_upstream));
             }
         });
     }
 
     fn handle_service_event(&self, event: &Event) {
         self.handle_resource::<Service, _>(event, "services", |handler, service| {
-            // 处理服务的逻辑
-            let mut proxy_service = ProxyService::from(service.clone());
-
-            if let Some(upstream) = service.upstream.clone() {
-                let proxy_upstream = ProxyUpstream::try_from(upstream).ok();
-                if let Some(mut proxy_upstream) = proxy_upstream {
-                    proxy_upstream.start_health_check(handler.work_stealing);
-
-                    proxy_service.upstream = Some(Arc::new(proxy_upstream));
-                }
+            if let Ok(proxy_service) =
+                ProxyService::new_with_upstream_and_plugins(service.clone(), handler.work_stealing)
+            {
+                SERVICE_MAP.insert(Arc::new(proxy_service));
             }
-
-            for (name, value) in service.plugins.iter() {
-                if let Ok(plugin) = build_plugin(name, value.clone()) {
-                    proxy_service.plugins.push(plugin);
-                }
-            }
-
-            // 更新服务的映射
-            let proxy_service = Arc::new(proxy_service);
-            SERVICE_MAP.insert(proxy_service);
         });
     }
 
     fn handle_global_rule_event(&self, event: &Event) {
         self.handle_resource::<GlobalRule, _>(event, "global_rules", |_handler, rule| {
-            // 处理全局规则的逻辑
-            let mut proxy_global_rule = ProxyGlobalRule::from(rule.clone());
-
-            for (name, value) in rule.plugins.iter() {
-                if let Ok(plugin) = build_plugin(name, value.clone()) {
-                    proxy_global_rule.plugins.push(plugin);
-                }
+            if let Ok(proxy_global_rule) = ProxyGlobalRule::new_with_plugins(rule.clone()) {
+                GLOBAL_RULE_MAP.insert(Arc::new(proxy_global_rule));
+                reload_global_plugin();
             }
-
-            // 更新全局规则的映射
-            let proxy_global_rule = Arc::new(proxy_global_rule);
-            GLOBAL_RULE_MAP.insert(proxy_global_rule);
-            reload_global_plugin();
         });
     }
 }

@@ -58,6 +58,12 @@ impl Identifiable for ProxyUpstream {
 }
 
 impl ProxyUpstream {
+    pub fn new_with_health_check(upstream: config::Upstream, work_stealing: bool) -> Result<Self> {
+        let mut proxy_upstream = Self::try_from(upstream)?;
+        proxy_upstream.start_health_check(work_stealing);
+        Ok(proxy_upstream)
+    }
+
     /// Starts the health check service, runs only once.
     pub fn start_health_check(&mut self, work_stealing: bool) {
         if let Some(mut service) = self.take_background_service() {
@@ -351,11 +357,12 @@ pub fn load_upstreams(config: &config::Config) -> Result<()> {
         .upstreams
         .iter()
         .map(|upstream| {
-            let upstream_id = upstream.id.clone();
-            info!("Configuring Upstream: {}", upstream_id);
+            info!("Configuring Upstream: {}", upstream.id);
 
-            let mut proxy_upstream = ProxyUpstream::try_from(upstream.clone())?;
-            proxy_upstream.start_health_check(config.pingora.work_stealing);
+            let proxy_upstream = ProxyUpstream::new_with_health_check(
+                upstream.clone(),
+                config.pingora.work_stealing,
+            )?;
 
             Ok(Arc::new(proxy_upstream))
         })

@@ -35,6 +35,20 @@ impl From<config::GlobalRule> for ProxyGlobalRule {
     }
 }
 
+impl ProxyGlobalRule {
+    pub fn new_with_plugins(rule: config::GlobalRule) -> Result<Self> {
+        let mut proxy_global_rule = Self::from(rule.clone());
+
+        // 加载插件
+        for (name, value) in rule.plugins {
+            let plugin = build_plugin(&name, value)?;
+            proxy_global_rule.plugins.push(plugin);
+        }
+
+        Ok(proxy_global_rule)
+    }
+}
+
 /// Global map to store global rules, initialized lazily.
 pub static GLOBAL_RULE_MAP: Lazy<RwLock<HashMap<String, Arc<ProxyGlobalRule>>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
@@ -79,13 +93,7 @@ pub fn load_global_rules(config: &config::Config) -> Result<()> {
         .iter()
         .map(|rule| {
             log::info!("Configuring GlobalRule: {}", rule.id);
-            let mut proxy_global_rule = ProxyGlobalRule::from(rule.clone());
-
-            // load service plugins
-            for (name, value) in rule.plugins.clone() {
-                let plugin = build_plugin(&name, value)?;
-                proxy_global_rule.plugins.push(plugin);
-            }
+            let proxy_global_rule = ProxyGlobalRule::new_with_plugins(rule.clone())?;
 
             Ok(Arc::new(proxy_global_rule))
         })
