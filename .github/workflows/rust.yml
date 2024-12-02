@@ -18,7 +18,7 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - name: Build
-      run: cargo build --verbose
+      run: apt-get install protobuf-compiler && cargo build --verbose
     - name: Run Clippy
       run: cargo clippy --all-features
     - name: Run tests
