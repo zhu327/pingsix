@@ -1,28 +1,31 @@
+pub mod discovery;
+pub mod global_rule;
+pub mod plugin;
+pub mod router;
+pub mod service;
+pub mod sync;
+pub mod upstream;
+
 use std::{
-    collections::{BTreeMap, HashMap},
-    sync::Arc,
+    collections::{BTreeMap, HashMap, HashSet},
+    sync::{Arc, RwLock},
     time::Instant,
 };
 
 use pingora_http::RequestHeader;
 use pingora_proxy::Session;
+
 use plugin::ProxyPluginExecutor;
 use router::ProxyRouter;
 
 use crate::config;
-
-pub mod discovery;
-pub mod plugin;
-pub mod router;
-pub mod service;
-pub mod upstream;
 
 /// Proxy context.
 ///
 /// Holds the context for each request.
 pub struct ProxyContext {
     pub router: Option<Arc<ProxyRouter>>,
-    pub router_params: BTreeMap<String, String>,
+    pub router_params: Option<BTreeMap<String, String>>,
 
     pub tries: usize,
     pub request_start: Instant,
@@ -38,7 +41,7 @@ impl Default for ProxyContext {
     fn default() -> Self {
         Self {
             router: None,
-            router_params: BTreeMap::new(),
+            router_params: None,
             tries: 0,
             request_start: Instant::now(),
             plugin: Arc::new(ProxyPluginExecutor::default()),
@@ -147,4 +150,57 @@ pub fn get_request_host(header: &RequestHeader) -> Option<&str> {
         }
     }
     None
+}
+
+pub trait Identifiable {
+    fn id(&self) -> String;
+}
+
+pub trait MapOperations<T> {
+    fn reload_resource(&self, resources: Vec<Arc<T>>);
+
+    fn remove(&self, id: &str);
+    fn insert(&self, resource: Arc<T>);
+    fn get(&self, id: &str) -> Option<Arc<T>>;
+}
+
+impl<T> MapOperations<T> for RwLock<HashMap<String, Arc<T>>>
+where
+    T: Identifiable,
+{
+    // reload_resource：根据新的资源更新 map，删除不在 resources 中的条目
+    fn reload_resource(&self, resources: Vec<Arc<T>>) {
+        let mut map = self.write().unwrap();
+
+        // 先从 resources 中提取所有 id
+        let resource_ids: HashSet<String> = resources.iter().map(|r| r.id()).collect();
+
+        // 删除那些不在资源中的条目
+        map.retain(|key, _| resource_ids.contains(key));
+
+        // 用新的资源更新 map
+        for resource in resources {
+            let key = resource.id();
+            map.insert(key, resource);
+        }
+    }
+
+    // remove：根据 id 从 map 中删除条目
+    fn remove(&self, id: &str) {
+        let mut map = self.write().unwrap();
+        map.remove(id);
+    }
+
+    // insert：插入新的资源
+    fn insert(&self, resource: Arc<T>) {
+        let mut map = self.write().unwrap();
+        let key = resource.id();
+        map.insert(key, resource);
+    }
+
+    // get：根据 id 从 map 中获取资源
+    fn get(&self, id: &str) -> Option<Arc<T>> {
+        let map = self.read().unwrap();
+        map.get(id).cloned()
+    }
 }

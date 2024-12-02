@@ -1,8 +1,11 @@
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time;
+use std::{collections::BTreeMap, sync::RwLock};
 
+use arc_swap::ArcSwap;
 use matchit::{InsertError, Router as MatchRouter};
+use once_cell::sync::Lazy;
 use pingora_core::upstreams::peer::HttpPeer;
 use pingora_error::{Error, Result};
 use pingora_proxy::Session;
@@ -11,9 +14,11 @@ use crate::config;
 
 use super::{
     get_request_host,
+    plugin::build_plugin,
     plugin::ProxyPlugin,
     service::service_fetch,
     upstream::{upstream_fetch, ProxyUpstream},
+    Identifiable, MapOperations,
 };
 
 /// Proxy router.
@@ -36,7 +41,35 @@ impl From<config::Router> for ProxyRouter {
     }
 }
 
+impl Identifiable for ProxyRouter {
+    fn id(&self) -> String {
+        self.inner.id.clone()
+    }
+}
+
 impl ProxyRouter {
+    pub fn new_with_upstream_and_plugins(
+        router: config::Router,
+        work_stealing: bool,
+    ) -> Result<Self> {
+        let mut proxy_router = Self::from(router.clone());
+
+        // 配置 upstream
+        if let Some(upstream_config) = router.upstream {
+            let mut proxy_upstream = ProxyUpstream::try_from(upstream_config)?;
+            proxy_upstream.start_health_check(work_stealing);
+            proxy_router.upstream = Some(Arc::new(proxy_upstream));
+        }
+
+        // 加载插件
+        for (name, value) in router.plugins {
+            let plugin = build_plugin(&name, value)?;
+            proxy_router.plugins.push(plugin);
+        }
+
+        Ok(proxy_router)
+    }
+
     /// Gets the upstream for the router.
     pub fn get_upstream(&self) -> Option<Arc<ProxyUpstream>> {
         self.upstream
@@ -122,10 +155,9 @@ pub struct MatchEntry {
 
 impl MatchEntry {
     /// Inserts a router into the match entry.
-    pub fn insert_router(&mut self, proxy_router: ProxyRouter) -> Result<(), InsertError> {
+    pub fn insert_router(&mut self, proxy_router: Arc<ProxyRouter>) -> Result<(), InsertError> {
         let hosts = proxy_router.get_hosts();
         let uris = proxy_router.inner.get_uris();
-        let proxy_router = Arc::new(proxy_router);
 
         if hosts.is_empty() {
             // Insert for non-host URIs
@@ -237,4 +269,53 @@ impl MatchEntry {
         }
         None
     }
+}
+
+/// Global map to store global rules, initialized lazily.
+pub static ROUTER_MAP: Lazy<RwLock<HashMap<String, Arc<ProxyRouter>>>> =
+    Lazy::new(|| RwLock::new(HashMap::new()));
+static GLOBAL_MATCH: Lazy<ArcSwap<MatchEntry>> =
+    Lazy::new(|| ArcSwap::new(Arc::new(MatchEntry::default())));
+
+pub fn global_match_fetch() -> Arc<MatchEntry> {
+    GLOBAL_MATCH.load().clone()
+}
+
+pub fn reload_global_match() {
+    let mut matcher = MatchEntry::default();
+
+    let routers = ROUTER_MAP.read().unwrap();
+    for router in routers.values() {
+        matcher.insert_router(router.clone()).unwrap();
+    }
+
+    GLOBAL_MATCH.store(Arc::new(matcher));
+}
+
+/// Loads routers from the given configuration.
+pub fn load_routers(config: &config::Config) -> Result<()> {
+    let proxy_routers: Vec<Arc<ProxyRouter>> = config
+        .routers
+        .iter()
+        .map(|router| {
+            log::info!("Configuring Router: {}", router.id);
+            let proxy_router = ProxyRouter::new_with_upstream_and_plugins(
+                router.clone(),
+                config.pingora.work_stealing,
+            )?;
+
+            Ok(Arc::new(proxy_router))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    ROUTER_MAP.reload_resource(proxy_routers);
+
+    reload_global_match();
+
+    Ok(())
+}
+
+/// Fetches an upstream by its ID.
+pub fn router_fetch(id: &str) -> Option<Arc<ProxyRouter>> {
+    ROUTER_MAP.get(id)
 }

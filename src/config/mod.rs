@@ -1,3 +1,5 @@
+pub mod etcd;
+
 use std::fs;
 use std::net::SocketAddr;
 use std::{collections::HashMap, fmt};
@@ -15,6 +17,9 @@ use validator::{Validate, ValidationError};
 pub struct Config {
     #[serde(default)]
     pub pingora: ServerConf,
+
+    #[validate(nested)]
+    pub etcd: Option<Etcd>,
 
     #[validate(nested)]
     #[serde(default)]
@@ -96,11 +101,22 @@ impl Config {
     fn validate_upstreams_id(&self) -> Result<(), ValidationError> {
         self.upstreams
             .iter()
-            .find(|upstream| upstream.id.is_none())
+            .find(|upstream| upstream.id.is_empty())
             .map_or(Ok(()), |_| {
                 Err(ValidationError::new("upstream_id_required"))
             })
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Validate)]
+pub struct Etcd {
+    #[validate(length(min = 1))]
+    pub host: Vec<String>,
+    pub prefix: String,
+    pub timeout: Option<u32>,
+    pub connect_timeout: Option<u32>,
+    pub user: Option<String>,
+    pub password: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Validate)]
@@ -138,16 +154,17 @@ pub struct Tls {
     pub key_path: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Validate)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
 pub struct Timeout {
     pub connect: u64,
     pub send: u64,
     pub read: u64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Validate)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
 #[validate(schema(function = "Router::validate"))]
 pub struct Router {
+    #[serde(default)]
     pub id: String,
 
     pub uri: Option<String>,
@@ -201,7 +218,7 @@ impl Router {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HttpMethod {
     GET,
     POST,
@@ -233,10 +250,11 @@ impl std::fmt::Display for HttpMethod {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Validate)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
 #[validate(schema(function = "Upstream::validate_upstream_host"))]
 pub struct Upstream {
-    pub id: Option<String>,
+    #[serde(default)]
+    pub id: String,
     pub retries: Option<u32>,
     pub retry_timeout: Option<u64>,
     #[validate(nested)]
@@ -292,7 +310,7 @@ impl Upstream {
     }
 }
 
-#[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SelectionType {
     #[default]
@@ -302,14 +320,14 @@ pub enum SelectionType {
     Ketama,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Validate)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
 pub struct HealthCheck {
     // only support passive check for now
     #[validate(nested)]
     pub active: ActiveCheck,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Validate)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
 pub struct ActiveCheck {
     #[serde(default)]
     pub r#type: ActiveCheckType,
@@ -328,7 +346,7 @@ pub struct ActiveCheck {
     pub unhealthy: Option<Unhealthy>,
 }
 
-#[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ActiveCheckType {
     TCP,
@@ -351,7 +369,7 @@ impl ActiveCheck {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Health {
     #[serde(default = "Health::default_interval")]
     pub interval: u32,
@@ -375,7 +393,7 @@ impl Health {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Validate)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
 pub struct Unhealthy {
     #[serde(default = "Unhealthy::default_http_failures")]
     pub http_failures: u32,
@@ -393,7 +411,7 @@ impl Unhealthy {
     }
 }
 
-#[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum UpstreamHashOn {
     #[default]
@@ -402,7 +420,7 @@ pub enum UpstreamHashOn {
     COOKIE,
 }
 
-#[derive(Copy, Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum UpstreamScheme {
     #[default]
@@ -412,7 +430,7 @@ pub enum UpstreamScheme {
     GRPCS,
 }
 
-#[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum UpstreamPassHost {
     #[default]
@@ -420,9 +438,10 @@ pub enum UpstreamPassHost {
     REWRITE,
 }
 
-#[derive(Clone, Default, Debug, Serialize, Deserialize, Validate)]
+#[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
 #[validate(schema(function = "Service::validate_upstream"))]
 pub struct Service {
+    #[serde(default)]
     pub id: String,
     #[serde(default)]
     pub plugins: HashMap<String, YamlValue>,
@@ -442,8 +461,9 @@ impl Service {
     }
 }
 
-#[derive(Clone, Default, Debug, Serialize, Deserialize, Validate)]
+#[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
 pub struct GlobalRule {
+    #[serde(default)]
     pub id: String,
     #[serde(default)]
     pub plugins: HashMap<String, YamlValue>,

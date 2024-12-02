@@ -8,8 +8,7 @@ use http::Uri;
 use log::info;
 use once_cell::sync::Lazy;
 use pingora::services::background::background_service;
-use pingora_core::services::Service;
-use pingora_core::upstreams::peer::HttpPeer;
+use pingora_core::{services::Service, upstreams::peer::HttpPeer};
 use pingora_error::{Error, Result};
 use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_load_balancing::{
@@ -25,8 +24,7 @@ use tokio::sync::watch;
 
 use crate::config;
 
-use super::discovery::HybridDiscovery;
-use super::request_selector_key;
+use super::{discovery::HybridDiscovery, request_selector_key, Identifiable, MapOperations};
 
 /// Proxy load balancer.
 ///
@@ -53,7 +51,19 @@ impl TryFrom<config::Upstream> for ProxyUpstream {
     }
 }
 
+impl Identifiable for ProxyUpstream {
+    fn id(&self) -> String {
+        self.inner.id.clone()
+    }
+}
+
 impl ProxyUpstream {
+    pub fn new_with_health_check(upstream: config::Upstream, work_stealing: bool) -> Result<Self> {
+        let mut proxy_upstream = Self::try_from(upstream)?;
+        proxy_upstream.start_health_check(work_stealing);
+        Ok(proxy_upstream)
+    }
+
     /// Starts the health check service, runs only once.
     pub fn start_health_check(&mut self, work_stealing: bool) {
         if let Some(mut service) = self.take_background_service() {
@@ -337,34 +347,34 @@ impl From<config::HealthCheck> for Box<HttpHealthCheck> {
 }
 
 // Define a global upstream map, initialized lazily
-static UPSTREAM_MAP: Lazy<RwLock<HashMap<String, Arc<ProxyUpstream>>>> =
+pub static UPSTREAM_MAP: Lazy<RwLock<HashMap<String, Arc<ProxyUpstream>>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
 
 /// Loads upstreams from the given configuration.
 pub fn load_upstreams(config: &config::Config) -> Result<()> {
-    let mut map = UPSTREAM_MAP
-        .write()
-        .expect("Failed to acquire write lock on the upstream map");
+    // Collect all ProxyUpstream instances into a vector.
+    let proxy_upstreams: Vec<Arc<ProxyUpstream>> = config
+        .upstreams
+        .iter()
+        .map(|upstream| {
+            info!("Configuring Upstream: {}", upstream.id);
 
-    for upstream in config.upstreams.iter() {
-        info!(
-            "Configuring Upstream: {}",
-            upstream.id.clone().expect("Upstream ID is missing")
-        );
+            let proxy_upstream = ProxyUpstream::new_with_health_check(
+                upstream.clone(),
+                config.pingora.work_stealing,
+            )?;
 
-        let mut proxy_upstream = ProxyUpstream::try_from(upstream.clone())?;
-        proxy_upstream.start_health_check(config.pingora.work_stealing);
+            Ok(Arc::new(proxy_upstream))
+        })
+        .collect::<Result<Vec<_>>>()?;
 
-        map.insert(upstream.id.clone().unwrap(), Arc::new(proxy_upstream));
-    }
+    // Insert all ProxyUpstream instances into the global map.
+    UPSTREAM_MAP.reload_resource(proxy_upstreams);
 
     Ok(())
 }
 
 /// Fetches an upstream by its ID.
 pub fn upstream_fetch(id: &str) -> Option<Arc<ProxyUpstream>> {
-    let map = UPSTREAM_MAP
-        .read()
-        .expect("Failed to acquire read lock on the upstream map");
-    map.get(id).cloned()
+    UPSTREAM_MAP.get(id)
 }

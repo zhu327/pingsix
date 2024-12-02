@@ -6,8 +6,7 @@ use async_trait::async_trait;
 use futures::future::join_all;
 use hickory_resolver::TokioAsyncResolver;
 use once_cell::sync::OnceCell;
-use pingora::protocols::ALPN;
-use pingora::upstreams::peer::HttpPeer;
+use pingora::{protocols::ALPN, upstreams::peer::HttpPeer};
 use pingora_error::{Error, ErrorType::InternalError, OrErr, Result};
 use pingora_load_balancing::{
     discovery::{ServiceDiscovery, Static},
