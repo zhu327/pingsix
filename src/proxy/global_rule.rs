@@ -11,8 +11,29 @@ use crate::config;
 
 use super::{
     plugin::{build_plugin, ProxyPlugin, ProxyPluginExecutor},
-    Identifiable,
+    Identifiable, MapOperations,
 };
+
+/// Represents a proxy service that manages upstreams.
+pub struct ProxyGlobalRule {
+    pub inner: config::GlobalRule,
+    pub plugins: Vec<Arc<dyn ProxyPlugin>>,
+}
+
+impl Identifiable for ProxyGlobalRule {
+    fn id(&self) -> String {
+        self.inner.id.clone()
+    }
+}
+
+impl From<config::GlobalRule> for ProxyGlobalRule {
+    fn from(value: config::GlobalRule) -> Self {
+        Self {
+            inner: value,
+            plugins: Vec::new(),
+        }
+    }
+}
 
 /// Global map to store global rules, initialized lazily.
 static GLOBAL_RULE_MAP: Lazy<RwLock<HashMap<String, Arc<ProxyGlobalRule>>>> =
@@ -53,12 +74,10 @@ pub fn reload_global_plugin() {
 
 /// Loads services from the given configuration.
 pub fn load_global_rules(config: &config::Config) -> Result<()> {
-    {
-        let mut map = GLOBAL_RULE_MAP
-            .write()
-            .expect("Failed to acquire write lock on the global rule map");
-
-        for rule in config.global_rules.iter() {
+    let proxy_global_rules: Vec<ProxyGlobalRule> = config
+        .global_rules
+        .iter()
+        .map(|rule| {
             log::info!("Configuring GlobalRule: {}", rule.id);
             let mut proxy_global_rule = ProxyGlobalRule::from(rule.clone());
 
@@ -68,34 +87,13 @@ pub fn load_global_rules(config: &config::Config) -> Result<()> {
                 proxy_global_rule.plugins.push(plugin);
             }
 
-            map.insert(rule.id.clone(), Arc::new(proxy_global_rule));
-        }
+            Ok(proxy_global_rule)
+        })
+        .collect::<Result<Vec<_>>>()?;
 
-        // release the write lock
-    }
+    GLOBAL_RULE_MAP.reload_resource(proxy_global_rules);
 
     reload_global_plugin();
 
     Ok(())
-}
-
-/// Represents a proxy service that manages upstreams.
-pub struct ProxyGlobalRule {
-    pub inner: config::GlobalRule,
-    pub plugins: Vec<Arc<dyn ProxyPlugin>>,
-}
-
-impl Identifiable for ProxyGlobalRule {
-    fn id(&self) -> String {
-        self.inner.id.clone()
-    }
-}
-
-impl From<config::GlobalRule> for ProxyGlobalRule {
-    fn from(value: config::GlobalRule) -> Self {
-        Self {
-            inner: value,
-            plugins: Vec::new(),
-        }
-    }
 }

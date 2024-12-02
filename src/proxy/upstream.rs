@@ -8,8 +8,7 @@ use http::Uri;
 use log::info;
 use once_cell::sync::Lazy;
 use pingora::services::background::background_service;
-use pingora_core::services::Service;
-use pingora_core::upstreams::peer::HttpPeer;
+use pingora_core::{services::Service, upstreams::peer::HttpPeer};
 use pingora_error::{Error, Result};
 use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_load_balancing::{
@@ -25,8 +24,7 @@ use tokio::sync::watch;
 
 use crate::config;
 
-use super::request_selector_key;
-use super::{discovery::HybridDiscovery, Identifiable};
+use super::{discovery::HybridDiscovery, request_selector_key, Identifiable, MapOperations};
 
 /// Proxy load balancer.
 ///
@@ -348,29 +346,28 @@ static UPSTREAM_MAP: Lazy<RwLock<HashMap<String, Arc<ProxyUpstream>>>> =
 
 /// Loads upstreams from the given configuration.
 pub fn load_upstreams(config: &config::Config) -> Result<()> {
-    let mut map = UPSTREAM_MAP
-        .write()
-        .expect("Failed to acquire write lock on the upstream map");
+    // Collect all ProxyUpstream instances into a vector.
+    let proxy_upstreams: Vec<ProxyUpstream> = config
+        .upstreams
+        .iter()
+        .map(|upstream| {
+            let upstream_id = upstream.id.clone().expect("Upstream ID is missing");
+            info!("Configuring Upstream: {}", upstream_id);
 
-    for upstream in config.upstreams.iter() {
-        info!(
-            "Configuring Upstream: {}",
-            upstream.id.clone().expect("Upstream ID is missing")
-        );
+            let mut proxy_upstream = ProxyUpstream::try_from(upstream.clone())?;
+            proxy_upstream.start_health_check(config.pingora.work_stealing);
 
-        let mut proxy_upstream = ProxyUpstream::try_from(upstream.clone())?;
-        proxy_upstream.start_health_check(config.pingora.work_stealing);
+            Ok(proxy_upstream)
+        })
+        .collect::<Result<Vec<_>>>()?;
 
-        map.insert(upstream.id.clone().unwrap(), Arc::new(proxy_upstream));
-    }
+    // Insert all ProxyUpstream instances into the global map.
+    UPSTREAM_MAP.reload_resource(proxy_upstreams);
 
     Ok(())
 }
 
 /// Fetches an upstream by its ID.
 pub fn upstream_fetch(id: &str) -> Option<Arc<ProxyUpstream>> {
-    let map = UPSTREAM_MAP
-        .read()
-        .expect("Failed to acquire read lock on the upstream map");
-    map.get(id).cloned()
+    UPSTREAM_MAP.get(id)
 }

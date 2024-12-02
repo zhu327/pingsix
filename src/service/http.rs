@@ -3,17 +3,21 @@ use std::time::Duration;
 use async_trait::async_trait;
 use bytes::Bytes;
 use http::StatusCode;
-use pingora::modules::http::HttpModules;
-use pingora::modules::http::{compression::ResponseCompressionBuilder, grpc_web::GrpcWeb};
+use pingora::modules::http::{
+    HttpModules,
+    {compression::ResponseCompressionBuilder, grpc_web::GrpcWeb},
+};
 use pingora_core::upstreams::peer::HttpPeer;
 use pingora_error::{Error, Result};
 use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_proxy::{ProxyHttp, Session};
 
-use crate::proxy::global_rule::global_plugin_fetch;
-use crate::proxy::plugin::{build_plugin_executor, ProxyPlugin};
-use crate::proxy::router::global_match_fetch;
-use crate::proxy::ProxyContext;
+use crate::proxy::{
+    global_rule::global_plugin_fetch,
+    plugin::{build_plugin_executor, ProxyPlugin},
+    router::global_match_fetch,
+    ProxyContext,
+};
 
 /// Proxy service.
 ///

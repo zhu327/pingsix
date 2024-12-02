@@ -11,46 +11,12 @@ use crate::config;
 use super::{
     plugin::{build_plugin, ProxyPlugin},
     upstream::{upstream_fetch, ProxyUpstream},
-    Identifiable,
+    Identifiable, MapOperations,
 };
-
-/// Global map to store services, initialized lazily.
-static SERVICE_MAP: Lazy<RwLock<HashMap<String, Arc<ProxyService>>>> =
-    Lazy::new(|| RwLock::new(HashMap::new()));
-
-/// Loads services from the given configuration.
-pub fn load_services(config: &config::Config) -> Result<()> {
-    let mut map = SERVICE_MAP
-        .write()
-        .expect("Failed to acquire write lock on the service map");
-
-    for service in config.services.iter() {
-        log::info!("Configuring Service: {}", service.id);
-        let mut proxy_service = ProxyService::from(service.clone());
-
-        if let Some(ref upstream) = service.upstream {
-            let mut proxy_upstream = ProxyUpstream::try_from(upstream.clone())?;
-            proxy_upstream.start_health_check(config.pingora.work_stealing);
-
-            proxy_service.upstream = Some(Arc::new(proxy_upstream));
-        }
-
-        // load service plugins
-        for (name, value) in service.plugins.clone() {
-            let plugin = build_plugin(&name, value)?;
-            proxy_service.plugins.push(plugin);
-        }
-
-        map.insert(service.id.clone(), Arc::new(proxy_service));
-    }
-
-    Ok(())
-}
 
 /// Fetches a service by its ID.
 pub fn service_fetch(id: &str) -> Option<Arc<ProxyService>> {
-    let map = SERVICE_MAP.read().unwrap();
-    map.get(id).cloned()
+    SERVICE_MAP.get(id)
 }
 
 /// Represents a proxy service that manages upstreams.
@@ -85,4 +51,39 @@ impl ProxyService {
 
         self.inner.upstream_id.as_deref().and_then(upstream_fetch)
     }
+}
+
+/// Global map to store services, initialized lazily.
+static SERVICE_MAP: Lazy<RwLock<HashMap<String, Arc<ProxyService>>>> =
+    Lazy::new(|| RwLock::new(HashMap::new()));
+
+/// Loads services from the given configuration.
+pub fn load_services(config: &config::Config) -> Result<()> {
+    let proxy_services: Vec<ProxyService> = config
+        .services
+        .iter()
+        .map(|service| {
+            log::info!("Configuring Service: {}", service.id);
+            let mut proxy_service = ProxyService::from(service.clone());
+
+            if let Some(ref upstream) = service.upstream {
+                let mut proxy_upstream = ProxyUpstream::try_from(upstream.clone())?;
+                proxy_upstream.start_health_check(config.pingora.work_stealing);
+
+                proxy_service.upstream = Some(Arc::new(proxy_upstream));
+            }
+
+            // load service plugins
+            for (name, value) in service.plugins.clone() {
+                let plugin = build_plugin(&name, value)?;
+                proxy_service.plugins.push(plugin);
+            }
+
+            Ok(proxy_service)
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    SERVICE_MAP.reload_resource(proxy_services);
+
+    Ok(())
 }

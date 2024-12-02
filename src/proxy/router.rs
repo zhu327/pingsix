@@ -11,14 +11,14 @@ use pingora_error::{Error, Result};
 use pingora_proxy::Session;
 
 use crate::config;
-use crate::proxy::plugin::build_plugin;
 
-use super::Identifiable;
 use super::{
     get_request_host,
+    plugin::build_plugin,
     plugin::ProxyPlugin,
     service::service_fetch,
     upstream::{upstream_fetch, ProxyUpstream},
+    Identifiable, MapOperations,
 };
 
 /// Proxy router.
@@ -270,14 +270,12 @@ pub fn reload_global_match() {
     GLOBAL_MATCH.store(Arc::new(matcher));
 }
 
-/// Loads services from the given configuration.
+/// Loads routers from the given configuration.
 pub fn load_routers(config: &config::Config) -> Result<()> {
-    {
-        let mut map = ROUTER_MAP
-            .write()
-            .expect("Failed to acquire write lock on the router map");
-
-        for router in config.routers.iter() {
+    let proxy_routers: Vec<ProxyRouter> = config
+        .routers
+        .iter()
+        .map(|router| {
             log::info!("Configuring Router: {}", router.id);
             let mut proxy_router = ProxyRouter::from(router.clone());
 
@@ -294,11 +292,11 @@ pub fn load_routers(config: &config::Config) -> Result<()> {
                 proxy_router.plugins.push(plugin);
             }
 
-            map.insert(router.id.clone(), Arc::new(proxy_router));
-        }
+            Ok(proxy_router)
+        })
+        .collect::<Result<Vec<_>>>()?;
 
-        // release the write lock
-    }
+    ROUTER_MAP.reload_resource(proxy_routers);
 
     reload_global_match();
 

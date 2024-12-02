@@ -1,3 +1,10 @@
+pub mod discovery;
+pub mod global_rule;
+pub mod plugin;
+pub mod router;
+pub mod service;
+pub mod upstream;
+
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     sync::{Arc, RwLock},
@@ -6,17 +13,11 @@ use std::{
 
 use pingora_http::RequestHeader;
 use pingora_proxy::Session;
+
 use plugin::ProxyPluginExecutor;
 use router::ProxyRouter;
 
 use crate::config;
-
-pub mod discovery;
-pub mod global_rule;
-pub mod plugin;
-pub mod router;
-pub mod service;
-pub mod upstream;
 
 /// Proxy context.
 ///
@@ -155,10 +156,11 @@ pub trait Identifiable {
 }
 
 pub trait MapOperations<T> {
-    fn reload_resource(&mut self, resources: Vec<T>);
+    fn reload_resource(&self, resources: Vec<T>);
 
-    fn remove(&mut self, id: &str);
-    fn insert(&mut self, resource: T);
+    fn remove(&self, id: &str);
+    fn insert(&self, resource: T);
+    fn get(&self, id: &str) -> Option<Arc<T>>;
 }
 
 impl<T> MapOperations<T> for RwLock<HashMap<String, Arc<T>>>
@@ -166,7 +168,7 @@ where
     T: Identifiable,
 {
     // reload_resource：根据新的资源更新 map，删除不在 resources 中的条目
-    fn reload_resource(&mut self, resources: Vec<T>) {
+    fn reload_resource(&self, resources: Vec<T>) {
         let mut map = self.write().unwrap();
 
         // 先从 resources 中提取所有 id
@@ -184,16 +186,22 @@ where
     }
 
     // remove：根据 id 从 map 中删除条目
-    fn remove(&mut self, id: &str) {
+    fn remove(&self, id: &str) {
         let mut map = self.write().unwrap();
         map.remove(id);
     }
 
     // insert：插入新的资源
-    fn insert(&mut self, resource: T) {
+    fn insert(&self, resource: T) {
         let mut map = self.write().unwrap();
         let key = resource.id();
         let value = Arc::new(resource);
         map.insert(key, value);
+    }
+
+    // get：根据 id 从 map 中获取资源
+    fn get(&self, id: &str) -> Option<Arc<T>> {
+        let map = self.read().unwrap();
+        map.get(id).cloned()
     }
 }

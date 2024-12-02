@@ -1,10 +1,14 @@
 #![allow(clippy::upper_case_acronyms)]
+mod config;
+mod proxy;
+mod service;
 
 use pingora::services::listening::Service;
-use pingora_core::apps::HttpServerOptions;
-use pingora_core::listeners::tls::TlsSettings;
-use pingora_core::server::configuration::Opt;
-use pingora_core::server::Server;
+use pingora_core::{
+    apps::HttpServerOptions,
+    listeners::tls::TlsSettings,
+    server::{configuration::Opt, Server},
+};
 use pingora_proxy::http_proxy_service_with_name;
 use sentry::IntoDsn;
 
@@ -13,10 +17,6 @@ use proxy::{
     global_rule::load_global_rules, router::load_routers, service::load_services,
     upstream::load_upstreams,
 };
-
-mod config;
-mod proxy;
-mod service;
 
 fn main() {
     // Initialize logging

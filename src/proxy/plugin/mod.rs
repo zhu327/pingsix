@@ -1,3 +1,10 @@
+pub mod brotli;
+pub mod echo;
+pub mod grpc_web;
+pub mod gzip;
+pub mod limit_count;
+pub mod prometheus;
+
 use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
@@ -9,16 +16,7 @@ use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_proxy::Session;
 use serde_yaml::Value as YamlValue;
 
-use crate::proxy::ProxyContext;
-
-use super::{router::ProxyRouter, service::service_fetch};
-
-pub mod brotli;
-pub mod echo;
-pub mod grpc_web;
-pub mod gzip;
-pub mod limit_count;
-pub mod prometheus;
+use super::{router::ProxyRouter, service::service_fetch, ProxyContext};
 
 /// Type alias for plugin initialization functions
 pub type PluginCreateFn = Arc<dyn Fn(YamlValue) -> Result<Arc<dyn ProxyPlugin>> + Send + Sync>;
