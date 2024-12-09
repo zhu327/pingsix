@@ -4,6 +4,7 @@ use std::time;
 use std::{collections::BTreeMap, sync::RwLock};
 
 use arc_swap::ArcSwap;
+use log::debug;
 use matchit::{InsertError, Router as MatchRouter};
 use once_cell::sync::Lazy;
 use pingora_core::upstreams::peer::HttpPeer;
@@ -44,6 +45,10 @@ impl From<config::Router> for ProxyRouter {
 impl Identifiable for ProxyRouter {
     fn id(&self) -> String {
         self.inner.id.clone()
+    }
+
+    fn set_id(&mut self, id: String) {
+        self.inner.id = id;
     }
 }
 
@@ -286,6 +291,7 @@ pub fn reload_global_match() {
 
     let routers = ROUTER_MAP.read().unwrap();
     for router in routers.values() {
+        debug!("Inserting router: {}", router.inner.id);
         matcher.insert_router(router.clone()).unwrap();
     }
 

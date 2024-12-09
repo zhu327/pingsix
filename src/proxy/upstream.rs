@@ -55,6 +55,10 @@ impl Identifiable for ProxyUpstream {
     fn id(&self) -> String {
         self.inner.id.clone()
     }
+
+    fn set_id(&mut self, id: String) {
+        self.inner.id = id;
+    }
 }
 
 impl ProxyUpstream {
@@ -174,6 +178,15 @@ impl Drop for ProxyUpstream {
     /// Stops the health check service if it exists.
     fn drop(&mut self) {
         self.stop_health_check();
+
+        // 确保其他资源如 runtime 被释放
+        if let Some(runtime) = self.runtime.take() {
+            // Use a blocking task to shut down the runtime to avoid the panic
+            tokio::task::spawn_blocking(move || {
+                runtime.shutdown_timeout(time::Duration::from_secs(1));
+                info!("Runtime shutdown successfully.");
+            });
+        }
     }
 }
 

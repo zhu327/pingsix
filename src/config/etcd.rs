@@ -65,7 +65,7 @@ impl EtcdConfigSync {
 
     /// 监听 etcd 数据变更
     async fn watch(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let start_revision = *self.revision.lock().await;
+        let start_revision = *self.revision.lock().await + 1;
         let options = WatchOptions::new()
             .with_start_revision(start_revision)
             .with_prefix();
@@ -100,7 +100,7 @@ impl EtcdConfigSync {
         let mut client_guard = self.client.lock().await;
 
         if client_guard.is_none() {
-            println!("Creating new etcd client...");
+            log::info!("Creating new etcd client...");
             *client_guard = Some(self.create_client().await?);
         }
         Ok(())
@@ -116,23 +116,26 @@ impl BackgroundService for EtcdConfigSync {
             }
 
             // 确保客户端存在
+            log::info!("Ensuring etcd client...");
             if let Err(err) = self.ensure_client().await {
-                println!("Failed to create etcd client: {:?}", err);
+                log::error!("Failed to create etcd client: {:?}", err);
                 sleep(Duration::from_secs(3)).await;
                 continue;
             }
 
             // 执行 list 操作
+            log::info!("Executing etcd list operation...");
             if let Err(err) = self.list().await {
-                println!("List operation failed: {:?}", err);
+                log::error!("List operation failed: {:?}", err);
                 *self.client.lock().await = None; // 重置客户端以便重试
                 sleep(Duration::from_secs(3)).await;
                 continue;
             }
 
             // 执行 watch 操作
+            log::info!("Executing etcd watch operation...");
             if let Err(err) = self.watch().await {
-                println!("Watch operation failed: {:?}", err);
+                log::error!("Watch operation failed: {:?}", err);
                 *self.client.lock().await = None; // 重置客户端以便重试
                 sleep(Duration::from_secs(1)).await;
             }

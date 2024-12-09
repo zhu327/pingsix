@@ -154,6 +154,7 @@ pub fn get_request_host(header: &RequestHeader) -> Option<&str> {
 
 pub trait Identifiable {
     fn id(&self) -> String;
+    fn set_id(&mut self, id: String);
 }
 
 pub trait MapOperations<T> {

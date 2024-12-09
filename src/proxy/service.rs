@@ -40,6 +40,10 @@ impl Identifiable for ProxyService {
     fn id(&self) -> String {
         self.inner.id.clone()
     }
+
+    fn set_id(&mut self, id: String) {
+        self.inner.id = id;
+    }
 }
 
 impl ProxyService {

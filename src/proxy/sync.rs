@@ -9,7 +9,7 @@ use super::{
     router::{reload_global_match, router_fetch, ProxyRouter, ROUTER_MAP},
     service::{service_fetch, ProxyService, SERVICE_MAP},
     upstream::{upstream_fetch, ProxyUpstream, UPSTREAM_MAP},
-    MapOperations,
+    Identifiable, MapOperations,
 };
 
 pub struct ProxySyncHandler {
@@ -181,14 +181,14 @@ impl ProxySyncHandler {
     fn handle_resource<T, F>(&self, event: &Event, key_type: &str, handler: F)
     where
         T: serde::de::DeserializeOwned + Clone,
-        F: Fn(&Self, &T),
+        F: Fn(&Self, String, &T),
     {
         let key = event.kv().unwrap().key();
         match parse_key(key) {
             Ok((id, parsed_key_type)) if parsed_key_type == key_type => {
                 if let Ok(resource) = value_to_resource::<T>(event.kv().unwrap().value()) {
                     log::info!("Handling {}: {}", key_type, id);
-                    handler(self, &resource);
+                    handler(self, id, &resource);
                 }
             }
             _ => {
@@ -201,10 +201,11 @@ impl ProxySyncHandler {
     }
 
     fn handle_router_event(&self, event: &Event) {
-        self.handle_resource::<Router, _>(event, "routers", |handler, router| {
-            if let Ok(proxy_router) =
+        self.handle_resource::<Router, _>(event, "routers", |handler, id, router| {
+            if let Ok(mut proxy_router) =
                 ProxyRouter::new_with_upstream_and_plugins(router.clone(), handler.work_stealing)
             {
+                proxy_router.set_id(id);
                 ROUTER_MAP.insert(Arc::new(proxy_router));
                 reload_global_match();
             }
@@ -212,28 +213,31 @@ impl ProxySyncHandler {
     }
 
     fn handle_upstream_event(&self, event: &Event) {
-        self.handle_resource::<Upstream, _>(event, "upstreams", |handler, upstream| {
-            if let Ok(proxy_upstream) =
+        self.handle_resource::<Upstream, _>(event, "upstreams", |handler, id, upstream| {
+            if let Ok(mut proxy_upstream) =
                 ProxyUpstream::new_with_health_check(upstream.clone(), handler.work_stealing)
             {
+                proxy_upstream.set_id(id);
                 UPSTREAM_MAP.insert(Arc::new(proxy_upstream));
             }
         });
     }
 
     fn handle_service_event(&self, event: &Event) {
-        self.handle_resource::<Service, _>(event, "services", |handler, service| {
-            if let Ok(proxy_service) =
+        self.handle_resource::<Service, _>(event, "services", |handler, id, service| {
+            if let Ok(mut proxy_service) =
                 ProxyService::new_with_upstream_and_plugins(service.clone(), handler.work_stealing)
             {
+                proxy_service.set_id(id);
                 SERVICE_MAP.insert(Arc::new(proxy_service));
             }
         });
     }
 
     fn handle_global_rule_event(&self, event: &Event) {
-        self.handle_resource::<GlobalRule, _>(event, "global_rules", |_handler, rule| {
-            if let Ok(proxy_global_rule) = ProxyGlobalRule::new_with_plugins(rule.clone()) {
+        self.handle_resource::<GlobalRule, _>(event, "global_rules", |_handler, id, rule| {
+            if let Ok(mut proxy_global_rule) = ProxyGlobalRule::new_with_plugins(rule.clone()) {
+                proxy_global_rule.set_id(id);
                 GLOBAL_RULE_MAP.insert(Arc::new(proxy_global_rule));
                 reload_global_plugin();
             }
