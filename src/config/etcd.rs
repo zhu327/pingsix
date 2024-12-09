@@ -12,11 +12,11 @@ pub struct EtcdConfigSync {
     client: Arc<Mutex<Option<Client>>>,
     revision: Arc<Mutex<i64>>,
 
-    handler: Box<dyn EtcdSyncHandler + Send + Sync>,
+    handler: Box<dyn EtcdEventHandler + Send + Sync>,
 }
 
 impl EtcdConfigSync {
-    pub fn new(config: Etcd, handler: Box<dyn EtcdSyncHandler + Send + Sync>) -> Self {
+    pub fn new(config: Etcd, handler: Box<dyn EtcdEventHandler + Send + Sync>) -> Self {
         Self {
             config,
             client: Arc::new(Mutex::new(None)),
@@ -143,7 +143,7 @@ impl BackgroundService for EtcdConfigSync {
     }
 }
 
-pub trait EtcdSyncHandler {
+pub trait EtcdEventHandler {
     fn handle_event(&self, event: &Event);
     fn handle_list_response(&self, response: &GetResponse);
 }

@@ -1,9 +1,9 @@
 pub mod discovery;
+pub mod event;
 pub mod global_rule;
 pub mod plugin;
 pub mod router;
 pub mod service;
-pub mod sync;
 pub mod upstream;
 
 use std::{

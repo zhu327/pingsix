@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use etcd_client::{Event, GetResponse};
 
-use crate::config::{etcd::EtcdSyncHandler, GlobalRule, Router, Service, Upstream};
+use crate::config::{etcd::EtcdEventHandler, GlobalRule, Router, Service, Upstream};
 
 use super::{
     global_rule::{global_rule_fetch, reload_global_plugin, ProxyGlobalRule, GLOBAL_RULE_MAP},
@@ -12,13 +12,13 @@ use super::{
     Identifiable, MapOperations,
 };
 
-pub struct ProxySyncHandler {
+pub struct ProxyEventHandler {
     work_stealing: bool,
 }
 
-impl ProxySyncHandler {
+impl ProxyEventHandler {
     pub fn new(work_stealing: bool) -> Self {
-        ProxySyncHandler { work_stealing }
+        ProxyEventHandler { work_stealing }
     }
 
     fn handle_routers(&self, response: &GetResponse) {
@@ -245,7 +245,7 @@ impl ProxySyncHandler {
     }
 }
 
-impl EtcdSyncHandler for ProxySyncHandler {
+impl EtcdEventHandler for ProxyEventHandler {
     fn handle_event(&self, event: &Event) {
         if event.kv().is_none() {
             log::warn!("Event does not contain a key-value pair");

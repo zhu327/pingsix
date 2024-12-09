@@ -14,8 +14,8 @@ use sentry::IntoDsn;
 
 use config::{etcd::EtcdConfigSync, Config, Tls};
 use proxy::{
-    global_rule::load_global_rules, router::load_routers, service::load_services,
-    sync::ProxySyncHandler, upstream::load_upstreams,
+    event::ProxyEventHandler, global_rule::load_global_rules, router::load_routers,
+    service::load_services, upstream::load_upstreams,
 };
 
 fn main() {
@@ -28,8 +28,8 @@ fn main() {
 
     let etcd_config_sync = config.etcd.as_ref().map(|etcd_cfg| {
         log::info!("Adding etcd config sync...");
-        let sync_handler = ProxySyncHandler::new(config.pingora.work_stealing);
-        EtcdConfigSync::new(etcd_cfg.clone(), Box::new(sync_handler))
+        let event_handler = ProxyEventHandler::new(config.pingora.work_stealing);
+        EtcdConfigSync::new(etcd_cfg.clone(), Box::new(event_handler))
     });
 
     if etcd_config_sync.is_none() {
