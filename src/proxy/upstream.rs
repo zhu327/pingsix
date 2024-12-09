@@ -181,11 +181,15 @@ impl Drop for ProxyUpstream {
 
         // 确保其他资源如 runtime 被释放
         if let Some(runtime) = self.runtime.take() {
-            // Use a blocking task to shut down the runtime to avoid the panic
-            tokio::task::spawn_blocking(move || {
-                runtime.shutdown_timeout(time::Duration::from_secs(1));
-                info!("Runtime shutdown successfully.");
+            // 获取 runtime 的 handle
+            let handler = runtime.get_handle().clone();
+
+            // 使用 handler 执行关闭逻辑
+            handler.spawn_blocking(move|| {
+                runtime.shutdown_timeout(std::time::Duration::from_secs(1));
             });
+
+            info!("Runtime shutdown successfully.");
         }
     }
 }
