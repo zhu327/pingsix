@@ -4,6 +4,7 @@ pub mod grpc_web;
 pub mod gzip;
 pub mod limit_count;
 pub mod prometheus;
+pub mod proxy_rewrite;
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -24,20 +25,24 @@ pub type PluginCreateFn = Arc<dyn Fn(YamlValue) -> Result<Arc<dyn ProxyPlugin>> 
 /// Registry of plugin builders
 static PLUGIN_BUILDER_REGISTRY: Lazy<HashMap<&'static str, PluginCreateFn>> = Lazy::new(|| {
     let arr: Vec<(&str, PluginCreateFn)> = vec![
-        (echo::PLUGIN_NAME, Arc::new(echo::create_echo_plugin)),
+        (echo::PLUGIN_NAME, Arc::new(echo::create_echo_plugin)), // 412
         (
-            limit_count::PLUGIN_NAME,
+            prometheus::PLUGIN_NAME, // 500
+            Arc::new(prometheus::create_prometheus_plugin),
+        ),
+        (
+            limit_count::PLUGIN_NAME, // 503
             Arc::new(limit_count::create_limit_count_plugin),
         ),
         (
-            grpc_web::PLUGIN_NAME,
+            grpc_web::PLUGIN_NAME, // 505
             Arc::new(grpc_web::create_grpc_web_plugin),
         ),
-        (gzip::PLUGIN_NAME, Arc::new(gzip::create_gzip_plugin)),
-        (brotli::PLUGIN_NAME, Arc::new(brotli::create_brotli_plugin)),
+        (gzip::PLUGIN_NAME, Arc::new(gzip::create_gzip_plugin)), // 995
+        (brotli::PLUGIN_NAME, Arc::new(brotli::create_brotli_plugin)), // 996
         (
-            prometheus::PLUGIN_NAME,
-            Arc::new(prometheus::create_prometheus_plugin),
+            proxy_rewrite::PLUGIN_NAME, // 1008
+            Arc::new(proxy_rewrite::create_proxy_rewrite_plugin),
         ),
     ];
     arr.into_iter().collect()

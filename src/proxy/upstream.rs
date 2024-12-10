@@ -185,8 +185,8 @@ impl Drop for ProxyUpstream {
             let handler = runtime.get_handle().clone();
 
             // 使用 handler 执行关闭逻辑
-            handler.spawn_blocking(move|| {
-                runtime.shutdown_timeout(std::time::Duration::from_secs(1));
+            handler.spawn_blocking(move || {
+                runtime.shutdown_timeout(time::Duration::from_secs(1));
             });
 
             info!("Runtime shutdown successfully.");
