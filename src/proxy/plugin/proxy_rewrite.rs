@@ -18,8 +18,8 @@ use super::ProxyPlugin;
 pub const PLUGIN_NAME: &str = "proxy-rewrite";
 
 pub fn create_proxy_rewrite_plugin(cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> {
-    let config: PluginConfig =
-        serde_yaml::from_value(cfg).or_err_with(ReadError, || "Invalid echo plugin config")?;
+    let config: PluginConfig = serde_yaml::from_value(cfg)
+        .or_err_with(ReadError, || "Invalid proxy rewrite plugin config")?;
 
     Ok(Arc::new(PluginProxyRewrite { config }))
 }

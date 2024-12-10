@@ -2,6 +2,7 @@ pub mod brotli;
 pub mod echo;
 pub mod grpc_web;
 pub mod gzip;
+pub mod ip_restriction;
 pub mod limit_count;
 pub mod prometheus;
 pub mod proxy_rewrite;
@@ -43,6 +44,10 @@ static PLUGIN_BUILDER_REGISTRY: Lazy<HashMap<&'static str, PluginCreateFn>> = La
         (
             proxy_rewrite::PLUGIN_NAME, // 1008
             Arc::new(proxy_rewrite::create_proxy_rewrite_plugin),
+        ),
+        (
+            ip_restriction::PLUGIN_NAME, // 3000
+            Arc::new(ip_restriction::create_ip_restriction_plugin),
         ),
     ];
     arr.into_iter().collect()
