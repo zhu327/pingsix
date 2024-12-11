@@ -1,8 +1,6 @@
 pub mod etcd;
 
-use std::fs;
-use std::net::SocketAddr;
-use std::{collections::HashMap, fmt};
+use std::{collections::HashMap, fmt, fs, net::SocketAddr};
 
 use log::{debug, trace};
 use pingora::server::configuration::{Opt, ServerConf};
@@ -13,7 +11,7 @@ use serde_yaml::Value as YamlValue;
 use validator::{Validate, ValidationError};
 
 #[derive(Default, Debug, Serialize, Deserialize, Validate)]
-#[validate(schema(function = "Config::validate_upstreams_id"))]
+#[validate(schema(function = "Config::validate_resource_id"))]
 pub struct Config {
     #[serde(default)]
     pub pingora: ServerConf,
@@ -98,13 +96,24 @@ impl Config {
         }
     }
 
-    fn validate_upstreams_id(&self) -> Result<(), ValidationError> {
-        self.upstreams
-            .iter()
-            .find(|upstream| upstream.id.is_empty())
-            .map_or(Ok(()), |_| {
-                Err(ValidationError::new("upstream_id_required"))
-            })
+    fn validate_resource_id(&self) -> Result<(), ValidationError> {
+        if self.upstreams.iter().any(|upstream| upstream.id.is_empty()) {
+            return Err(ValidationError::new("upstream_id_required"));
+        }
+
+        if self.routers.iter().any(|router| router.id.is_empty()) {
+            return Err(ValidationError::new("router_id_required"));
+        }
+
+        if self.services.iter().any(|service| service.id.is_empty()) {
+            return Err(ValidationError::new("service_id_required"));
+        }
+
+        if self.global_rules.iter().any(|rule| rule.id.is_empty()) {
+            return Err(ValidationError::new("global_rule_id_required"));
+        }
+
+        Ok(())
     }
 }
 

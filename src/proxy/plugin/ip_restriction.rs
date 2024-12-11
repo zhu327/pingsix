@@ -16,23 +16,30 @@ use super::ProxyPlugin;
 
 pub const PLUGIN_NAME: &str = "ip-restriction";
 
+/// Creates an IP Restriction plugin instance.
 pub fn create_ip_restriction_plugin(cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> {
     let config: PluginConfig = serde_yaml::from_value(cfg)
-        .or_err_with(ReadError, || "Invalid ip restriction plugin config")?;
-
+        .or_err_with(ReadError, || "Invalid IP restriction plugin config")?;
     Ok(Arc::new(PluginIPRestriction { config }))
 }
 
+/// Configuration for the IP Restriction plugin.
 #[derive(Default, Debug, Serialize, Deserialize)]
 struct PluginConfig {
+    /// List of allowed IP networks (whitelist).
     #[serde(default)]
     whitelist: Vec<IpNetwork>,
+
+    /// List of denied IP networks (blacklist).
     #[serde(default)]
     blacklist: Vec<IpNetwork>,
+
+    /// Custom rejection message.
     #[serde(default)]
     message: Option<String>,
 }
 
+/// IP Restriction Plugin implementation.
 pub struct PluginIPRestriction {
     config: PluginConfig,
 }
@@ -48,32 +55,38 @@ impl ProxyPlugin for PluginIPRestriction {
     }
 
     async fn request_filter(&self, session: &mut Session, _ctx: &mut ProxyContext) -> Result<bool> {
-        let ip = get_client_ip(session)
+        let client_ip = get_client_ip(session)
             .parse::<IpAddr>()
-            .or_err_with(ReadError, || "Invalid client ip")?;
+            .or_err_with(ReadError, || "Failed to parse client IP")?;
 
-        // Check if the client IP is in whitelist
+        // Check whitelist
         if !self.config.whitelist.is_empty()
-            && self
+            && !self
                 .config
                 .whitelist
                 .iter()
-                .any(|network| network.contains(ip))
+                .any(|network| network.contains(client_ip))
         {
-            return Ok(false);
+            return self.reject_request(session).await;
         }
 
-        // Check if the client IP is in blacklist
-        if self.config.blacklist.is_empty()
-            || !self
-                .config
-                .blacklist
-                .iter()
-                .any(|network| network.contains(ip))
+        // Check blacklist
+        if self
+            .config
+            .blacklist
+            .iter()
+            .any(|network| network.contains(client_ip))
         {
-            return Ok(false);
+            return self.reject_request(session).await;
         }
 
+        Ok(false)
+    }
+}
+
+impl PluginIPRestriction {
+    /// Rejects the request with a `403 Forbidden` response.
+    async fn reject_request(&self, session: &mut Session) -> Result<bool> {
         let mut header = ResponseHeader::build(StatusCode::FORBIDDEN, None)?;
 
         if let Some(ref msg) = self.config.message {
@@ -100,7 +113,7 @@ static HTTP_HEADER_X_FORWARDED_FOR: Lazy<http::HeaderName> =
 static HTTP_HEADER_X_REAL_IP: Lazy<http::HeaderName> =
     Lazy::new(|| HeaderName::from_str("X-Real-Ip").unwrap());
 
-/// Get remote addr from session
+/// Get remote address from session.
 fn get_remote_addr(session: &Session) -> Option<(String, u16)> {
     session
         .client_addr()
@@ -108,21 +121,25 @@ fn get_remote_addr(session: &Session) -> Option<(String, u16)> {
         .map(|addr| (addr.ip().to_string(), addr.port()))
 }
 
-/// Gets client ip from X-Forwarded-For,
-/// If none, get from X-Real-Ip,
-/// If none, get remote addr.
+/// Gets client IP from `X-Forwarded-For`, `X-Real-IP`, or remote address.
 fn get_client_ip(session: &Session) -> String {
     if let Some(value) = session.get_header(HTTP_HEADER_X_FORWARDED_FOR.clone()) {
-        let arr: Vec<&str> = value.to_str().unwrap_or_default().split(',').collect();
-        if !arr.is_empty() {
-            return arr[0].trim().to_string();
+        if let Ok(forwarded) = value.to_str() {
+            if let Some(ip) = forwarded.split(',').next() {
+                return ip.trim().to_string();
+            }
         }
     }
+
     if let Some(value) = session.get_header(HTTP_HEADER_X_REAL_IP.clone()) {
-        return value.to_str().unwrap_or_default().to_string();
+        if let Ok(real_ip) = value.to_str() {
+            return real_ip.trim().to_string();
+        }
     }
+
     if let Some((addr, _)) = get_remote_addr(session) {
         return addr;
     }
+
     "".to_string()
 }

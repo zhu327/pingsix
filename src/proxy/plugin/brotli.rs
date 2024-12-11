@@ -15,17 +15,26 @@ use super::ProxyPlugin;
 
 pub const PLUGIN_NAME: &str = "brotli";
 
+/// Creates a Brotli plugin instance with the given configuration.
 pub fn create_brotli_plugin(cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> {
-    let config: PluginConfig =
-        serde_yaml::from_value(cfg).or_err_with(ReadError, || "Invalid brotli plugin config")?;
+    let config: PluginConfig = parse_plugin_config(cfg)?;
     Ok(Arc::new(PluginBrotli { config }))
 }
 
+/// Parses plugin configuration from a YAML value.
+fn parse_plugin_config<T: for<'de> Deserialize<'de>>(cfg: YamlValue) -> Result<T> {
+    serde_yaml::from_value(cfg).or_err_with(ReadError, || "Invalid plugin config")
+}
+
+/// Configuration for the Brotli plugin.
 #[derive(Default, Debug, Serialize, Deserialize)]
 struct PluginConfig {
+    /// Compression level (0-11) for Brotli.
     #[serde(default = "PluginConfig::default_comp_level")]
     comp_level: u32,
-    #[serde(default)]
+
+    /// Whether to enable decompression for Brotli.
+    #[serde(default = "PluginConfig::default_decompression")]
     decompression: bool,
 }
 
@@ -33,8 +42,13 @@ impl PluginConfig {
     fn default_comp_level() -> u32 {
         1
     }
+
+    fn default_decompression() -> bool {
+        false
+    }
 }
 
+/// Brotli plugin implementation.
 pub struct PluginBrotli {
     config: PluginConfig,
 }

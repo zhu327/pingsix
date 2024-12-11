@@ -26,14 +26,9 @@ use crate::config;
 pub struct ProxyContext {
     pub router: Option<Arc<ProxyRouter>>,
     pub router_params: Option<BTreeMap<String, String>>,
-
     pub tries: usize,
     pub request_start: Instant,
-
     pub plugin: Arc<ProxyPluginExecutor>,
-
-    // Share custom vars between plugins
-    #[allow(dead_code)]
     pub vars: HashMap<String, String>,
 }
 
@@ -136,6 +131,8 @@ fn get_cookie_value<'a>(req_header: &'a RequestHeader, cookie_name: &str) -> Opt
             }
         }
     }
+
+    log::warn!("Cookie '{}' not found or malformed.", cookie_name);
     None
 }
 
@@ -173,15 +170,17 @@ where
     fn reload_resource(&self, resources: Vec<Arc<T>>) {
         let mut map = self.write().unwrap();
 
-        // 先从 resources 中提取所有 id
-        let resource_ids: HashSet<String> = resources.iter().map(|r| r.id()).collect();
+        // Log the old and new resources
+        for resource in resources.iter() {
+            log::info!("Inserting/Updating resource: {}", resource.id());
+        }
 
-        // 删除那些不在资源中的条目
+        let resource_ids: HashSet<String> = resources.iter().map(|r| r.id()).collect();
         map.retain(|key, _| resource_ids.contains(key));
 
-        // 用新的资源更新 map
         for resource in resources {
             let key = resource.id();
+            log::info!("Inserting resource with id: {}", key);
             map.insert(key, resource);
         }
     }

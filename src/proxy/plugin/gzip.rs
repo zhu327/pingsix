@@ -15,26 +15,33 @@ use super::ProxyPlugin;
 
 pub const PLUGIN_NAME: &str = "gzip";
 
+/// Creates a Gzip plugin instance with the given configuration.
 pub fn create_gzip_plugin(cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> {
     let config: PluginConfig =
         serde_yaml::from_value(cfg).or_err_with(ReadError, || "Invalid gzip plugin config")?;
     Ok(Arc::new(PluginGzip { config }))
 }
 
+/// Configuration for the Gzip plugin.
 #[derive(Default, Debug, Serialize, Deserialize)]
 struct PluginConfig {
+    /// Compression level for Gzip (default: 1).
     #[serde(default = "PluginConfig::default_comp_level")]
     comp_level: u32,
+
+    /// Enable or disable decompression (default: false).
     #[serde(default)]
     decompression: bool,
 }
 
 impl PluginConfig {
+    /// Default compression level.
     fn default_comp_level() -> u32 {
         1
     }
 }
 
+/// Gzip Plugin implementation.
 pub struct PluginGzip {
     config: PluginConfig,
 }

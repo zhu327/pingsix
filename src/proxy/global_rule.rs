@@ -43,8 +43,9 @@ impl ProxyGlobalRule {
     pub fn new_with_plugins(rule: config::GlobalRule) -> Result<Self> {
         let mut proxy_global_rule = Self::from(rule.clone());
 
-        // 加载插件
+        // Load plugins and log each one
         for (name, value) in rule.plugins {
+            log::info!("Loading plugin: {}", name); // Add logging for each plugin
             let plugin = build_plugin(&name, value)?;
             proxy_global_rule.plugins.push(plugin);
         }
@@ -97,19 +98,31 @@ pub fn load_global_rules(config: &config::Config) -> Result<()> {
         .iter()
         .map(|rule| {
             log::info!("Configuring GlobalRule: {}", rule.id);
-            let proxy_global_rule = ProxyGlobalRule::new_with_plugins(rule.clone())?;
 
-            Ok(Arc::new(proxy_global_rule))
+            // Attempt to create a ProxyGlobalRule with plugins
+            match ProxyGlobalRule::new_with_plugins(rule.clone()) {
+                Ok(proxy_global_rule) => Ok(Arc::new(proxy_global_rule)),
+                Err(e) => {
+                    log::error!("Failed to configure GlobalRule {}: {}", rule.id, e);
+                    Err(e)
+                }
+            }
         })
         .collect::<Result<Vec<_>>>()?;
 
+    // Reload global rules into the map
     GLOBAL_RULE_MAP.reload_resource(proxy_global_rules);
-
     reload_global_plugin();
 
     Ok(())
 }
 
 pub fn global_rule_fetch(id: &str) -> Option<Arc<ProxyGlobalRule>> {
-    GLOBAL_RULE_MAP.get(id)
+    match GLOBAL_RULE_MAP.get(id) {
+        Some(rule) => Some(rule),
+        None => {
+            log::warn!("Global rule with id '{}' not found", id);
+            None
+        }
+    }
 }

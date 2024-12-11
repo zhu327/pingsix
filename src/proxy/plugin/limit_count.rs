@@ -70,38 +70,47 @@ impl ProxyPlugin for PluginRateLimit {
     async fn request_filter(&self, session: &mut Session, _ctx: &mut ProxyContext) -> Result<bool> {
         let key = request_selector_key(session, &self.config.key_type, self.config.key.as_str());
 
-        // Retrieve the current window requests
-        let curr_window_requests = self.rate.observe(&key, 1);
-        if curr_window_requests > self.config.count as isize {
-            let mut header = ResponseHeader::build(self.config.rejected_code, None)?;
-
-            // If the rate limit headers are to be shown, insert them
-            if self.config.show_limit_quota_header {
-                header.insert_header("X-Rate-Limit-Limit", self.config.count.to_string())?;
-                header.insert_header("X-Rate-Limit-Remaining", "0")?;
-                header.insert_header("X-Rate-Limit-Reset", "1")?;
-            }
-
-            // Disable keep-alive connection
-            session.set_keepalive(None);
-
-            if let Some(ref msg) = self.config.rejected_msg {
-                header.insert_header(header::CONTENT_LENGTH, msg.len().to_string())?;
-                session
-                    .write_response_header(Box::new(header), false)
-                    .await?;
-                session
-                    .write_response_body(Some(msg.clone().into()), true)
-                    .await?;
-            } else {
-                session
-                    .write_response_header(Box::new(header), true)
-                    .await?;
-            }
-
-            return Ok(true);
+        if self.is_rate_limited(key) {
+            return self.handle_rate_limit(session).await;
         }
 
         Ok(false)
+    }
+}
+
+impl PluginRateLimit {
+    /// Check if the request exceeds the rate limit
+    fn is_rate_limited(&self, key: String) -> bool {
+        let curr_window_requests = self.rate.observe(&key, 1);
+        curr_window_requests > self.config.count as isize
+    }
+
+    /// Handle rate-limited requests
+    async fn handle_rate_limit(&self, session: &mut Session) -> Result<bool> {
+        let mut header = ResponseHeader::build(self.config.rejected_code, None)?;
+
+        if self.config.show_limit_quota_header {
+            header.insert_header("X-Rate-Limit-Limit", self.config.count.to_string())?;
+            header.insert_header("X-Rate-Limit-Remaining", "0")?;
+            header.insert_header("X-Rate-Limit-Reset", "1")?;
+        }
+
+        session.set_keepalive(None);
+
+        if let Some(ref msg) = self.config.rejected_msg {
+            header.insert_header(header::CONTENT_LENGTH, msg.len().to_string())?;
+            session
+                .write_response_header(Box::new(header), false)
+                .await?;
+            session
+                .write_response_body(Some(msg.clone().into()), true)
+                .await?;
+        } else {
+            session
+                .write_response_header(Box::new(header), true)
+                .await?;
+        }
+
+        Ok(true)
     }
 }

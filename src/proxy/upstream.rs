@@ -112,11 +112,11 @@ impl ProxyUpstream {
             SelectionLB::Ketama(lb) => lb.upstreams.select(key.as_bytes(), 256),
         };
 
-        backend.as_mut().and_then(|b| {
-            b.ext.get_mut::<HttpPeer>().map(|p| {
-                self.set_timeout(p);
-            })
-        });
+        if let Some(backend) = backend.as_mut() {
+            if let Some(peer) = backend.ext.get_mut::<HttpPeer>() {
+                self.set_timeout(peer);
+            }
+        }
 
         backend
     }
@@ -375,13 +375,16 @@ pub fn load_upstreams(config: &config::Config) -> Result<()> {
         .iter()
         .map(|upstream| {
             info!("Configuring Upstream: {}", upstream.id);
-
-            let proxy_upstream = ProxyUpstream::new_with_health_check(
+            match ProxyUpstream::new_with_health_check(
                 upstream.clone(),
                 config.pingora.work_stealing,
-            )?;
-
-            Ok(Arc::new(proxy_upstream))
+            ) {
+                Ok(proxy_upstream) => Ok(Arc::new(proxy_upstream)),
+                Err(e) => {
+                    log::error!("Failed to configure Upstream {}: {}", upstream.id, e);
+                    Err(e)
+                }
+            }
         })
         .collect::<Result<Vec<_>>>()?;
 
@@ -393,5 +396,11 @@ pub fn load_upstreams(config: &config::Config) -> Result<()> {
 
 /// Fetches an upstream by its ID.
 pub fn upstream_fetch(id: &str) -> Option<Arc<ProxyUpstream>> {
-    UPSTREAM_MAP.get(id)
+    match UPSTREAM_MAP.get(id) {
+        Some(rule) => Some(rule),
+        None => {
+            log::warn!("Upstream with id '{}' not found", id);
+            None
+        }
+    }
 }

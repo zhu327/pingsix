@@ -71,7 +71,7 @@ static PLUGIN_BUILDER_REGISTRY: Lazy<HashMap<&'static str, PluginCreateFn>> = La
 pub fn build_plugin(name: &str, cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> {
     let builder = PLUGIN_BUILDER_REGISTRY
         .get(name)
-        .or_err(ReadError, "Unknow plugin type")?;
+        .or_err(ReadError, "Unknown plugin type")?;
     builder(cfg)
 }
 

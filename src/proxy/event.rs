@@ -186,9 +186,14 @@ impl ProxyEventHandler {
         let key = event.kv().unwrap().key();
         match parse_key(key) {
             Ok((id, parsed_key_type)) if parsed_key_type == key_type => {
-                if let Ok(resource) = value_to_resource::<T>(event.kv().unwrap().value()) {
-                    log::info!("Handling {}: {}", key_type, id);
-                    handler(self, id, &resource);
+                match value_to_resource::<T>(event.kv().unwrap().value()) {
+                    Ok(resource) => {
+                        log::info!("Handling {}: {}", key_type, id);
+                        handler(self, id, &resource);
+                    }
+                    Err(e) => {
+                        log::error!("Failed to deserialize resource of type {}: {}", key_type, e);
+                    }
                 }
             }
             _ => {

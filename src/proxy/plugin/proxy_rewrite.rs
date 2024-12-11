@@ -80,7 +80,7 @@ impl ProxyPlugin for PluginProxyRewrite {
                     let query = pq.query().unwrap_or("");
                     format!("{}?{}", path, query).parse().ok()
                 }
-                None => Some(path.to_string().parse().unwrap()),
+                None => path.to_string().parse().ok(),
             };
 
             parts.path_and_query = path_and_query;

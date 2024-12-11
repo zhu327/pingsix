@@ -70,12 +70,10 @@ impl ProxyService {
     }
 
     /// Gets the upstream for the service.
-    pub fn get_upstream(&self) -> Option<Arc<ProxyUpstream>> {
-        if self.upstream.is_some() {
-            return self.upstream.clone();
-        };
-
-        self.inner.upstream_id.as_deref().and_then(upstream_fetch)
+    pub fn resolve_upstream(&self) -> Option<Arc<ProxyUpstream>> {
+        self.upstream
+            .clone()
+            .or_else(|| self.inner.upstream_id.as_deref().and_then(upstream_fetch))
     }
 }
 
@@ -90,12 +88,16 @@ pub fn load_services(config: &config::Config) -> Result<()> {
         .iter()
         .map(|service| {
             log::info!("Configuring Service: {}", service.id);
-            let proxy_service = ProxyService::new_with_upstream_and_plugins(
+            match ProxyService::new_with_upstream_and_plugins(
                 service.clone(),
                 config.pingora.work_stealing,
-            )?;
-
-            Ok(Arc::new(proxy_service))
+            ) {
+                Ok(proxy_service) => Ok(Arc::new(proxy_service)),
+                Err(e) => {
+                    log::error!("Failed to configure Service {}: {}", service.id, e);
+                    Err(e)
+                }
+            }
         })
         .collect::<Result<Vec<_>>>()?;
 

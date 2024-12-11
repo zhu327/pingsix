@@ -114,8 +114,9 @@ impl ProxyHttp for HttpService {
             .await?;
 
         // rewrite host header
-        let upstream = ctx.router.as_ref().unwrap().get_upstream().unwrap();
-        upstream.upstream_host_rewrite(upstream_request);
+        if let Some(upstream) = ctx.router.as_ref().and_then(|r| r.resolve_upstream()) {
+            upstream.upstream_host_rewrite(upstream_request);
+        }
         Ok(())
     }
 
@@ -171,25 +172,22 @@ impl ProxyHttp for HttpService {
         mut e: Box<Error>,
     ) -> Box<Error> {
         if let Some(router) = ctx.router.as_ref() {
-            let upstream = router.get_upstream().unwrap();
-
-            if let Some(retries) = upstream.get_retries() {
-                if retries == 0 || ctx.tries >= retries {
-                    return e;
-                }
-
-                if let Some(timeout) = upstream.get_retry_timeout() {
-                    if ctx.request_start.elapsed().as_millis() > (timeout * 1000) as u128 {
+            if let Some(upstream) = router.resolve_upstream() {
+                if let Some(retries) = upstream.get_retries() {
+                    if retries == 0 || ctx.tries >= retries {
                         return e;
                     }
+                    if let Some(timeout) = upstream.get_retry_timeout() {
+                        if ctx.request_start.elapsed().as_millis() > (timeout * 1000) as u128 {
+                            return e;
+                        }
+                    }
+                    ctx.tries += 1;
+                    e.set_retry(true);
+                    return e;
                 }
-
-                ctx.tries += 1;
-                e.set_retry(true);
-                return e;
             }
         }
-
         e
     }
 }

@@ -76,7 +76,7 @@ impl ProxyRouter {
     }
 
     /// Gets the upstream for the router.
-    pub fn get_upstream(&self) -> Option<Arc<ProxyUpstream>> {
+    pub fn resolve_upstream(&self) -> Option<Arc<ProxyUpstream>> {
         self.upstream
             .clone()
             .or_else(|| {
@@ -89,7 +89,7 @@ impl ProxyRouter {
                 self.inner
                     .service_id
                     .as_ref()
-                    .and_then(|id| service_fetch(id).and_then(|s| s.get_upstream()))
+                    .and_then(|id| service_fetch(id).and_then(|s| s.resolve_upstream()))
             })
     }
 
@@ -109,30 +109,25 @@ impl ProxyRouter {
             vec![]
         }
     }
-}
 
-impl ProxyRouter {
     /// Selects an HTTP peer for a given session.
     pub fn select_http_peer<'a>(&'a self, session: &'a mut Session) -> Result<Box<HttpPeer>> {
-        let upstream = self
-            .get_upstream()
-            .ok_or_else(|| Error::new_str("No upstream configured"))?;
+        let upstream = self.resolve_upstream().ok_or_else(|| {
+            Error::new_str("Failed to retrieve upstream configuration for router")
+        })?;
 
-        // Select the backend and handle the error immediately if None is returned
         let mut backend = upstream
             .select_backend(session)
-            .ok_or_else(|| Error::new_str("Unable to determine backend"))?;
+            .ok_or_else(|| Error::new_str("Unable to determine backend for the request"))?;
 
-        // Try to get the HttpPeer from the backend's extension and handle the error
         backend
             .ext
             .get_mut::<HttpPeer>()
             .map(|peer| {
-                // Set timeout from the router
                 self.set_timeout(peer);
                 Box::new(peer.clone())
             })
-            .ok_or_else(|| Error::new_str("Fatal: Missing selected backend metadata"))
+            .ok_or_else(|| Error::new_str("Missing selected backend metadata for HttpPeer"))
     }
 
     /// Sets the timeout for an `HttpPeer` based on the router configuration.
@@ -305,12 +300,16 @@ pub fn load_routers(config: &config::Config) -> Result<()> {
         .iter()
         .map(|router| {
             log::info!("Configuring Router: {}", router.id);
-            let proxy_router = ProxyRouter::new_with_upstream_and_plugins(
+            match ProxyRouter::new_with_upstream_and_plugins(
                 router.clone(),
                 config.pingora.work_stealing,
-            )?;
-
-            Ok(Arc::new(proxy_router))
+            ) {
+                Ok(proxy_router) => Ok(Arc::new(proxy_router)),
+                Err(e) => {
+                    log::error!("Failed to configure Router {}: {}", router.id, e);
+                    Err(e)
+                }
+            }
         })
         .collect::<Result<Vec<_>>>()?;
 
@@ -323,5 +322,11 @@ pub fn load_routers(config: &config::Config) -> Result<()> {
 
 /// Fetches an upstream by its ID.
 pub fn router_fetch(id: &str) -> Option<Arc<ProxyRouter>> {
-    ROUTER_MAP.get(id)
+    match ROUTER_MAP.get(id) {
+        Some(rule) => Some(rule),
+        None => {
+            log::warn!("Router with id '{}' not found", id);
+            None
+        }
+    }
 }

@@ -12,10 +12,14 @@ use super::ProxyPlugin;
 
 pub const PLUGIN_NAME: &str = "grpc-web";
 
+/// Creates a gRPC-Web plugin instance.
+/// This plugin enables support for the gRPC-Web protocol in the proxy.
 pub fn create_grpc_web_plugin(_cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> {
     Ok(Arc::new(PluginGrpcWeb {}))
 }
 
+/// gRPC-Web Plugin implementation.
+/// This plugin enables support for gRPC-Web protocol in the proxy.
 pub struct PluginGrpcWeb;
 
 #[async_trait]
