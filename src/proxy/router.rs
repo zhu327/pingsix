@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time;
+use std::time::Duration;
 use std::{collections::BTreeMap, sync::RwLock};
 
 use arc_swap::ArcSwap;
@@ -138,9 +138,9 @@ impl ProxyRouter {
             send,
         }) = self.inner.timeout
         {
-            p.options.connection_timeout = Some(time::Duration::from_secs(connect));
-            p.options.read_timeout = Some(time::Duration::from_secs(read));
-            p.options.write_timeout = Some(time::Duration::from_secs(send));
+            p.options.connection_timeout = Some(Duration::from_secs(connect));
+            p.options.read_timeout = Some(Duration::from_secs(read));
+            p.options.write_timeout = Some(Duration::from_secs(send));
         }
     }
 }

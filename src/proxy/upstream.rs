@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     sync::{Arc, RwLock},
-    time::{self, Duration},
+    time::Duration,
 };
 
 use http::Uri;
@@ -167,9 +167,9 @@ impl ProxyUpstream {
             send,
         }) = self.inner.timeout
         {
-            p.options.connection_timeout = Some(time::Duration::from_secs(connect));
-            p.options.read_timeout = Some(time::Duration::from_secs(read));
-            p.options.write_timeout = Some(time::Duration::from_secs(send));
+            p.options.connection_timeout = Some(Duration::from_secs(connect));
+            p.options.read_timeout = Some(Duration::from_secs(read));
+            p.options.write_timeout = Some(Duration::from_secs(send));
         }
     }
 }
@@ -186,7 +186,7 @@ impl Drop for ProxyUpstream {
 
             // 使用 handler 执行关闭逻辑
             handler.spawn_blocking(move || {
-                runtime.shutdown_timeout(time::Duration::from_secs(1));
+                runtime.shutdown_timeout(Duration::from_secs(1));
             });
 
             info!("Runtime shutdown successfully.");

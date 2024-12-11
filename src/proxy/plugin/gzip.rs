@@ -61,14 +61,14 @@ impl ProxyPlugin for PluginGzip {
         session: &mut Session,
         _ctx: &mut ProxyContext,
     ) -> Result<()> {
-        let c = session
+        let resp_compression = session
             .downstream_modules_ctx
             .get_mut::<ResponseCompression>()
             .expect("ResponseCompression module added");
 
-        c.adjust_algorithm_level(Algorithm::Gzip, self.config.comp_level);
+        resp_compression.adjust_algorithm_level(Algorithm::Gzip, self.config.comp_level);
 
-        c.adjust_decompression(self.config.decompression);
+        resp_compression.adjust_decompression(self.config.decompression);
 
         Ok(())
     }

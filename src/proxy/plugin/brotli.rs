@@ -17,13 +17,9 @@ pub const PLUGIN_NAME: &str = "brotli";
 
 /// Creates a Brotli plugin instance with the given configuration.
 pub fn create_brotli_plugin(cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> {
-    let config: PluginConfig = parse_plugin_config(cfg)?;
+    let config: PluginConfig =
+        serde_yaml::from_value(cfg).or_err_with(ReadError, || "Invalid brotli plugin config")?;
     Ok(Arc::new(PluginBrotli { config }))
-}
-
-/// Parses plugin configuration from a YAML value.
-fn parse_plugin_config<T: for<'de> Deserialize<'de>>(cfg: YamlValue) -> Result<T> {
-    serde_yaml::from_value(cfg).or_err_with(ReadError, || "Invalid plugin config")
 }
 
 /// Configuration for the Brotli plugin.
@@ -34,17 +30,13 @@ struct PluginConfig {
     comp_level: u32,
 
     /// Whether to enable decompression for Brotli.
-    #[serde(default = "PluginConfig::default_decompression")]
+    #[serde(default)]
     decompression: bool,
 }
 
 impl PluginConfig {
     fn default_comp_level() -> u32 {
         1
-    }
-
-    fn default_decompression() -> bool {
-        false
     }
 }
 
@@ -68,14 +60,14 @@ impl ProxyPlugin for PluginBrotli {
         session: &mut Session,
         _ctx: &mut ProxyContext,
     ) -> Result<()> {
-        let c = session
+        let resp_compression = session
             .downstream_modules_ctx
             .get_mut::<ResponseCompression>()
             .expect("ResponseCompression module added");
 
-        c.adjust_algorithm_level(Algorithm::Brotli, self.config.comp_level);
+        resp_compression.adjust_algorithm_level(Algorithm::Brotli, self.config.comp_level);
 
-        c.adjust_decompression(self.config.decompression);
+        resp_compression.adjust_decompression(self.config.decompression);
 
         Ok(())
     }

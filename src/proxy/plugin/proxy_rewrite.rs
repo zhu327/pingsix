@@ -104,20 +104,20 @@ impl ProxyPlugin for PluginProxyRewrite {
                 .or_err_with(InternalError, || "Invalid host")?;
         }
 
-        if let Some(headers) = self.config.headers.clone() {
-            for head in headers.set {
+        if let Some(ref headers) = self.config.headers {
+            for head in &headers.set {
                 upstream_request
-                    .insert_header(head.name, head.value.as_str())
+                    .insert_header(head.name.clone(), head.value.as_str())
                     .or_err_with(InternalError, || "Invalid header")?;
             }
 
-            for name in headers.remove.iter() {
+            for name in &headers.remove {
                 upstream_request.remove_header(name);
             }
 
-            for head in headers.add {
+            for head in &headers.add {
                 upstream_request
-                    .append_header(head.name, head.value.as_str())
+                    .append_header(head.name.clone(), head.value.as_str())
                     .or_err_with(InternalError, || "Invalid header")?;
             }
         }
