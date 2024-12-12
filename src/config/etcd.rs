@@ -2,7 +2,7 @@ use std::{error::Error, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use etcd_client::{Client, ConnectOptions, Event, GetOptions, GetResponse, WatchOptions};
-use pingora_core::services::background::BackgroundService;
+use pingora_core::{server::ShutdownWatch, services::background::BackgroundService};
 use tokio::{sync::Mutex, time::sleep};
 
 use super::Etcd;
@@ -122,24 +122,45 @@ impl EtcdConfigSync {
     }
 
     /// 主任务循环
-    async fn run_sync_loop(&self, shutdown: &pingora_core::server::ShutdownWatch) {
+    async fn run_sync_loop(&self, shutdown: &mut ShutdownWatch) {
         loop {
-            if *shutdown.borrow() {
-                log::info!("Shutdown signal received, stopping etcd config sync");
-                return;
+            tokio::select! {
+                // Shutdown signal handling
+                _ = shutdown.changed() => {
+                    if *shutdown.borrow() {
+                        log::info!("Shutdown signal received, stopping etcd config sync");
+                        return;
+                    }
+                },
+
+                // Perform list operation
+                result = self.list() => {
+                    if let Err(err) = result {
+                        log::error!("List operation failed: {:?}", err);
+                        self.reset_client().await;
+                        sleep(Duration::from_secs(3)).await;
+                        continue;
+                    }
+                }
             }
 
-            if let Err(err) = self.list().await {
-                log::error!("List operation failed: {:?}", err);
-                self.reset_client().await;
-                sleep(Duration::from_secs(3)).await;
-                continue;
-            }
+            tokio::select! {
+                // Shutdown signal handling during watch
+                _ = shutdown.changed() => {
+                    if *shutdown.borrow() {
+                        log::info!("Shutdown signal received, stopping etcd config sync");
+                        return;
+                    }
+                },
 
-            if let Err(err) = self.watch().await {
-                log::error!("Watch operation failed: {:?}", err);
-                self.reset_client().await;
-                sleep(Duration::from_secs(1)).await;
+                // Perform watch operation
+                result = self.watch() => {
+                    if let Err(err) = result {
+                        log::error!("Watch operation failed: {:?}", err);
+                        self.reset_client().await;
+                        sleep(Duration::from_secs(1)).await;
+                    }
+                }
             }
         }
     }
@@ -147,8 +168,8 @@ impl EtcdConfigSync {
 
 #[async_trait]
 impl BackgroundService for EtcdConfigSync {
-    async fn start(&self, shutdown: pingora_core::server::ShutdownWatch) {
-        self.run_sync_loop(&shutdown).await;
+    async fn start(&self, mut shutdown: ShutdownWatch) {
+        self.run_sync_loop(&mut shutdown).await;
     }
 }
 
