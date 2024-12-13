@@ -294,7 +294,7 @@ pub fn reload_global_match() {
 }
 
 /// Loads routers from the given configuration.
-pub fn load_routers(config: &config::Config) -> Result<()> {
+pub fn load_static_routers(config: &config::Config) -> Result<()> {
     let proxy_routers: Vec<Arc<ProxyRouter>> = config
         .routers
         .iter()

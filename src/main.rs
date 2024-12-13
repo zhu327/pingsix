@@ -14,8 +14,8 @@ use sentry::IntoDsn;
 
 use config::{etcd::EtcdConfigSync, Config, Tls};
 use proxy::{
-    event::ProxyEventHandler, global_rule::load_global_rules, router::load_routers,
-    service::load_services, upstream::load_upstreams,
+    event::ProxyEventHandler, global_rule::load_static_global_rules, router::load_static_routers,
+    service::load_static_services, upstream::load_static_upstreams,
 };
 use service::http::HttpService;
 
@@ -27,16 +27,19 @@ fn main() {
     let config = Config::load_yaml_with_opt_override(&opt).expect("Failed to load configuration");
 
     // 配置同步
-    let etcd_config = if let Some(etcd_cfg) = config.etcd {
+    let etcd_config = if let Some(etcd_cfg) = &config.pingsix.etcd {
         log::info!("Adding etcd config sync...");
         let event_handler = ProxyEventHandler::new(config.pingora.work_stealing);
-        Some(EtcdConfigSync::new(etcd_cfg, Box::new(event_handler)))
+        Some(EtcdConfigSync::new(
+            etcd_cfg.clone(),
+            Box::new(event_handler),
+        ))
     } else {
         log::info!("Loading services, upstreams, and routers...");
-        load_upstreams(&config).expect("Failed to load upstreams");
-        load_services(&config).expect("Failed to load services");
-        load_global_rules(&config).expect("Failed to load global rules");
-        load_routers(&config).expect("Failed to load routers");
+        load_static_upstreams(&config).expect("Failed to load static upstreams");
+        load_static_services(&config).expect("Failed to load static services");
+        load_static_global_rules(&config).expect("Failed to load static global rules");
+        load_static_routers(&config).expect("Failed to load  static routers");
         None
     };
 
@@ -49,10 +52,10 @@ fn main() {
 
     // 添加监听器
     log::info!("Adding listeners...");
-    add_listeners(&mut http_service, config.listeners);
+    add_listeners(&mut http_service, &config.pingsix);
 
     // 添加扩展服务（如 Sentry 和 Prometheus）
-    add_optional_services(&mut pingsix_server, config.sentry, config.prometheus);
+    add_optional_services(&mut pingsix_server, &config.pingsix);
 
     // 添加 Etcd 配置同步服务
     if let Some(etcd_config) = etcd_config {
@@ -72,11 +75,8 @@ fn main() {
 }
 
 // 添加监听器的辅助函数
-fn add_listeners(
-    http_service: &mut Service<HttpProxy<HttpService>>,
-    listeners: Vec<config::Listener>,
-) {
-    for list_cfg in listeners.iter() {
+fn add_listeners(http_service: &mut Service<HttpProxy<HttpService>>, cfg: &config::Pingsix) {
+    for list_cfg in cfg.listeners.iter() {
         match &list_cfg.tls {
             Some(Tls {
                 cert_path,
@@ -103,12 +103,8 @@ fn add_listeners(
 }
 
 // 添加可选服务（如 Sentry 和 Prometheus）的辅助函数
-fn add_optional_services(
-    server: &mut Server,
-    sentry: Option<config::Sentry>,
-    prometheus: Option<config::Prometheus>,
-) {
-    if let Some(sentry_cfg) = sentry {
+fn add_optional_services(server: &mut Server, cfg: &config::Pingsix) {
+    if let Some(sentry_cfg) = &cfg.sentry {
         log::info!("Adding Sentry config...");
         server.sentry = Some(sentry::ClientOptions {
             dsn: sentry_cfg
@@ -120,7 +116,7 @@ fn add_optional_services(
         });
     }
 
-    if let Some(prometheus_cfg) = prometheus {
+    if let Some(prometheus_cfg) = &cfg.prometheus {
         log::info!("Adding Prometheus Service...");
         let mut prometheus_service_http = Service::prometheus_http_service();
         prometheus_service_http.add_tcp(&prometheus_cfg.address.to_string());

@@ -7,20 +7,21 @@ pingora:
   user: nobody
   group: webusers
 
-prometheus:
-  address: 0.0.0.0:8081
+pingsix:
+  # listener on TCP or TLS
+  listeners:
+    - address: 0.0.0.0:8080
+    # - address: "[::1]:443"
+    #   tls:
+    #     cert_path: /etc/ssl/server.crt
+    #     key_path: /etc/ssl/server.key
+    #   offer_h2: true
 
-sentry:
-  dsn: https://1234567890@sentry.io/123456
+  prometheus:
+    address: 0.0.0.0:8081
 
-# listener on TCP or TLS
-listeners:
-  - address: 0.0.0.0:8080
-  # - address: "[::1]:443"
-  #   tls:
-  #     cert_path: /etc/ssl/server.crt
-  #     key_path: /etc/ssl/server.key
-  #   offer_h2: true
+  sentry:
+    dsn: https://1234567890@sentry.io/123456
 
 # api routers example for https://apisix.apache.org/docs/apisix/admin-api/#route
 # Here is a complete example, which is a subset of routes from the apisix docs. The fields not mentioned here indicate that pingsix does not support them.

@@ -92,7 +92,7 @@ pub fn reload_global_plugin() {
 }
 
 /// Loads services from the given configuration.
-pub fn load_global_rules(config: &config::Config) -> Result<()> {
+pub fn load_static_global_rules(config: &config::Config) -> Result<()> {
     let proxy_global_rules: Vec<Arc<ProxyGlobalRule>> = config
         .global_rules
         .iter()

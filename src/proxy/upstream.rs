@@ -368,7 +368,7 @@ pub static UPSTREAM_MAP: Lazy<RwLock<HashMap<String, Arc<ProxyUpstream>>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
 
 /// Loads upstreams from the given configuration.
-pub fn load_upstreams(config: &config::Config) -> Result<()> {
+pub fn load_static_upstreams(config: &config::Config) -> Result<()> {
     // Collect all ProxyUpstream instances into a vector.
     let proxy_upstreams: Vec<Arc<ProxyUpstream>> = config
         .upstreams

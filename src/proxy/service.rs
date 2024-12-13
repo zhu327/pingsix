@@ -82,7 +82,7 @@ pub static SERVICE_MAP: Lazy<RwLock<HashMap<String, Arc<ProxyService>>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
 
 /// Loads services from the given configuration.
-pub fn load_services(config: &config::Config) -> Result<()> {
+pub fn load_static_services(config: &config::Config) -> Result<()> {
     let proxy_services: Vec<Arc<ProxyService>> = config
         .services
         .iter()

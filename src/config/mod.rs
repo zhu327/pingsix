@@ -17,22 +17,10 @@ pub struct Config {
     pub pingora: ServerConf,
 
     #[validate(nested)]
-    pub etcd: Option<Etcd>,
+    pub pingsix: Pingsix,
 
     #[validate(nested)]
     #[serde(default)]
-    pub prometheus: Option<Prometheus>,
-
-    #[validate(nested)]
-    #[serde(default)]
-    pub sentry: Option<Sentry>,
-
-    #[validate(length(min = 1))]
-    #[validate(nested)]
-    pub listeners: Vec<Listener>,
-
-    #[validate(length(min = 1))]
-    #[validate(nested)]
     pub routers: Vec<Router>,
     #[validate(nested)]
     #[serde(default)]
@@ -115,6 +103,22 @@ impl Config {
 
         Ok(())
     }
+}
+
+#[derive(Clone, Default, Debug, Serialize, Deserialize, Validate)]
+pub struct Pingsix {
+    #[validate(length(min = 1))]
+    #[validate(nested)]
+    pub listeners: Vec<Listener>,
+
+    #[validate(nested)]
+    pub etcd: Option<Etcd>,
+
+    #[validate(nested)]
+    pub prometheus: Option<Prometheus>,
+
+    #[validate(nested)]
+    pub sentry: Option<Sentry>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Validate)]
@@ -506,13 +510,14 @@ pingora:
       - 5.6.7.8
   client_bind_to_ipv6: []
 
-listeners:
-  - address: 0.0.0.0:8080
-  - address: "[::1]:8080"
-    tls:
-      cert_path: /etc/ssl/server.crt
-      key_path: /etc/ssl/server.key
-    offer_h2: true
+pingsix:
+  listeners:
+    - address: 0.0.0.0:8080
+    - address: "[::1]:8080"
+      tls:
+        cert_path: /etc/ssl/server.crt
+        key_path: /etc/ssl/server.key
+      offer_h2: true
 
 routers:
   - id: 1
@@ -542,7 +547,7 @@ services:
         assert_eq!(2, conf.pingora.client_bind_to_ipv4.len());
         assert_eq!(0, conf.pingora.client_bind_to_ipv6.len());
         assert_eq!(1, conf.pingora.version);
-        assert_eq!(2, conf.listeners.len());
+        assert_eq!(2, conf.pingsix.listeners.len());
         assert_eq!(1, conf.routers.len());
         assert_eq!(1, conf.upstreams.len());
         assert_eq!(1, conf.services.len());
@@ -561,14 +566,15 @@ pingora:
       - 5.6.7.8
   client_bind_to_ipv6: []
 
-listeners:
-  - address: 0.0.0.0:8080
-    offer_h2c: true
-  - address: "[::1]:8080"
-    tls:
-      cert_path: /etc/ssl/server.crt
-      key_path: /etc/ssl/server.key
-    offer_h2: true
+pingsix:
+  listeners:
+    - address: 0.0.0.0:8080
+      offer_h2c: true
+    - address: "[::1]:8080"
+      tls:
+        cert_path: /etc/ssl/server.crt
+        key_path: /etc/ssl/server.key
+      offer_h2: true
 
 routers:
   - id: 1
@@ -599,7 +605,7 @@ services:
         assert_eq!(2, conf.pingora.client_bind_to_ipv4.len());
         assert_eq!(0, conf.pingora.client_bind_to_ipv6.len());
         assert_eq!(1, conf.pingora.version);
-        assert_eq!(2, conf.listeners.len());
+        assert_eq!(2, conf.pingsix.listeners.len());
         assert_eq!(1, conf.routers.len());
         assert_eq!(2, conf.upstreams.len());
         assert_eq!(1, conf.services.len());
@@ -611,7 +617,8 @@ services:
         init_log();
         let conf_str = r#"
 ---
-listeners: []
+pingsix:
+  listeners: []
 
 routers:
   - id: 1
@@ -638,9 +645,10 @@ routers:
         init_log();
         let conf_str = r#"
 ---
-listeners:
-  - address: "[::1]:8080"
-    offer_h2: true
+pingsix:
+  listeners:
+    - address: "[::1]:8080"
+      offer_h2: true
 
 routers:
   - id: 1
@@ -663,35 +671,13 @@ routers:
     }
 
     #[test]
-    fn test_valid_routers_length() {
-        init_log();
-        let conf_str = r#"
----
-listeners:
-  - address: "[::1]:8080"
-
-routers: []
-        "#
-        .to_string();
-        let conf = Config::from_yaml(&conf_str);
-        // Check for error and print the result
-        match conf {
-            Ok(_) => panic!("Expected error, but got a valid config"),
-            Err(e) => {
-                // Print the error here
-                eprintln!("Error: {:?}", e);
-                assert!(true); // You can assert true because you expect an error
-            }
-        }
-    }
-
-    #[test]
     fn test_valid_routers_uri_and_uris() {
         init_log();
         let conf_str = r#"
 ---
-listeners:
-  - address: "[::1]:8080"
+pingsix:
+  listeners:
+    - address: "[::1]:8080"
 
 routers:
   - id: 1
@@ -717,8 +703,9 @@ routers:
         init_log();
         let conf_str = r#"
 ---
-listeners:
-  - address: "[::1]:8080"
+pingsix:
+  listeners:
+    - address: "[::1]:8080"
 
 routers:
   - id: 1
@@ -745,8 +732,9 @@ routers:
         init_log();
         let conf_str = r#"
 ---
-listeners:
-  - address: "[::1]:8080"
+pingsix:
+  listeners:
+    - address: "[::1]:8080"
 
 routers:
   - id: 1
@@ -783,8 +771,9 @@ upstreams:
         init_log();
         let conf_str = r#"
 ---
-listeners:
-  - address: "[::1]:8080"
+pingsix:
+  listeners:
+    - address: "[::1]:8080"
 
 routers:
   - id: 1
@@ -808,8 +797,9 @@ routers:
         init_log();
         let conf_str = r#"
 ---
-listeners:
-  - address: "[::1]:8080"
+pingsix:
+  listeners:
+    - address: "[::1]:8080"
 
 routers:
   - id: 1
