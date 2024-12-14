@@ -230,7 +230,7 @@ impl EtcdClientWrapper {
             .ok_or("Etcd client is not initialized")?;
 
         let resp = client.get(self.with_prefix(key), None).await?;
-        return Ok(resp.kvs().first().map(|kv| kv.value().to_vec()));
+        Ok(resp.kvs().first().map(|kv| kv.value().to_vec()))
     }
 
     pub async fn put(&self, key: &str, value: Vec<u8>) -> Result<(), Box<dyn Error + Send + Sync>> {
