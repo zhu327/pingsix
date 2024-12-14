@@ -56,10 +56,7 @@ fn main() {
     log::info!("Adding listeners...");
     add_listeners(&mut http_service, &config.pingsix);
 
-    // add admin service
-    add_admin_service(&mut pingsix_server, &config.pingsix);
-
-    // 添加扩展服务（如 Sentry 和 Prometheus）
+    // 添加扩展服务（如 Sentry 和 Prometheus, Admin）
     add_optional_services(&mut pingsix_server, &config.pingsix);
 
     // 添加 Etcd 配置同步服务
@@ -107,15 +104,7 @@ fn add_listeners(http_service: &mut Service<HttpProxy<HttpService>>, cfg: &confi
     }
 }
 
-fn add_admin_service(server: &mut Server, cfg: &config::Pingsix) {
-    if cfg.etcd.is_some() && cfg.admin.is_some() {
-        log::info!("Adding Admin Service...");
-        let admin_service_http = AdminHttpApp::admin_http_service(cfg);
-        server.add_service(admin_service_http);
-    }
-}
-
-// 添加可选服务（如 Sentry 和 Prometheus）的辅助函数
+// 添加可选服务（如 Sentry 和 Prometheus, Admin）的辅助函数
 fn add_optional_services(server: &mut Server, cfg: &config::Pingsix) {
     if let Some(sentry_cfg) = &cfg.sentry {
         log::info!("Adding Sentry config...");
@@ -127,6 +116,12 @@ fn add_optional_services(server: &mut Server, cfg: &config::Pingsix) {
                 .expect("Invalid Sentry DSN"),
             ..Default::default()
         });
+    }
+
+    if cfg.etcd.is_some() && cfg.admin.is_some() {
+        log::info!("Adding Admin Service...");
+        let admin_service_http = AdminHttpApp::admin_http_service(cfg);
+        server.add_service(admin_service_http);
     }
 
     if let Some(prometheus_cfg) = &cfg.prometheus {
