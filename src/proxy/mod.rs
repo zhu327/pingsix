@@ -2,7 +2,7 @@ pub mod discovery;
 pub mod event;
 pub mod global_rule;
 pub mod plugin;
-pub mod router;
+pub mod route;
 pub mod service;
 pub mod upstream;
 
@@ -16,7 +16,7 @@ use pingora_http::RequestHeader;
 use pingora_proxy::Session;
 
 use plugin::ProxyPluginExecutor;
-use router::ProxyRouter;
+use route::ProxyRoute;
 
 use crate::config;
 
@@ -24,8 +24,8 @@ use crate::config;
 ///
 /// Holds the context for each request.
 pub struct ProxyContext {
-    pub router: Option<Arc<ProxyRouter>>,
-    pub router_params: Option<BTreeMap<String, String>>,
+    pub route: Option<Arc<ProxyRoute>>,
+    pub route_params: Option<BTreeMap<String, String>>,
     pub tries: usize,
     pub request_start: Instant,
     pub plugin: Arc<ProxyPluginExecutor>,
@@ -35,8 +35,8 @@ pub struct ProxyContext {
 impl Default for ProxyContext {
     fn default() -> Self {
         Self {
-            router: None,
-            router_params: None,
+            route: None,
+            route_params: None,
             tries: 0,
             request_start: Instant::now(),
             plugin: Arc::new(ProxyPluginExecutor::default()),

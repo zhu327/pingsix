@@ -18,7 +18,7 @@ use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_proxy::Session;
 use serde_yaml::Value as YamlValue;
 
-use super::{router::ProxyRouter, service::service_fetch, ProxyContext};
+use super::{route::ProxyRoute, service::service_fetch, ProxyContext};
 
 /// Type alias for plugin initialization functions
 pub type PluginCreateFn = Arc<dyn Fn(YamlValue) -> Result<Arc<dyn ProxyPlugin>> + Send + Sync>;
@@ -75,35 +75,35 @@ pub fn build_plugin(name: &str, cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> 
     builder(cfg)
 }
 
-/// Builds a `ProxyPluginExecutor` by combining plugins from both a router and its associated service.
+/// Builds a `ProxyPluginExecutor` by combining plugins from both a route and its associated service.
 ///
 /// # Arguments
-/// - `router`: A reference-counted pointer to a `ProxyRouter` instance containing router-specific plugins.
+/// - `route`: A reference-counted pointer to a `ProxyRoute` instance containing route-specific plugins.
 ///
 /// # Returns
 /// - `Arc<ProxyPluginExecutor>`: A reference-counted pointer to a `ProxyPluginExecutor` that manages the merged plugin list.
 ///
 /// # Process
-/// - Retrieves router-specific plugins from the `router`.
-/// - If the router is associated with a service (via `service_id`), retrieves service-specific plugins.
-/// - Combines the router and service plugins, ensuring unique entries by their name.
+/// - Retrieves route-specific plugins from the `route`.
+/// - If the route is associated with a service (via `service_id`), retrieves service-specific plugins.
+/// - Combines the route and service plugins, ensuring unique entries by their name.
 /// - Sorts the merged plugin list by priority in descending order.
 /// - Constructs and returns the `ProxyPluginExecutor` instance.
 ///
 /// # Notes
-/// - This function ensures that plugins from the router take precedence over those from the service in case of naming conflicts.
-pub fn build_plugin_executor(router: Arc<ProxyRouter>) -> Arc<ProxyPluginExecutor> {
+/// - This function ensures that plugins from the route take precedence over those from the service in case of naming conflicts.
+pub fn build_plugin_executor(route: Arc<ProxyRoute>) -> Arc<ProxyPluginExecutor> {
     let mut plugin_map: HashMap<String, Arc<dyn ProxyPlugin>> = HashMap::new();
 
-    // 合并 router 和 service 的插件
-    let service_plugins = router
+    // 合并 route 和 service 的插件
+    let service_plugins = route
         .inner
         .service_id
         .as_deref() // 将 Option<String> 转换为 Option<&str>
         .and_then(service_fetch)
         .map_or_else(Vec::new, |service| service.plugins.clone());
 
-    for plugin in router.plugins.iter().chain(service_plugins.iter()) {
+    for plugin in route.plugins.iter().chain(service_plugins.iter()) {
         plugin_map
             .entry(plugin.name().to_string())
             .or_insert_with(|| plugin.clone());

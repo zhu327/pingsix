@@ -16,6 +16,15 @@ pingsix:
     #     cert_path: /etc/ssl/server.crt
     #     key_path: /etc/ssl/server.key
     #   offer_h2: true
+  
+  etcd:
+    host:
+      - "http://192.168.2.141:2379"
+    prefix: /apisix
+
+  admin:
+    address: "0.0.0.0:8082"
+    api_key: pingsix
 
   prometheus:
     address: 0.0.0.0:8081
@@ -23,10 +32,10 @@ pingsix:
   sentry:
     dsn: https://1234567890@sentry.io/123456
 
-# api routers example for https://apisix.apache.org/docs/apisix/admin-api/#route
+# api routes example for https://apisix.apache.org/docs/apisix/admin-api/#route
 # Here is a complete example, which is a subset of routes from the apisix docs. The fields not mentioned here indicate that pingsix does not support them.
 # The fields in the following comments are all optional parameters.
-routers:
+routes:
   - id: 1
     uri: /
     # uris: ["/","/test"]

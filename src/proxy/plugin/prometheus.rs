@@ -91,8 +91,8 @@ impl ProxyPlugin for PluginPrometheus {
     async fn logging(&self, session: &mut Session, _e: Option<&Error>, ctx: &mut ProxyContext) {
         REQUESTS.inc();
 
-        // Clone router only once
-        let router = ctx.router.clone();
+        // Clone route only once
+        let route = ctx.route.clone();
 
         // Extract response code
         let code = session
@@ -100,19 +100,19 @@ impl ProxyPlugin for PluginPrometheus {
             .map_or("", |resp| resp.status.as_str());
 
         // Extract route information, falling back to empty string if not present
-        let route = router.as_ref().map_or_else(|| "", |r| r.inner.id.as_str());
+        let route_id = route.as_ref().map_or_else(|| "", |r| r.inner.id.as_str());
 
         // Extract URI and host, falling back to empty string or default values
-        let uri = router
+        let uri = route
             .as_ref()
             .map_or("", |_| session.req_header().uri.path());
 
-        let host = router.as_ref().map_or("", |_| {
+        let host = route.as_ref().map_or("", |_| {
             get_request_host(session.req_header()).unwrap_or_default()
         });
 
         // Extract service, falling back to host if service_id is None
-        let service = router
+        let service = route
             .as_ref()
             .map_or_else(|| host, |r| r.inner.service_id.as_deref().unwrap_or(host));
 
@@ -121,19 +121,19 @@ impl ProxyPlugin for PluginPrometheus {
 
         // Update Prometheus metrics
         STATUS
-            .with_label_values(&[code, route, uri, host, service, node])
+            .with_label_values(&[code, route_id, uri, host, service, node])
             .inc();
 
         LATENCY
-            .with_label_values(&["request", route, service, node])
+            .with_label_values(&["request", route_id, service, node])
             .observe(ctx.request_start.elapsed().as_millis() as f64);
 
         BANDWIDTH
-            .with_label_values(&["ingress", route, service, node])
+            .with_label_values(&["ingress", route_id, service, node])
             .inc_by(session.body_bytes_read() as u64);
 
         BANDWIDTH
-            .with_label_values(&["egress", route, service, node])
+            .with_label_values(&["egress", route_id, service, node])
             .inc_by(session.body_bytes_sent() as u64);
     }
 }

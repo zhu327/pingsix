@@ -15,7 +15,7 @@ use pingora_proxy::{ProxyHttp, Session};
 use crate::proxy::{
     global_rule::global_plugin_fetch,
     plugin::{build_plugin_executor, ProxyPlugin},
-    router::global_match_fetch,
+    route::global_match_fetch,
     ProxyContext,
 };
 
@@ -40,7 +40,7 @@ impl ProxyHttp for HttpService {
         session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
-        let peer = ctx.router.as_ref().unwrap().select_http_peer(session);
+        let peer = ctx.route.as_ref().unwrap().select_http_peer(session);
         if let Ok(ref p) = peer {
             ctx.vars
                 .insert("upstream".to_string(), p._address.to_string());
@@ -61,7 +61,7 @@ impl ProxyHttp for HttpService {
 
     /// Filters incoming requests
     async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
-        if ctx.router.is_none() {
+        if ctx.route.is_none() {
             session
                 .respond_error(StatusCode::NOT_FOUND.as_u16())
                 .await?;
@@ -80,10 +80,10 @@ impl ProxyHttp for HttpService {
     /// Handle the incoming request before any downstream module is executed.
     async fn early_request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<()> {
         // Match request to pipeline
-        if let Some((router_params, router)) = global_match_fetch().match_request(session) {
-            ctx.router_params = Some(router_params);
-            ctx.router = Some(router.clone());
-            ctx.plugin = build_plugin_executor(router);
+        if let Some((route_params, route)) = global_match_fetch().match_request(session) {
+            ctx.route_params = Some(route_params);
+            ctx.route = Some(route.clone());
+            ctx.plugin = build_plugin_executor(route);
         }
 
         // execute global rule plugins
@@ -114,7 +114,7 @@ impl ProxyHttp for HttpService {
             .await?;
 
         // rewrite host header
-        if let Some(upstream) = ctx.router.as_ref().and_then(|r| r.resolve_upstream()) {
+        if let Some(upstream) = ctx.route.as_ref().and_then(|r| r.resolve_upstream()) {
             upstream.upstream_host_rewrite(upstream_request);
         }
         Ok(())
@@ -171,8 +171,8 @@ impl ProxyHttp for HttpService {
         ctx: &mut Self::CTX,
         mut e: Box<Error>,
     ) -> Box<Error> {
-        if let Some(router) = ctx.router.as_ref() {
-            if let Some(upstream) = router.resolve_upstream() {
+        if let Some(route) = ctx.route.as_ref() {
+            if let Some(upstream) = route.resolve_upstream() {
                 if let Some(retries) = upstream.get_retries() {
                     if retries == 0 || ctx.tries >= retries {
                         return e;

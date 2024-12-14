@@ -1,4 +1,5 @@
 #![allow(clippy::upper_case_acronyms)]
+mod admin;
 mod config;
 mod proxy;
 mod service;
@@ -12,9 +13,10 @@ use pingora_core::{
 use pingora_proxy::{http_proxy_service_with_name, HttpProxy};
 use sentry::IntoDsn;
 
+use admin::AdminHttpApp;
 use config::{etcd::EtcdConfigSync, Config, Tls};
 use proxy::{
-    event::ProxyEventHandler, global_rule::load_static_global_rules, router::load_static_routers,
+    event::ProxyEventHandler, global_rule::load_static_global_rules, route::load_static_routes,
     service::load_static_services, upstream::load_static_upstreams,
 };
 use service::http::HttpService;
@@ -35,11 +37,11 @@ fn main() {
             Box::new(event_handler),
         ))
     } else {
-        log::info!("Loading services, upstreams, and routers...");
+        log::info!("Loading services, upstreams, and routes...");
         load_static_upstreams(&config).expect("Failed to load static upstreams");
         load_static_services(&config).expect("Failed to load static services");
         load_static_global_rules(&config).expect("Failed to load static global rules");
-        load_static_routers(&config).expect("Failed to load  static routers");
+        load_static_routes(&config).expect("Failed to load  static routes");
         None
     };
 
@@ -53,6 +55,9 @@ fn main() {
     // 添加监听器
     log::info!("Adding listeners...");
     add_listeners(&mut http_service, &config.pingsix);
+
+    // add admin service
+    add_admin_service(&mut pingsix_server, &config.pingsix);
 
     // 添加扩展服务（如 Sentry 和 Prometheus）
     add_optional_services(&mut pingsix_server, &config.pingsix);
@@ -99,6 +104,14 @@ fn add_listeners(http_service: &mut Service<HttpProxy<HttpService>>, cfg: &confi
                 http_service.add_tcp(&list_cfg.address.to_string());
             }
         }
+    }
+}
+
+fn add_admin_service(server: &mut Server, cfg: &config::Pingsix) {
+    if cfg.etcd.is_some() && cfg.admin.is_some() {
+        log::info!("Adding Admin Service...");
+        let admin_service_http = AdminHttpApp::admin_http_service(cfg);
+        server.add_service(admin_service_http);
     }
 }
 

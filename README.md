@@ -41,7 +41,7 @@ prometheus:
 listeners:
   - address: 0.0.0.0:8080
 
-routers:
+routes:
   - id: 1
     uri: /
     host: www.example.com

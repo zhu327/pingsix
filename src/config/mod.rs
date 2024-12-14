@@ -21,7 +21,7 @@ pub struct Config {
 
     #[validate(nested)]
     #[serde(default)]
-    pub routers: Vec<Router>,
+    pub routes: Vec<Route>,
     #[validate(nested)]
     #[serde(default)]
     pub upstreams: Vec<Upstream>,
@@ -89,8 +89,8 @@ impl Config {
             return Err(ValidationError::new("upstream_id_required"));
         }
 
-        if self.routers.iter().any(|router| router.id.is_empty()) {
-            return Err(ValidationError::new("router_id_required"));
+        if self.routes.iter().any(|route| route.id.is_empty()) {
+            return Err(ValidationError::new("route_id_required"));
         }
 
         if self.services.iter().any(|service| service.id.is_empty()) {
@@ -115,10 +115,24 @@ pub struct Pingsix {
     pub etcd: Option<Etcd>,
 
     #[validate(nested)]
+    pub admin: Option<Admin>,
+
+    #[validate(nested)]
     pub prometheus: Option<Prometheus>,
 
     #[validate(nested)]
     pub sentry: Option<Sentry>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Validate)]
+#[validate(schema(function = "Listener::validate_tls_for_offer_h2"))]
+pub struct Listener {
+    pub address: SocketAddr,
+    pub tls: Option<Tls>,
+    #[serde(default)]
+    pub offer_h2: bool,
+    #[serde(default)]
+    pub offer_h2c: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Validate)]
@@ -133,6 +147,12 @@ pub struct Etcd {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Validate)]
+pub struct Admin {
+    pub address: SocketAddr,
+    pub api_key: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Validate)]
 pub struct Prometheus {
     pub address: SocketAddr,
 }
@@ -140,17 +160,6 @@ pub struct Prometheus {
 #[derive(Clone, Debug, Serialize, Deserialize, Validate)]
 pub struct Sentry {
     pub dsn: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, Validate)]
-#[validate(schema(function = "Listener::validate_tls_for_offer_h2"))]
-pub struct Listener {
-    pub address: SocketAddr,
-    pub tls: Option<Tls>,
-    #[serde(default)]
-    pub offer_h2: bool,
-    #[serde(default)]
-    pub offer_h2c: bool,
 }
 
 impl Listener {
@@ -175,8 +184,8 @@ pub struct Timeout {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
-#[validate(schema(function = "Router::validate"))]
-pub struct Router {
+#[validate(schema(function = "Route::validate"))]
+pub struct Route {
     #[serde(default)]
     pub id: String,
 
@@ -188,7 +197,7 @@ pub struct Router {
     pub host: Option<String>,
     #[serde(default)]
     pub hosts: Vec<String>,
-    #[serde(default = "Router::default_priority")]
+    #[serde(default = "Route::default_priority")]
     pub priority: u32,
 
     #[serde(default)]
@@ -201,7 +210,7 @@ pub struct Router {
     pub timeout: Option<Timeout>,
 }
 
-impl Router {
+impl Route {
     fn validate(&self) -> Result<(), ValidationError> {
         if self.uri.is_none() && self.uris.is_empty() {
             return Err(ValidationError::new("uri_or_uris_required"));
@@ -519,7 +528,7 @@ pingsix:
         key_path: /etc/ssl/server.key
       offer_h2: true
 
-routers:
+routes:
   - id: 1
     uri: /
     upstream:
@@ -548,7 +557,7 @@ services:
         assert_eq!(0, conf.pingora.client_bind_to_ipv6.len());
         assert_eq!(1, conf.pingora.version);
         assert_eq!(2, conf.pingsix.listeners.len());
-        assert_eq!(1, conf.routers.len());
+        assert_eq!(1, conf.routes.len());
         assert_eq!(1, conf.upstreams.len());
         assert_eq!(1, conf.services.len());
         print!("{}", conf.to_yaml());
@@ -576,7 +585,7 @@ pingsix:
         key_path: /etc/ssl/server.key
       offer_h2: true
 
-routers:
+routes:
   - id: 1
     uri: /
     upstream_id: 1
@@ -606,7 +615,7 @@ services:
         assert_eq!(0, conf.pingora.client_bind_to_ipv6.len());
         assert_eq!(1, conf.pingora.version);
         assert_eq!(2, conf.pingsix.listeners.len());
-        assert_eq!(1, conf.routers.len());
+        assert_eq!(1, conf.routes.len());
         assert_eq!(2, conf.upstreams.len());
         assert_eq!(1, conf.services.len());
         print!("{}", conf.to_yaml());
@@ -620,7 +629,7 @@ services:
 pingsix:
   listeners: []
 
-routers:
+routes:
   - id: 1
     uri: /
     upstream:
@@ -650,7 +659,7 @@ pingsix:
     - address: "[::1]:8080"
       offer_h2: true
 
-routers:
+routes:
   - id: 1
     uri: /
     upstream:
@@ -671,7 +680,7 @@ routers:
     }
 
     #[test]
-    fn test_valid_routers_uri_and_uris() {
+    fn test_valid_routes_uri_and_uris() {
         init_log();
         let conf_str = r#"
 ---
@@ -679,7 +688,7 @@ pingsix:
   listeners:
     - address: "[::1]:8080"
 
-routers:
+routes:
   - id: 1
     upstream:
       nodes:
@@ -699,7 +708,7 @@ routers:
     }
 
     #[test]
-    fn test_valid_routers_upstream_host() {
+    fn test_valid_routes_upstream_host() {
         init_log();
         let conf_str = r#"
 ---
@@ -707,7 +716,7 @@ pingsix:
   listeners:
     - address: "[::1]:8080"
 
-routers:
+routes:
   - id: 1
     upstream:
       nodes:
@@ -736,7 +745,7 @@ pingsix:
   listeners:
     - address: "[::1]:8080"
 
-routers:
+routes:
   - id: 1
     uri: /
     upstream:
@@ -767,7 +776,7 @@ upstreams:
     }
 
     #[test]
-    fn test_valid_router_upstream() {
+    fn test_valid_route_upstream() {
         init_log();
         let conf_str = r#"
 ---
@@ -775,7 +784,7 @@ pingsix:
   listeners:
     - address: "[::1]:8080"
 
-routers:
+routes:
   - id: 1
     uri: /
         "#
@@ -801,7 +810,7 @@ pingsix:
   listeners:
     - address: "[::1]:8080"
 
-routers:
+routes:
   - id: 1
     uri: /
     upstream:

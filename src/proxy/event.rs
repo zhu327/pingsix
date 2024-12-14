@@ -2,11 +2,14 @@ use std::sync::Arc;
 
 use etcd_client::{Event, GetResponse};
 
-use crate::config::{etcd::EtcdEventHandler, GlobalRule, Router, Service, Upstream};
+use crate::config::{
+    etcd::{json_to_resource, EtcdEventHandler},
+    GlobalRule, Route, Service, Upstream,
+};
 
 use super::{
     global_rule::{global_rule_fetch, reload_global_plugin, ProxyGlobalRule, GLOBAL_RULE_MAP},
-    router::{reload_global_match, router_fetch, ProxyRouter, ROUTER_MAP},
+    route::{reload_global_match, route_fetch, ProxyRoute, ROUTE_MAP},
     service::{service_fetch, ProxyService, SERVICE_MAP},
     upstream::{upstream_fetch, ProxyUpstream, UPSTREAM_MAP},
     Identifiable, MapOperations,
@@ -21,16 +24,16 @@ impl ProxyEventHandler {
         ProxyEventHandler { work_stealing }
     }
 
-    fn handle_routers(&self, response: &GetResponse) {
-        let routers: Vec<Router> = response
+    fn handle_routes(&self, response: &GetResponse) {
+        let routes: Vec<Route> = response
             .kvs()
             .iter()
             .filter_map(|kv| match parse_key(kv.key()) {
-                Ok((id, key_type)) if key_type == "routers" => {
-                    match value_to_resource::<Router>(kv.value()) {
-                        Ok(mut router) => {
-                            router.id = id;
-                            Some(router)
+                Ok((id, key_type)) if key_type == "routes" => {
+                    match json_to_resource::<Route>(kv.value()) {
+                        Ok(mut route) => {
+                            route.id = id;
+                            Some(route)
                         }
                         Err(_) => None,
                     }
@@ -39,26 +42,26 @@ impl ProxyEventHandler {
             })
             .collect();
 
-        let proxy_routers: Vec<Arc<ProxyRouter>> = routers
+        let proxy_routes: Vec<Arc<ProxyRoute>> = routes
             .iter()
-            .filter_map(|router| {
-                // 尝试从缓存或其他地方获取现有的 ProxyRouter
-                if let Some(proxy_router) = router_fetch(&router.id) {
-                    if proxy_router.inner == *router {
-                        return Some(proxy_router); // 如果已经有匹配的ProxyRouter则直接返回
+            .filter_map(|route| {
+                // 尝试从缓存或其他地方获取现有的 ProxyRoute
+                if let Some(proxy_route) = route_fetch(&route.id) {
+                    if proxy_route.inner == *route {
+                        return Some(proxy_route); // 如果已经有匹配的ProxyRoute则直接返回
                     }
                 }
 
-                log::info!("Configuring Router: {}", router.id);
+                log::info!("Configuring Route: {}", route.id);
 
-                // 创建新的 ProxyRouter
-                ProxyRouter::new_with_upstream_and_plugins(router.clone(), self.work_stealing)
+                // 创建新的 ProxyRoute
+                ProxyRoute::new_with_upstream_and_plugins(route.clone(), self.work_stealing)
                     .ok()
                     .map(Arc::new)
             })
             .collect();
 
-        ROUTER_MAP.reload_resource(proxy_routers);
+        ROUTE_MAP.reload_resource(proxy_routes);
         reload_global_match();
     }
 
@@ -68,7 +71,7 @@ impl ProxyEventHandler {
             .iter()
             .filter_map(|kv| match parse_key(kv.key()) {
                 Ok((id, key_type)) if key_type == "upstreams" => {
-                    match value_to_resource::<Upstream>(kv.value()) {
+                    match json_to_resource::<Upstream>(kv.value()) {
                         Ok(mut upstream) => {
                             upstream.id = id;
                             Some(upstream)
@@ -83,10 +86,9 @@ impl ProxyEventHandler {
         let proxy_upstreams: Vec<Arc<ProxyUpstream>> = upstream
             .iter()
             .filter_map(|upstream| {
-                // 尝试从缓存或其他地方获取现有的 ProxyRouter
                 if let Some(proxy_upstream) = upstream_fetch(&upstream.id) {
                     if proxy_upstream.inner == *upstream {
-                        return Some(proxy_upstream); // 如果已经有匹配的ProxyRouter则直接返回
+                        return Some(proxy_upstream);
                     }
                 }
 
@@ -106,7 +108,7 @@ impl ProxyEventHandler {
             .iter()
             .filter_map(|kv| match parse_key(kv.key()) {
                 Ok((id, key_type)) if key_type == "services" => {
-                    match value_to_resource::<Service>(kv.value()) {
+                    match json_to_resource::<Service>(kv.value()) {
                         Ok(mut service) => {
                             service.id = id;
                             Some(service)
@@ -121,10 +123,9 @@ impl ProxyEventHandler {
         let proxy_services: Vec<Arc<ProxyService>> = service
             .iter()
             .filter_map(|service| {
-                // 尝试从缓存或其他地方获取现有的 ProxyRouter
                 if let Some(proxy_service) = service_fetch(&service.id) {
                     if proxy_service.inner == *service {
-                        return Some(proxy_service); // 如果已经有匹配的ProxyRouter则直接返回
+                        return Some(proxy_service);
                     }
                 }
 
@@ -144,7 +145,7 @@ impl ProxyEventHandler {
             .iter()
             .filter_map(|kv| match parse_key(kv.key()) {
                 Ok((id, key_type)) if key_type == "global_rules" => {
-                    match value_to_resource::<GlobalRule>(kv.value()) {
+                    match json_to_resource::<GlobalRule>(kv.value()) {
                         Ok(mut rule) => {
                             rule.id = id;
                             Some(rule)
@@ -159,10 +160,9 @@ impl ProxyEventHandler {
         let proxy_global_rules: Vec<Arc<ProxyGlobalRule>> = global_rules
             .iter()
             .filter_map(|rule| {
-                // 尝试从缓存或其他地方获取现有的 ProxyRouter
                 if let Some(proxy_global_rule) = global_rule_fetch(&rule.id) {
                     if proxy_global_rule.inner == *rule {
-                        return Some(proxy_global_rule); // 如果已经有匹配的ProxyRouter则直接返回
+                        return Some(proxy_global_rule);
                     }
                 }
 
@@ -186,7 +186,7 @@ impl ProxyEventHandler {
         let key = event.kv().unwrap().key();
         match parse_key(key) {
             Ok((id, parsed_key_type)) if parsed_key_type == key_type => {
-                match value_to_resource::<T>(event.kv().unwrap().value()) {
+                match json_to_resource::<T>(event.kv().unwrap().value()) {
                     Ok(resource) => {
                         log::info!("Handling {}: {}", key_type, id);
                         handler(self, id, &resource);
@@ -205,13 +205,13 @@ impl ProxyEventHandler {
         }
     }
 
-    fn handle_router_event(&self, event: &Event) {
-        self.handle_resource::<Router, _>(event, "routers", |handler, id, router| {
-            if let Ok(mut proxy_router) =
-                ProxyRouter::new_with_upstream_and_plugins(router.clone(), handler.work_stealing)
+    fn handle_route_event(&self, event: &Event) {
+        self.handle_resource::<Route, _>(event, "routes", |handler, id, route| {
+            if let Ok(mut proxy_route) =
+                ProxyRoute::new_with_upstream_and_plugins(route.clone(), handler.work_stealing)
             {
-                proxy_router.set_id(id);
-                ROUTER_MAP.insert(Arc::new(proxy_router));
+                proxy_route.set_id(id);
+                ROUTE_MAP.insert(Arc::new(proxy_route));
                 reload_global_match();
             }
         });
@@ -261,8 +261,8 @@ impl EtcdEventHandler for ProxyEventHandler {
             // A PUT event indicates that a key-value pair was added or updated
             etcd_client::EventType::Put => match parse_key(event.kv().unwrap().key()) {
                 Ok((_, key_type)) => match key_type.as_str() {
-                    "routers" => {
-                        self.handle_router_event(event);
+                    "routes" => {
+                        self.handle_route_event(event);
                     }
                     "upstreams" => {
                         self.handle_upstream_event(event);
@@ -287,10 +287,10 @@ impl EtcdEventHandler for ProxyEventHandler {
                 match parse_key(event.kv().unwrap().key()) {
                     Ok((id, key_type)) => {
                         match key_type.as_str() {
-                            "routers" => {
-                                log::info!("DELETE Router: {}", id);
-                                // Handle the removal of a router
-                                ROUTER_MAP.remove(&id);
+                            "routes" => {
+                                log::info!("DELETE Route: {}", id);
+                                // Handle the removal of a route
+                                ROUTE_MAP.remove(&id);
                                 reload_global_match();
                             }
                             "upstreams" => {
@@ -325,27 +325,9 @@ impl EtcdEventHandler for ProxyEventHandler {
     fn handle_list_response(&self, response: &GetResponse) {
         self.handle_upstreams(response);
         self.handle_services(response);
-        self.handle_routers(response);
+        self.handle_routes(response);
         self.handle_global_rules(response);
     }
-}
-
-fn value_to_resource<T>(value: &[u8]) -> Result<T, Box<dyn std::error::Error>>
-where
-    T: serde::de::DeserializeOwned,
-{
-    // Deserialize the input value from JSON
-    let json_value: serde_json::Value = serde_json::from_slice(value)?;
-
-    // Serialize the JSON value to YAML directly into a Vec<u8>
-    let mut yaml_output = Vec::new();
-    let mut serializer = serde_yaml::Serializer::new(&mut yaml_output);
-    serde_transcode::transcode(json_value, &mut serializer)?;
-
-    // Deserialize directly from the YAML bytes
-    let resource: T = serde_yaml::from_slice(&yaml_output)?;
-
-    Ok(resource)
 }
 
 fn parse_key(key: &[u8]) -> Result<(String, String), Box<dyn std::error::Error>> {

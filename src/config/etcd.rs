@@ -29,30 +29,13 @@ impl EtcdConfigSync {
         }
     }
 
-    /// 创建一个新的 etcd 客户端
-    async fn create_client(&self) -> Result<Client, Box<dyn Error + Send + Sync>> {
-        let mut options = ConnectOptions::default();
-        if let Some(timeout) = self.config.timeout {
-            options = options.with_timeout(Duration::from_secs(timeout as u64));
-        }
-        if let Some(connect_timeout) = self.config.connect_timeout {
-            options = options.with_connect_timeout(Duration::from_secs(connect_timeout as u64));
-        }
-        if let (Some(user), Some(password)) = (&self.config.user, &self.config.password) {
-            options = options.with_user(user.clone(), password.clone());
-        }
-
-        let client = Client::connect(self.config.host.clone(), Some(options)).await?;
-        Ok(client)
-    }
-
     /// 获取初始化的 etcd 客户端
     async fn get_client(&self) -> Result<Arc<Mutex<Option<Client>>>, Box<dyn Error + Send + Sync>> {
         let mut client_guard = self.client.lock().await;
 
         if client_guard.is_none() {
             log::info!("Creating new etcd client...");
-            *client_guard = Some(self.create_client().await?);
+            *client_guard = Some(create_client(&self.config).await?);
         }
 
         Ok(self.client.clone())
@@ -176,4 +159,105 @@ impl BackgroundService for EtcdConfigSync {
 pub trait EtcdEventHandler {
     fn handle_event(&self, event: &Event);
     fn handle_list_response(&self, response: &GetResponse);
+}
+
+async fn create_client(cfg: &Etcd) -> Result<Client, Box<dyn Error + Send + Sync>> {
+    let mut options = ConnectOptions::default();
+    if let Some(timeout) = cfg.timeout {
+        options = options.with_timeout(Duration::from_secs(timeout as u64));
+    }
+    if let Some(connect_timeout) = cfg.connect_timeout {
+        options = options.with_connect_timeout(Duration::from_secs(connect_timeout as u64));
+    }
+    if let (Some(user), Some(password)) = (&cfg.user, &cfg.password) {
+        options = options.with_user(user.clone(), password.clone());
+    }
+
+    let client = Client::connect(cfg.host.clone(), Some(options)).await?;
+    Ok(client)
+}
+
+pub fn json_to_resource<T>(value: &[u8]) -> Result<T, Box<dyn Error>>
+where
+    T: serde::de::DeserializeOwned,
+{
+    // Deserialize the input value from JSON
+    let json_value: serde_json::Value = serde_json::from_slice(value)?;
+
+    // Serialize the JSON value to YAML directly into a Vec<u8>
+    let mut yaml_output = Vec::new();
+    let mut serializer = serde_yaml::Serializer::new(&mut yaml_output);
+    serde_transcode::transcode(json_value, &mut serializer)?;
+
+    // Deserialize directly from the YAML bytes
+    let resource: T = serde_yaml::from_slice(&yaml_output)?;
+
+    Ok(resource)
+}
+
+pub struct EtcdClientWrapper {
+    config: Etcd,
+    client: Arc<Mutex<Option<Client>>>,
+}
+
+impl EtcdClientWrapper {
+    pub fn new(cfg: Etcd) -> Self {
+        Self {
+            config: cfg,
+            client: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    async fn ensure_connected(
+        &self,
+    ) -> Result<Arc<Mutex<Option<Client>>>, Box<dyn Error + Send + Sync>> {
+        let mut client_guard = self.client.lock().await;
+
+        if client_guard.is_none() {
+            log::info!("Creating new etcd client...");
+            *client_guard = Some(create_client(&self.config).await?);
+        }
+
+        Ok(self.client.clone())
+    }
+
+    pub async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, Box<dyn Error + Send + Sync>> {
+        let client_arc = self.ensure_connected().await?;
+        let mut client_guard = client_arc.lock().await;
+
+        let client = client_guard
+            .as_mut()
+            .ok_or("Etcd client is not initialized")?;
+
+        let resp = client.get(self.with_prefix(key), None).await?;
+        return Ok(resp.kvs().first().map(|kv| kv.value().to_vec()));
+    }
+
+    pub async fn put(&self, key: &str, value: Vec<u8>) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let client_arc = self.ensure_connected().await?;
+        let mut client_guard = client_arc.lock().await;
+
+        let client = client_guard
+            .as_mut()
+            .ok_or("Etcd client is not initialized")?;
+
+        client.put(self.with_prefix(key), value, None).await?;
+        Ok(())
+    }
+
+    pub async fn delete(&self, key: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let client_arc = self.ensure_connected().await?;
+        let mut client_guard = client_arc.lock().await;
+
+        let client = client_guard
+            .as_mut()
+            .ok_or("Etcd client is not initialized")?;
+
+        client.delete(self.with_prefix(key), None).await?;
+        Ok(())
+    }
+
+    fn with_prefix(&self, key: &str) -> String {
+        format!("{}/{}", self.config.prefix, key)
+    }
 }
