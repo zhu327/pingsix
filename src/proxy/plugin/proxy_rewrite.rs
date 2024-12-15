@@ -42,13 +42,9 @@ struct Headers {
 
 #[derive(Default, Debug, Serialize, Deserialize)]
 struct PluginConfig {
-    #[serde(default)]
     uri: Option<String>,
-    #[serde(default)]
     method: Option<String>,
-    #[serde(default)]
     host: Option<String>,
-    #[serde(default)]
     headers: Option<Headers>,
 }
 

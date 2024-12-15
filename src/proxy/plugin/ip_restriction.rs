@@ -35,7 +35,6 @@ struct PluginConfig {
     blacklist: Vec<IpNetwork>,
 
     /// Custom rejection message.
-    #[serde(default)]
     message: Option<String>,
 }
 

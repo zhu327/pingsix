@@ -36,7 +36,6 @@ struct PluginConfig {
 
     #[serde(default = "PluginConfig::default_rejected_code")]
     rejected_code: u16,
-    #[serde(default)]
     rejected_msg: Option<String>,
     #[serde(default = "PluginConfig::default_show_limit_quota_header")]
     show_limit_quota_header: bool,
