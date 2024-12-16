@@ -1,30 +1,34 @@
-# PingSIX  
+# PingSIX
 
-PingSIX is a high-performance and scalable API gateway tailored for modern cloud-native environments. Inspired by Cloudflare's Pingora and APISIX, PingSIX combines flexibility, robustness, and the efficiency of Rust to provide a powerful reverse proxy and API management solution.  
+PingSIX is a high-performance and scalable API gateway tailored for modern cloud-native environments. Inspired by Cloudflare's Pingora and APISIX, PingSIX combines flexibility, robustness, and the efficiency of Rust to provide a powerful reverse proxy and API management solution.
 
-## Key Features  
+## Key Features
 
-- **High Performance**: Built with Rust, leveraging multi-threading for exceptional performance.  
-- **Flexible Configuration**: Offers a YAML-based configuration style for easy customization of routes, upstreams, health checks, and more.  
-- **Advanced Routing**: Supports host-based and URI-based routing with fine-grained control.  
-- **Upstream Health Checks**: Provides active health checks to ensure upstream reliability.  
-- **Observability**: Prometheus metrics and Sentry integration for monitoring and debugging.  
-- **Plugin System**: A rich plugin ecosystem for features such as compression, rate limiting, and gRPC support.  
+- **High Performance**: Built with Rust, leveraging multi-threading for exceptional performance.
+- **Dynamic Configuration**: Supports dynamic configuration via etcd for seamless distributed deployment, enabling real-time updates across distributed systems.
+- **Flexible Routing**: Offers advanced routing based on host, URI, and methods with support for priority-based rules.
+- **Plugin Ecosystem**: Includes a range of plugins for compression, access control, gRPC support, and more.
+- **Observability**: Exposes metrics via Prometheus and integrates with Sentry for debugging and monitoring.
+- **Distributed Configuration Management**: Admin API for resource management through etcd, fully compatible with APISIX's Admin API.
+- **Global Rules and Services**: Implements reusable global plugin behaviors and service configurations to simplify plugin and upstream reuse.
+- **Upstream Health Checks**: Provides active health checks for upstream reliability.
 
-## Plugin Highlights  
+## Plugin Highlights
 
-PingSIX now includes the following plugins to enhance its capabilities:  
+PingSIX includes the following plugins, inspired by APISIX:
 
-- **brotli**: Supports Brotli compression for responses, optimizing bandwidth usage.  
-- **gzip**: Provides Gzip compression for HTTP responses.  
-- **echo**: A utility plugin for testing, allowing custom headers and response bodies.  
-- **grpc_web**: Adds support for handling gRPC-Web requests.  
-- **limit_count**: Implements rate limiting with customizable policies.  
-- **prometheus**: Exposes metrics for monitoring the API gateway's performance and health.  
+- **brotli**: Brotli compression for HTTP responses, optimizing bandwidth usage.
+- **gzip**: Gzip compression for HTTP responses.
+- **echo**: A utility plugin for testing, allowing custom headers and response bodies.
+- **grpc_web**: Support for handling gRPC-Web requests.
+- **ip_restriction**: IP-based access control.
+- **limit_count**: Rate limiting with customizable policies.
+- **prometheus**: Metrics exposure for monitoring API gateway performance and health.
+- **proxy_rewrite**: Dynamic modification of request/response proxying rules.
 
-## Configuration Example  
+## Configuration
 
-Below is an example configuration file for PingSIX, including plugins:  
+PingSIX now supports YAML-based configuration inspired by the APISIX model. It includes support for global rules, services, and upstream configurations. Below is an example configuration:
 
 ```yaml
 pingora:
@@ -35,91 +39,117 @@ pingora:
   user: nobody
   group: webusers
 
-prometheus:
-  address: 0.0.0.0:8081
+pingsix:
+  listeners:
+    - address: 0.0.0.0:8080
 
-listeners:
-  - address: 0.0.0.0:8080
+  # etcd:
+  #   host:
+  #     - "http://192.168.2.141:2379"
+  #   prefix: /apisix
+
+  # admin:
+  #   address: "0.0.0.0:8082"
+  #   api_key: pingsix
+
+  prometheus:
+    address: 0.0.0.0:8081
+
+  sentry:
+    dsn: https://1234567890@sentry.io/123456
 
 routes:
   - id: 1
     uri: /
-    host: www.example.com
-    plugins:
-      gzip:
-        comp_level: 6
+    host: www.baidu.com
     upstream:
       nodes:
-        "www.example.com": 1
+        "www.baidu.com": 1
       type: roundrobin
-  - id: 2
-    uri: /api
-    host: api.example.com
-    plugins:
-      grpc_web: {}
-      limit_count:
-        key_type: head
-        key: Host
-        time_window: 1
-        count: 10
-        rejected_code: 429
-        rejected_msg: "Too Many Requests"
+      checks:
+        active:
+          type: https
+          timeout: 1
+          host: www.baidu.com
+          http_path: /
+          https_verify_certificate: true
+          req_headers: ["User-Agent: curl/7.29.0"]
+          healthy:
+            interval: 5
+            http_statuses: [200, 201]
+            successes: 2
+          unhealthy:
+            http_failures: 5
+            tcp_failures: 2
+
+upstreams:
+  - id: 1
+    nodes:
+      "www.taobao.com": 1
+    type: roundrobin
 
 services:
   - id: 1
-    upstream:
-      nodes:
-        "api.example.com": 1
-      type: roundrobin
+    hosts: ["www.qq.com"]
+    upstream_id: 2
+    plugins:
+      limit-count:
+        key_type: head
+        key: Host
+        time_window: 1
+        count: 1
+        rejected_code: 429
+        rejected_msg: "Please slow down!"
+
+global_rules:
+  - id: 1
+    plugins:
+      prometheus: {}
 ```
 
-## Usage  
+## Usage
 
-To run PingSIX with a configuration file:  
+Run PingSIX with the configuration file:
 
 ```bash
 cargo run -- -c config.yaml
 ```
 
-This will start the API gateway with the specified settings.  
+This will start the API gateway with the specified settings.
 
-## Installation  
+## Installation
 
-1. Clone the repository:  
-
+1. Clone the repository:
    ```bash
    git clone https://github.com/zhu327/pingsix.git
-   ```  
-
-2. Build the project:  
-
+   ```
+2. Build the project:
    ```bash
    cd pingsix
    cargo build --release
-   ```  
-
-3. Run the binary:  
-
+   ```
+3. Run the binary:
    ```bash
    ./target/release/pingsix -c config.yaml
-   ```  
+   ```
 
-## Observability  
+## Observability
 
-- **Prometheus Metrics**: Exposes metrics at `0.0.0.0:8081` (configurable).  
+- **Prometheus Metrics**: Exposes metrics at `0.0.0.0:8081` (configurable).
+- **Sentry Integration**: Tracks errors and performance metrics using Sentry.
 
-## Extensibility  
+## Extensibility
 
-With its plugin system, PingSIX is highly extensible. You can use built-in plugins or develop your own to meet specific requirements.  
+PingSIX is designed with extensibility in mind. Its plugin system allows developers to use built-in plugins or create custom ones to suit specific requirements.
 
-## License  
+## License
 
-PingSIX is licensed under the Apache License 2.0. See [LICENSE](./LICENSE) for details.  
+PingSIX is licensed under the Apache License 2.0. See [LICENSE](./LICENSE) for details.
 
-## Contributing  
+## Contributing
 
-Contributions are welcome! Please submit a pull request or open an issue for discussions or suggestions.  
+Contributions are welcome! Please submit a pull request or open an issue for discussions or suggestions.
 
-## Acknowledgments  
+## Acknowledgments
 
-This project is inspired by [Cloudflare Pingora](https://github.com/cloudflare/pingora) and [APISIX](https://apisix.apache.org/).  
+This project is inspired by [Cloudflare Pingora](https://github.com/cloudflare/pingora) and [APISIX](https://apisix.apache.org/).
