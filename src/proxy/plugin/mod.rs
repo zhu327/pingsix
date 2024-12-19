@@ -6,6 +6,7 @@ pub mod ip_restriction;
 pub mod limit_count;
 pub mod prometheus;
 pub mod proxy_rewrite;
+pub mod redirect;
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -16,6 +17,7 @@ use pingora::OkOrErr;
 use pingora_error::{Error, ErrorType::ReadError, Result};
 use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_proxy::Session;
+use regex::Regex;
 use serde_yaml::Value as YamlValue;
 
 use super::{route::ProxyRoute, service::service_fetch, ProxyContext};
@@ -39,6 +41,10 @@ static PLUGIN_BUILDER_REGISTRY: Lazy<HashMap<&'static str, PluginCreateFn>> = La
             grpc_web::PLUGIN_NAME, // 505
             Arc::new(grpc_web::create_grpc_web_plugin),
         ),
+        (
+            redirect::PLUGIN_NAME,
+            Arc::new(redirect::create_redirect_plugin),
+        ), // 900
         (gzip::PLUGIN_NAME, Arc::new(gzip::create_gzip_plugin)), // 995
         (brotli::PLUGIN_NAME, Arc::new(brotli::create_brotli_plugin)), // 996
         (
@@ -320,5 +326,137 @@ impl ProxyPlugin for ProxyPluginExecutor {
         for plugin in self.plugins.iter() {
             plugin.logging(session, e, ctx).await;
         }
+    }
+}
+
+pub fn regex_template_uri(uri: &str, regex_templates: &[&str]) -> String {
+    for i in (0..regex_templates.len()).step_by(2) {
+        let pattern = regex_templates[i];
+        let redirect_template = regex_templates[i + 1];
+
+        // 创建正则对象
+        let re = Regex::new(pattern).unwrap();
+
+        // 如果正则匹配成功
+        if let Some(captures) = re.captures(uri) {
+            // 使用模板替换生成新的 URI
+            let redirect_uri = captures
+                .iter()
+                .skip(1) // 跳过第一个元素 (即完整匹配)
+                .enumerate()
+                .fold(redirect_template.to_string(), |acc, (i, capture)| {
+                    // 用捕获组替换模板中的 $1, $2, ...
+                    acc.replace(&format!("${}", i + 1), capture.unwrap().as_str())
+                });
+            return redirect_uri;
+        }
+    }
+
+    // 如果没有匹配，返回原 URI（即进行代理转发）
+    uri.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_redirect_with_valid_match() {
+        let regex_templates = [
+            "^/iresty/(.*)/(.*)/(.*)",
+            "/$1-$2-$3",
+            "^/theothers/(.*)/(.*)",
+            "/theothers/$1-$2",
+        ];
+        let uri = "/iresty/a/b/c";
+
+        let result = regex_template_uri(uri, &regex_templates);
+
+        assert_eq!(result, "/a-b-c");
+    }
+
+    #[test]
+    fn test_second_match_in_multi_patterns() {
+        let regex_templates = [
+            "^/iresty/(.*)/(.*)/(.*)",
+            "/$1-$2-$3",
+            "^/theothers/(.*)/(.*)",
+            "/theothers/$1-$2",
+        ];
+        let uri = "/theothers/x/y";
+
+        let result = regex_template_uri(uri, &regex_templates);
+
+        assert_eq!(result, "/theothers/x-y");
+    }
+
+    #[test]
+    fn test_no_match_should_return_original_uri() {
+        let regex_templates = [
+            "^/iresty/(.*)/(.*)/(.*)",
+            "/$1-$2-$3",
+            "^/theothers/(.*)/(.*)",
+            "/theothers/$1-$2",
+        ];
+        let uri = "/api/test";
+
+        let result = regex_template_uri(uri, &regex_templates);
+
+        assert_eq!(result, "/api/test");
+    }
+
+    #[test]
+    fn test_empty_uri() {
+        let regex_templates = [
+            "^/iresty/(.*)/(.*)/(.*)",
+            "/$1-$2-$3",
+            "^/theothers/(.*)/(.*)",
+            "/theothers/$1-$2",
+        ];
+        let uri = "";
+
+        let result = regex_template_uri(uri, &regex_templates);
+
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_uri_with_multiple_parts() {
+        let regex_templates = [
+            "^/iresty/(.*)/(.*)/(.*)",
+            "/$1-$2-$3",
+            "^/theothers/(.*)/(.*)",
+            "/theothers/$1-$2",
+        ];
+        let uri = "/iresty/a/b/c/d/e/f";
+
+        let result = regex_template_uri(uri, &regex_templates);
+
+        assert_eq!(result, "/a/b/c/d-e-f");
+    }
+
+    #[test]
+    fn test_uri_with_special_characters() {
+        let regex_templates = [
+            "^/iresty/(.*)/(.*)/(.*)",
+            "/$1-$2-$3",
+            "^/theothers/(.*)/(.*)",
+            "/theothers/$1-$2",
+        ];
+        let uri = "/iresty/a/!/@";
+
+        let result = regex_template_uri(uri, &regex_templates);
+
+        assert_eq!(result, "/a-!-@");
+    }
+
+    #[test]
+    fn test_empty_template_should_return_empty_string() {
+        let regex_templates = ["^/iresty/(.*)/(.*)/(.*)", "", "^/theothers/(.*)/(.*)", ""];
+        let uri = "/iresty/a/b/c";
+
+        let result = regex_template_uri(uri, &regex_templates);
+
+        assert_eq!(result, "");
     }
 }
