@@ -22,7 +22,7 @@ use crate::{
 };
 
 #[async_trait]
-trait Hanlder {
+trait Handler {
     async fn handle(
         &self,
         etcd: &EtcdClientWrapper,
@@ -32,34 +32,33 @@ trait Hanlder {
 }
 
 pub struct AdminHttpApp {
-    etcd: EtcdClientWrapper,
-    router: Router<HashMap<Method, Box<dyn Hanlder + Send + Sync>>>,
-
     config: Admin,
+    etcd: EtcdClientWrapper,
+    router: Router<HashMap<Method, Box<dyn Handler + Send + Sync>>>,
 }
 
 impl AdminHttpApp {
     pub fn new(cfg: &Pingsix) -> Self {
         let mut this = Self {
+            config: cfg.admin.clone().unwrap(),
             etcd: EtcdClientWrapper::new(cfg.etcd.clone().unwrap()),
             router: Router::new(),
-            config: cfg.admin.clone().unwrap(),
         };
 
         this.route(
             "/apisix/admin/{resource}/{id}",
             Method::PUT,
-            Box::new(ResourcePutHanlder {}),
+            Box::new(ResourcePutHandler {}),
         )
         .route(
             "/apisix/admin/{resource}/{id}",
             Method::GET,
-            Box::new(ResourceGetHanlder {}),
+            Box::new(ResourceGetHandler {}),
         )
         .route(
             "/apisix/admin/{resource}/{id}",
             Method::DELETE,
-            Box::new(ResourceDeleteHanlder {}),
+            Box::new(ResourceDeleteHandler {}),
         );
 
         this
@@ -70,7 +69,7 @@ impl AdminHttpApp {
         &mut self,
         path: &str,
         method: Method,
-        handler: Box<dyn Hanlder + Send + Sync>,
+        handler: Box<dyn Handler + Send + Sync>,
     ) -> &mut Self {
         if self.router.at(path).is_err() {
             let mut hanlders = HashMap::new();
@@ -142,10 +141,10 @@ struct ValueWrapper<T> {
     value: T,
 }
 
-struct ResourcePutHanlder;
+struct ResourcePutHandler;
 
 #[async_trait]
-impl Hanlder for ResourcePutHanlder {
+impl Handler for ResourcePutHandler {
     async fn handle(
         &self,
         etcd: &EtcdClientWrapper,
@@ -176,10 +175,10 @@ impl Hanlder for ResourcePutHanlder {
     }
 }
 
-struct ResourceGetHanlder;
+struct ResourceGetHandler;
 
 #[async_trait]
-impl Hanlder for ResourceGetHanlder {
+impl Handler for ResourceGetHandler {
     async fn handle(
         &self,
         etcd: &EtcdClientWrapper,
@@ -222,10 +221,10 @@ impl Hanlder for ResourceGetHanlder {
     }
 }
 
-struct ResourceDeleteHanlder;
+struct ResourceDeleteHandler;
 
 #[async_trait]
-impl Hanlder for ResourceDeleteHanlder {
+impl Handler for ResourceDeleteHandler {
     async fn handle(
         &self,
         etcd: &EtcdClientWrapper,
