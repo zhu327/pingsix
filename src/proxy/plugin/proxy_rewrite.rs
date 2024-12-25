@@ -23,7 +23,7 @@ pub fn create_proxy_rewrite_plugin(cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin
 
     config
         .validate()
-        .or_err_with(InternalError, || "Invalid proxy rewrite plugin config")?;
+        .or_err_with(ReadError, || "Invalid proxy rewrite plugin config")?;
 
     Ok(Arc::new(PluginProxyRewrite { config }))
 }
@@ -94,11 +94,10 @@ impl ProxyPlugin for PluginProxyRewrite {
         upstream_request: &mut RequestHeader,
         _ctx: &mut ProxyContext,
     ) -> Result<()> {
-        let parts = session.req_header().uri.clone().into_parts();
-        let path_and_query = self.construct_path_and_query(parts.path_and_query.as_ref());
-
-        if let Some(Some(uri)) = path_and_query {
-            upstream_request.set_uri(uri);
+        if let Some(path_and_query) = session.req_header().uri.path_and_query() {
+            if let Some(uri) = self.construct_path_and_query(Some(path_and_query)) {
+                upstream_request.set_uri(uri);
+            }
         }
 
         if let Some(ref method) = self.config.method {
@@ -128,19 +127,18 @@ impl PluginProxyRewrite {
     fn construct_path_and_query(
         &self,
         path_and_query: Option<&http::uri::PathAndQuery>,
-    ) -> Option<Option<Uri>> {
+    ) -> Option<Uri> {
         if let Some(ref path) = self.config.uri {
             let query = path_and_query.and_then(|pq| pq.query()).unwrap_or("");
-            let full_path = if query.is_empty() {
-                Some(path.parse().ok())
+            return if query.is_empty() {
+                path.parse().ok()
             } else {
-                Some(format!("{}?{}", path, query).parse().ok())
+                format!("{}?{}", path, query).parse().ok()
             };
-            return full_path;
         }
 
         if !self.config.regex_uri.is_empty() {
-            path_and_query.map(|pq| {
+            if let Some(pq) = path_and_query {
                 let query = pq.query().unwrap_or("");
                 let new_path = regex_template_uri(
                     pq.path(),
@@ -151,15 +149,15 @@ impl PluginProxyRewrite {
                         .map(|s| s.as_str())
                         .collect::<Vec<&str>>(),
                 );
-                if query.is_empty() {
+                return if query.is_empty() {
                     new_path.parse().ok()
                 } else {
                     format!("{}?{}", new_path, query).parse().ok()
-                }
-            })
-        } else {
-            None
+                };
+            }
         }
+
+        None
     }
 
     fn apply_headers(&self, upstream_request: &mut RequestHeader, headers: &Headers) -> Result<()> {

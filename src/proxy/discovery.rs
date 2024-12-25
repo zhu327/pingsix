@@ -71,10 +71,10 @@ impl ServiceDiscovery for DnsDiscovery {
             })?
             .iter()
             .map(|ip| {
-                let addr = SocketAddr::new(ip, self.port as u16).to_string();
+                let addr = SocketAddr::new(ip, self.port as _).to_string();
 
                 // Creating backend
-                let mut backend = Backend::new_with_weight(&addr, self.weight as usize).unwrap();
+                let mut backend = Backend::new_with_weight(&addr, self.weight as _).unwrap();
 
                 // Determine if TLS is needed
                 let tls = matches!(self.scheme, UpstreamScheme::HTTPS | UpstreamScheme::GRPCS);
@@ -156,9 +156,8 @@ impl TryFrom<Upstream> for HybridDiscovery {
             } else {
                 // It's an IP address
                 // Handle backend creation for IP addresses
-                let addr =
-                    &SocketAddr::new(host.parse::<IpAddr>().unwrap(), port as u16).to_string();
-                let mut backend = Backend::new_with_weight(addr, *weight as usize).unwrap();
+                let addr = &SocketAddr::new(host.parse::<IpAddr>().unwrap(), port as _).to_string();
+                let mut backend = Backend::new_with_weight(addr, *weight as _).unwrap();
 
                 let tls = matches!(
                     upstream.scheme,

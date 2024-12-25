@@ -22,7 +22,7 @@ pub fn create_limit_count_plugin(cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>>
     let config: PluginConfig = serde_yaml::from_value(cfg)
         .or_err_with(ReadError, || "Invalid limit count plugin config")?;
 
-    let rate = Rate::new(Duration::from_secs(config.time_window as u64));
+    let rate = Rate::new(Duration::from_secs(config.time_window as _));
 
     Ok(Arc::new(PluginRateLimit { config, rate }))
 }

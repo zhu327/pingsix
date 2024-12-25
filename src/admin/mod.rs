@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, HashMap},
     error::Error,
+    fmt,
 };
 
 use async_trait::async_trait;
@@ -21,6 +22,68 @@ use crate::{
     proxy::plugin::build_plugin,
 };
 
+#[derive(Debug)]
+enum ApiError {
+    EtcdError(String),
+    ValidationError(String),
+    MissingParameter(String),
+    InvalidRequest(String),
+    InternalError(String),
+}
+
+impl fmt::Display for ApiError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ApiError::EtcdError(msg) => write!(f, "Etcd error: {}", msg),
+            ApiError::ValidationError(msg) => write!(f, "Validation error: {}", msg),
+            ApiError::MissingParameter(msg) => write!(f, "Missing parameter: {}", msg),
+            ApiError::InvalidRequest(msg) => write!(f, "Invalid request: {}", msg),
+            ApiError::InternalError(msg) => write!(f, "Internal error: {}", msg),
+        }
+    }
+}
+
+impl Error for ApiError {}
+
+type ApiResult<T> = Result<T, ApiError>;
+
+// Unified response handler
+struct ResponseHelper;
+
+impl ResponseHelper {
+    pub fn success(body: Vec<u8>, content_type: Option<&str>) -> Response<Vec<u8>> {
+        let mut builder = Response::builder().status(StatusCode::OK);
+
+        if let Some(ct) = content_type {
+            if let Ok(header_value) = HeaderValue::from_str(ct) {
+                builder = builder.header(header::CONTENT_TYPE, header_value);
+            } else {
+                // 如果 content_type 无法转换为 HeaderValue，可以选择日志记录或忽略
+                log::error!("Invalid content type: {}", ct);
+            }
+        }
+
+        builder.body(body).unwrap()
+    }
+
+    pub fn error(status: StatusCode, message: &str) -> Response<Vec<u8>> {
+        Response::builder()
+            .status(status)
+            .body(message.as_bytes().to_vec())
+            .unwrap()
+    }
+
+    pub fn from_api_error(error: ApiError) -> Response<Vec<u8>> {
+        match error {
+            ApiError::EtcdError(msg) => Self::error(StatusCode::INTERNAL_SERVER_ERROR, &msg),
+            ApiError::ValidationError(msg) => Self::error(StatusCode::BAD_REQUEST, &msg),
+            ApiError::MissingParameter(msg) => Self::error(StatusCode::BAD_REQUEST, &msg),
+            ApiError::InvalidRequest(msg) => Self::error(StatusCode::BAD_REQUEST, &msg),
+            ApiError::InternalError(msg) => Self::error(StatusCode::INTERNAL_SERVER_ERROR, &msg),
+        }
+    }
+}
+
 #[async_trait]
 trait Handler {
     async fn handle(
@@ -28,7 +91,7 @@ trait Handler {
         etcd: &EtcdClientWrapper,
         session: &mut ServerSession,
         params: BTreeMap<String, String>,
-    ) -> Result<Response<Vec<u8>>, Box<dyn Error>>;
+    ) -> ApiResult<Response<Vec<u8>>>;
 }
 
 pub struct AdminHttpApp {
@@ -64,7 +127,6 @@ impl AdminHttpApp {
         this
     }
 
-    /// 添加一个路由处理函数
     fn route(
         &mut self,
         path: &str,
@@ -72,9 +134,9 @@ impl AdminHttpApp {
         handler: Box<dyn Handler + Send + Sync>,
     ) -> &mut Self {
         if self.router.at(path).is_err() {
-            let mut hanlders = HashMap::new();
-            hanlders.insert(method, handler);
-            self.router.insert(path, hanlders).unwrap();
+            let mut handlers = HashMap::new();
+            handlers.insert(method, handler);
+            self.router.insert(path, handlers).unwrap();
         } else {
             let routes = self.router.at_mut(path).unwrap();
             routes.value.insert(method, handler);
@@ -97,10 +159,7 @@ impl ServeHttp for AdminHttpApp {
         http_session.set_keepalive(None);
 
         if validate_api_key(http_session, &self.config.api_key).is_err() {
-            return Response::builder()
-                .status(StatusCode::FORBIDDEN)
-                .body(Vec::new())
-                .unwrap();
+            return ResponseHelper::error(StatusCode::FORBIDDEN, "Invalid API key");
         }
 
         let (path, method) = {
@@ -117,28 +176,14 @@ impl ServeHttp for AdminHttpApp {
                         .collect();
                     match handler.handle(&self.etcd, http_session, params).await {
                         Ok(resp) => resp,
-                        Err(e) => Response::builder()
-                            .status(StatusCode::BAD_REQUEST)
-                            .body(e.to_string().into_bytes())
-                            .unwrap(),
+                        Err(e) => ResponseHelper::from_api_error(e),
                     }
                 }
-                None => Response::builder()
-                    .status(StatusCode::METHOD_NOT_ALLOWED)
-                    .body(Vec::new())
-                    .unwrap(),
+                None => ResponseHelper::error(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed"),
             },
-            Err(_) => Response::builder()
-                .status(StatusCode::NOT_FOUND)
-                .body(b"Not Found".to_vec())
-                .unwrap(),
+            Err(_) => ResponseHelper::error(StatusCode::NOT_FOUND, "Not Found"),
         }
     }
-}
-
-#[derive(Serialize, Deserialize)]
-struct ValueWrapper<T> {
-    value: T,
 }
 
 struct ResourcePutHandler;
@@ -150,29 +195,32 @@ impl Handler for ResourcePutHandler {
         etcd: &EtcdClientWrapper,
         http_session: &mut ServerSession,
         params: BTreeMap<String, String>,
-    ) -> Result<Response<Vec<u8>>, Box<dyn Error>> {
+    ) -> ApiResult<Response<Vec<u8>>> {
         validate_content_type(http_session)?;
 
         let body_data = read_request_body(http_session).await?;
-        let resource_type = params.get("resource").ok_or("Missing resource type")?;
+        let resource_type = params
+            .get("resource")
+            .ok_or_else(|| ApiError::MissingParameter("resource".into()))?;
         let key = format!(
             "{}/{}",
             resource_type,
-            params.get("id").ok_or("Missing resource ID")?
+            params
+                .get("id")
+                .ok_or_else(|| ApiError::MissingParameter("id".into()))?
         );
 
         validate_resource(resource_type, &body_data)?;
-        match etcd.put(&key, body_data).await {
-            Ok(_) => Ok(Response::builder()
-                .status(StatusCode::OK)
-                .body(Vec::new())
-                .unwrap()),
-            Err(e) => Ok(Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(e.to_string().into_bytes())
-                .unwrap()),
-        }
+        etcd.put(&key, body_data)
+            .await
+            .map_err(|e| ApiError::EtcdError(e.to_string()))?;
+        Ok(ResponseHelper::success(Vec::new(), None))
     }
+}
+
+#[derive(Serialize, Deserialize)]
+struct ValueWrapper<T> {
+    value: T,
 }
 
 struct ResourceGetHandler;
@@ -184,39 +232,29 @@ impl Handler for ResourceGetHandler {
         etcd: &EtcdClientWrapper,
         _http_session: &mut ServerSession,
         params: BTreeMap<String, String>,
-    ) -> Result<Response<Vec<u8>>, Box<dyn Error>> {
-        let resource_type = params.get("resource").ok_or("Missing resource type")?;
+    ) -> ApiResult<Response<Vec<u8>>> {
+        let resource_type = params
+            .get("resource")
+            .ok_or_else(|| ApiError::MissingParameter("resource".into()))?;
         let key = format!(
             "{}/{}",
             resource_type,
-            params.get("id").ok_or("Missing resource ID")?
+            params
+                .get("id")
+                .ok_or_else(|| ApiError::MissingParameter("id".into()))?
         );
+
         match etcd.get(&key).await {
-            Err(e) => Ok(Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(e.to_string().into_bytes())
-                .unwrap()),
+            Err(e) => Err(ApiError::EtcdError(e.to_string())),
             Ok(Some(value)) => {
                 let json_value: serde_json::Value = serde_json::from_slice(&value)
-                    .map_err(|e| format!("Invalid JSON data: {}", e))?;
+                    .map_err(|e| ApiError::InvalidRequest(format!("Invalid JSON data: {}", e)))?;
                 let wrapper = ValueWrapper { value: json_value };
-                serde_json::to_vec(&wrapper)
-                    .map(|json_vec| {
-                        Response::builder()
-                            .status(StatusCode::OK)
-                            .header(
-                                header::CONTENT_TYPE,
-                                HeaderValue::from_static("application/json"),
-                            )
-                            .body(json_vec)
-                            .unwrap()
-                    })
-                    .map_err(|e| e.into())
+                let json_vec = serde_json::to_vec(&wrapper)
+                    .map_err(|e| ApiError::InternalError(e.to_string()))?;
+                Ok(ResponseHelper::success(json_vec, Some("application/json")))
             }
-            Ok(None) => Ok(Response::builder()
-                .status(StatusCode::NOT_FOUND)
-                .body(b"Not Found".to_vec())
-                .unwrap()),
+            Ok(None) => Err(ApiError::InvalidRequest("Resource not found".into())),
         }
     }
 }
@@ -230,79 +268,90 @@ impl Handler for ResourceDeleteHandler {
         etcd: &EtcdClientWrapper,
         _http_session: &mut ServerSession,
         params: BTreeMap<String, String>,
-    ) -> Result<Response<Vec<u8>>, Box<dyn Error>> {
+    ) -> ApiResult<Response<Vec<u8>>> {
         let key = format!(
             "{}/{}",
-            params.get("resource").ok_or("Missing resource type")?,
-            params.get("id").ok_or("Missing resource ID")?
+            params
+                .get("resource")
+                .ok_or_else(|| ApiError::MissingParameter("resource".into()))?,
+            params
+                .get("id")
+                .ok_or_else(|| ApiError::MissingParameter("id".into()))?
         );
 
-        match etcd.delete(&key).await {
-            Ok(_) => Ok(Response::builder()
-                .status(StatusCode::NO_CONTENT)
-                .body(Vec::new())
-                .unwrap()),
-            Err(e) => Ok(Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(e.to_string().into_bytes())
-                .unwrap()),
-        }
+        etcd.delete(&key)
+            .await
+            .map_err(|e| ApiError::EtcdError(e.to_string()))?;
+        Ok(ResponseHelper::success(Vec::new(), None))
     }
 }
 
-fn validate_api_key(http_session: &ServerSession, api_key: &str) -> Result<(), Box<dyn Error>> {
+fn validate_api_key(http_session: &ServerSession, api_key: &str) -> ApiResult<()> {
     match http_session.get_header("x-api-key") {
-        Some(key) if key.to_str()? == api_key => Ok(()),
-        _ => Err("Must provide api key".into()),
+        Some(key) if key.to_str().unwrap_or("") == api_key => Ok(()),
+        _ => Err(ApiError::InvalidRequest("Must provide API key".into())),
     }
 }
 
-fn validate_content_type(http_session: &ServerSession) -> Result<(), Box<dyn Error>> {
+fn validate_content_type(http_session: &ServerSession) -> ApiResult<()> {
     match http_session.get_header(header::CONTENT_TYPE) {
-        Some(content_type) if content_type.to_str()? == "application/json" => Ok(()),
-        _ => Err("Content-Type must be application/json".into()),
+        Some(content_type) if content_type.to_str().unwrap_or("") == "application/json" => Ok(()),
+        _ => Err(ApiError::InvalidRequest(
+            "Content-Type must be application/json".into(),
+        )),
     }
 }
 
-async fn read_request_body(http_session: &mut ServerSession) -> Result<Vec<u8>, Box<dyn Error>> {
+async fn read_request_body(http_session: &mut ServerSession) -> ApiResult<Vec<u8>> {
     let mut body_data = Vec::new();
-    while let Some(bytes) = http_session.read_request_body().await? {
+    while let Some(bytes) = http_session
+        .read_request_body()
+        .await
+        .map_err(|e| ApiError::InternalError(e.to_string()))?
+    {
         body_data.extend_from_slice(&bytes);
     }
     Ok(body_data)
 }
 
-fn validate_resource(resource_type: &str, body_data: &[u8]) -> Result<(), Box<dyn Error>> {
+fn validate_resource(resource_type: &str, body_data: &[u8]) -> ApiResult<()> {
     match resource_type {
         "routes" => {
             let route = validate_with_plugins::<config::Route>(body_data)?;
-            route.validate().map_err(|e| Box::new(e) as Box<dyn Error>)
+            route
+                .validate()
+                .map_err(|e| ApiError::ValidationError(e.to_string()))
         }
         "upstreams" => {
-            let upstream = json_to_resource::<config::Upstream>(body_data)?;
+            let upstream = json_to_resource::<config::Upstream>(body_data)
+                .map_err(|e| ApiError::InvalidRequest(format!("Invalid JSON data: {}", e)))?;
             upstream
                 .validate()
-                .map_err(|e| Box::new(e) as Box<dyn Error>)
+                .map_err(|e| ApiError::ValidationError(e.to_string()))
         }
         "services" => {
             let service = validate_with_plugins::<config::Service>(body_data)?;
             service
                 .validate()
-                .map_err(|e| Box::new(e) as Box<dyn Error>)
+                .map_err(|e| ApiError::ValidationError(e.to_string()))
         }
         "global_rules" => {
             let rule = validate_with_plugins::<config::GlobalRule>(body_data)?;
-            rule.validate().map_err(|e| Box::new(e) as Box<dyn Error>)
+            rule.validate()
+                .map_err(|e| ApiError::ValidationError(e.to_string()))
         }
-        _ => Err("Unsupported resource type".into()),
+        _ => Err(ApiError::InvalidRequest("Unsupported resource type".into())),
     }
 }
 
 fn validate_with_plugins<T: PluginValidatable + DeserializeOwned>(
     body_data: &[u8],
-) -> Result<T, Box<dyn Error>> {
-    let resource = json_to_resource::<T>(body_data)?;
-    resource.validate_plugins()?;
+) -> ApiResult<T> {
+    let resource = json_to_resource::<T>(body_data)
+        .map_err(|e| ApiError::InvalidRequest(format!("Invalid JSON data: {}", e)))?;
+    resource
+        .validate_plugins()
+        .map_err(|e| ApiError::ValidationError(e.to_string()))?;
     Ok(resource)
 }
 

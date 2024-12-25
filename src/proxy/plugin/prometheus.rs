@@ -130,10 +130,10 @@ impl ProxyPlugin for PluginPrometheus {
 
         BANDWIDTH
             .with_label_values(&["ingress", route_id, service, node])
-            .inc_by(session.body_bytes_read() as u64);
+            .inc_by(session.body_bytes_read() as _);
 
         BANDWIDTH
             .with_label_values(&["egress", route_id, service, node])
-            .inc_by(session.body_bytes_sent() as u64);
+            .inc_by(session.body_bytes_sent() as _);
     }
 }

@@ -178,7 +178,7 @@ impl ProxyHttp for HttpService {
                         return e;
                     }
                     if let Some(timeout) = upstream.get_retry_timeout() {
-                        if ctx.request_start.elapsed().as_millis() > (timeout * 1000) as u128 {
+                        if ctx.request_start.elapsed().as_millis() > (timeout * 1000) as _ {
                             return e;
                         }
                     }

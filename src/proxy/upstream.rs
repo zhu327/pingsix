@@ -151,7 +151,7 @@ impl ProxyUpstream {
 
     /// Gets the number of retries from the upstream configuration.
     pub fn get_retries(&self) -> Option<usize> {
-        self.inner.retries.map(|r| r as usize)
+        self.inner.retries.map(|r| r as _)
     }
 
     /// Gets the retry timeout from the upstream configuration.
@@ -244,7 +244,7 @@ where
             let health_check_frequency = check
                 .active
                 .healthy
-                .map(|healthy| Duration::from_secs(healthy.interval as u64))
+                .map(|healthy| Duration::from_secs(healthy.interval as _))
                 .unwrap_or(Duration::from_secs(1));
 
             upstreams.health_check_frequency = Some(health_check_frequency);
@@ -281,14 +281,14 @@ impl From<config::HealthCheck> for Box<TcpHealthCheck> {
     fn from(value: config::HealthCheck) -> Self {
         let mut health_check = TcpHealthCheck::new();
         health_check.peer_template.options.total_connection_timeout =
-            Some(Duration::from_secs(value.active.timeout as u64));
+            Some(Duration::from_secs(value.active.timeout as _));
 
         if let Some(healthy) = value.active.healthy {
-            health_check.consecutive_success = healthy.successes as usize;
+            health_check.consecutive_success = healthy.successes as _;
         }
 
         if let Some(unhealthy) = value.active.unhealthy {
-            health_check.consecutive_failure = unhealthy.tcp_failures as usize;
+            health_check.consecutive_failure = unhealthy.tcp_failures as _;
         }
 
         health_check
@@ -303,7 +303,7 @@ impl From<config::HealthCheck> for Box<HttpHealthCheck> {
 
         // Set total connection timeout if provided
         health_check.peer_template.options.total_connection_timeout =
-            Some(Duration::from_secs(value.active.timeout as u64));
+            Some(Duration::from_secs(value.active.timeout as _));
 
         // Set certificate verification if TLS is enabled
         health_check.peer_template.options.verify_cert = value.active.https_verify_certificate;
@@ -333,18 +333,18 @@ impl From<config::HealthCheck> for Box<HttpHealthCheck> {
 
         // Handle port override
         if let Some(port) = value.active.port {
-            health_check.port_override = Some(port as u16);
+            health_check.port_override = Some(port as _);
         }
 
         // Set the success conditions
         if let Some(healthy) = value.active.healthy {
-            health_check.consecutive_success = healthy.successes as usize;
+            health_check.consecutive_success = healthy.successes as _;
 
             // Validator for HTTP status codes
             if !healthy.http_statuses.is_empty() {
                 let http_statuses = healthy.http_statuses.clone(); // Clone to move into closure
                 health_check.validator = Some(Box::new(move |header: &ResponseHeader| {
-                    if http_statuses.contains(&(header.status.as_u16() as u32)) {
+                    if http_statuses.contains(&(header.status.as_u16() as _)) {
                         Ok(())
                     } else {
                         Err(Error::new_str("Invalid response"))
@@ -355,7 +355,7 @@ impl From<config::HealthCheck> for Box<HttpHealthCheck> {
 
         // Set the failure conditions
         if let Some(unhealthy) = value.active.unhealthy {
-            health_check.consecutive_failure = unhealthy.http_failures as usize;
+            health_check.consecutive_failure = unhealthy.http_failures as _;
         }
 
         // Return the Boxed health check

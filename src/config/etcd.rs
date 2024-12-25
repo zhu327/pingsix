@@ -1,4 +1,4 @@
-use std::{error::Error, sync::Arc, time::Duration};
+use std::{error::Error, fmt, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use etcd_client::{Client, ConnectOptions, Event, GetOptions, GetResponse, WatchOptions};
@@ -6,6 +6,29 @@ use pingora_core::{server::ShutdownWatch, services::background::BackgroundServic
 use tokio::{sync::Mutex, time::sleep};
 
 use super::Etcd;
+
+#[derive(Debug)]
+pub enum EtcdError {
+    ClientNotInitialized,
+    ConnectionFailed(String),
+    ListOperationFailed(String),
+    WatchOperationFailed(String),
+    Other(String),
+}
+
+impl fmt::Display for EtcdError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            EtcdError::ClientNotInitialized => write!(f, "Etcd client is not initialized"),
+            EtcdError::ConnectionFailed(msg) => write!(f, "Connection failed: {}", msg),
+            EtcdError::ListOperationFailed(msg) => write!(f, "List operation failed: {}", msg),
+            EtcdError::WatchOperationFailed(msg) => write!(f, "Watch operation failed: {}", msg),
+            EtcdError::Other(msg) => write!(f, "Other error: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for EtcdError {}
 
 pub struct EtcdConfigSync {
     config: Etcd,
@@ -30,7 +53,7 @@ impl EtcdConfigSync {
     }
 
     /// 获取初始化的 etcd 客户端
-    async fn get_client(&self) -> Result<Arc<Mutex<Option<Client>>>, Box<dyn Error + Send + Sync>> {
+    async fn get_client(&self) -> Result<Arc<Mutex<Option<Client>>>, EtcdError> {
         let mut client_guard = self.client.lock().await;
 
         if client_guard.is_none() {
@@ -42,23 +65,26 @@ impl EtcdConfigSync {
     }
 
     /// 初始化时同步 etcd 数据
-    async fn list(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let client_arc = self.get_client().await?; // 获取完整的 `Arc<Mutex>` 对象
-        let mut client_guard = client_arc.lock().await; // 重新锁定获取内部值
+    async fn list(&self) -> Result<(), EtcdError> {
+        let client_arc = self.get_client().await?;
+        let mut client_guard = client_arc.lock().await;
 
         let client = client_guard
             .as_mut()
-            .ok_or("Etcd client is not initialized")?;
+            .ok_or(EtcdError::ClientNotInitialized)?;
 
         let options = GetOptions::new().with_prefix();
         let response = client
             .get(self.config.prefix.as_bytes(), Some(options))
-            .await?;
+            .await
+            .map_err(|e| EtcdError::ListOperationFailed(e.to_string()))?;
 
         if let Some(header) = response.header() {
             *self.revision.lock().await = header.revision();
         } else {
-            return Err("Missing response header from etcd".into());
+            return Err(EtcdError::Other(
+                "Failed to get header from response".to_string(),
+            ));
         }
 
         self.handler.handle_list_response(&response);
@@ -66,26 +92,31 @@ impl EtcdConfigSync {
     }
 
     /// 监听 etcd 数据变更
-    async fn watch(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
+    async fn watch(&self) -> Result<(), EtcdError> {
         let start_revision = *self.revision.lock().await + 1;
         let options = WatchOptions::new()
             .with_start_revision(start_revision)
             .with_prefix();
 
-        let client_arc = self.get_client().await?; // 获取完整的 `Arc<Mutex>` 对象
-        let mut client_guard = client_arc.lock().await; // 重新锁定获取内部值
+        let client_arc = self.get_client().await?;
+        let mut client_guard = client_arc.lock().await;
 
         let client = client_guard
             .as_mut()
-            .ok_or("Etcd client is not initialized")?;
+            .ok_or(EtcdError::ClientNotInitialized)?;
 
         let (mut watcher, mut stream) = client
             .watch(self.config.prefix.as_bytes(), Some(options))
-            .await?;
+            .await
+            .map_err(|e| EtcdError::WatchOperationFailed(e.to_string()))?;
 
-        watcher.request_progress().await?;
+        watcher.request_progress().await.map_err(|e| {
+            EtcdError::WatchOperationFailed(format!("Failed to request progress: {}", e))
+        })?;
 
-        while let Some(response) = stream.message().await? {
+        while let Some(response) = stream.message().await.map_err(|e| {
+            EtcdError::WatchOperationFailed(format!("Failed to receive watch message: {}", e))
+        })? {
             if response.canceled() {
                 log::warn!("Watch stream was canceled");
                 break;
@@ -161,20 +192,21 @@ pub trait EtcdEventHandler {
     fn handle_list_response(&self, response: &GetResponse);
 }
 
-async fn create_client(cfg: &Etcd) -> Result<Client, Box<dyn Error + Send + Sync>> {
+async fn create_client(cfg: &Etcd) -> Result<Client, EtcdError> {
     let mut options = ConnectOptions::default();
     if let Some(timeout) = cfg.timeout {
-        options = options.with_timeout(Duration::from_secs(timeout as u64));
+        options = options.with_timeout(Duration::from_secs(timeout as _));
     }
     if let Some(connect_timeout) = cfg.connect_timeout {
-        options = options.with_connect_timeout(Duration::from_secs(connect_timeout as u64));
+        options = options.with_connect_timeout(Duration::from_secs(connect_timeout as _));
     }
     if let (Some(user), Some(password)) = (&cfg.user, &cfg.password) {
         options = options.with_user(user.clone(), password.clone());
     }
 
-    let client = Client::connect(cfg.host.clone(), Some(options)).await?;
-    Ok(client)
+    Client::connect(cfg.host.clone(), Some(options))
+        .await
+        .map_err(|e| EtcdError::ConnectionFailed(e.to_string()))
 }
 
 pub fn json_to_resource<T>(value: &[u8]) -> Result<T, Box<dyn Error>>
@@ -208,52 +240,63 @@ impl EtcdClientWrapper {
         }
     }
 
-    async fn ensure_connected(
-        &self,
-    ) -> Result<Arc<Mutex<Option<Client>>>, Box<dyn Error + Send + Sync>> {
+    async fn ensure_connected(&self) -> Result<Arc<Mutex<Option<Client>>>, EtcdError> {
         let mut client_guard = self.client.lock().await;
 
         if client_guard.is_none() {
             log::info!("Creating new etcd client...");
-            *client_guard = Some(create_client(&self.config).await?);
+            *client_guard = Some(
+                create_client(&self.config)
+                    .await
+                    .map_err(|e| EtcdError::ConnectionFailed(e.to_string()))?,
+            );
         }
 
         Ok(self.client.clone())
     }
 
-    pub async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, Box<dyn Error + Send + Sync>> {
+    pub async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, EtcdError> {
         let client_arc = self.ensure_connected().await?;
         let mut client_guard = client_arc.lock().await;
 
         let client = client_guard
             .as_mut()
-            .ok_or("Etcd client is not initialized")?;
+            .ok_or(EtcdError::ClientNotInitialized)?;
 
-        let resp = client.get(self.with_prefix(key), None).await?;
-        Ok(resp.kvs().first().map(|kv| kv.value().to_vec()))
+        client
+            .get(self.with_prefix(key), None)
+            .await
+            .map_err(|e| EtcdError::ListOperationFailed(e.to_string()))
+            .map(|resp| resp.kvs().first().map(|kv| kv.value().to_vec()))
     }
 
-    pub async fn put(&self, key: &str, value: Vec<u8>) -> Result<(), Box<dyn Error + Send + Sync>> {
+    pub async fn put(&self, key: &str, value: Vec<u8>) -> Result<(), EtcdError> {
         let client_arc = self.ensure_connected().await?;
         let mut client_guard = client_arc.lock().await;
 
         let client = client_guard
             .as_mut()
-            .ok_or("Etcd client is not initialized")?;
+            .ok_or(EtcdError::ClientNotInitialized)?;
 
-        client.put(self.with_prefix(key), value, None).await?;
+        client
+            .put(self.with_prefix(key), value, None)
+            .await
+            .map_err(|e| EtcdError::Other(format!("Put operation failed: {}", e)))?;
         Ok(())
     }
 
-    pub async fn delete(&self, key: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+    pub async fn delete(&self, key: &str) -> Result<(), EtcdError> {
         let client_arc = self.ensure_connected().await?;
         let mut client_guard = client_arc.lock().await;
 
         let client = client_guard
             .as_mut()
-            .ok_or("Etcd client is not initialized")?;
+            .ok_or(EtcdError::ClientNotInitialized)?;
 
-        client.delete(self.with_prefix(key), None).await?;
+        client
+            .delete(self.with_prefix(key), None)
+            .await
+            .map_err(|e| EtcdError::Other(format!("Delete operation failed: {}", e)))?;
         Ok(())
     }
 

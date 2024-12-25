@@ -2,10 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use http::{header, uri::Scheme, Uri};
-use pingora_error::{
-    ErrorType::{InternalError, ReadError},
-    OrErr, Result,
-};
+use pingora_error::{ErrorType::ReadError, OrErr, Result};
 use pingora_http::ResponseHeader;
 use pingora_proxy::Session;
 use regex::Regex;
@@ -25,7 +22,7 @@ pub fn create_redirect_plugin(cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> {
 
     config
         .validate()
-        .or_err_with(InternalError, || "Invalid redirect plugin config")?;
+        .or_err_with(ReadError, || "Invalid redirect plugin config")?;
 
     Ok(Arc::new(PluginRedirect { config }))
 }

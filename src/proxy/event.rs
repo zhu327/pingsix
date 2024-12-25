@@ -35,7 +35,10 @@ impl ProxyEventHandler {
                             route.id = id;
                             Some(route)
                         }
-                        Err(_) => None,
+                        Err(e) => {
+                            log::error!("Failed to load etcd Route: {} {}", id, e);
+                            None
+                        }
                     }
                 }
                 _ => None,
@@ -76,7 +79,10 @@ impl ProxyEventHandler {
                             upstream.id = id;
                             Some(upstream)
                         }
-                        Err(_) => None,
+                        Err(e) => {
+                            log::error!("Failed to load etcd Upstream: {} {}", id, e);
+                            None
+                        }
                     }
                 }
                 _ => None,
@@ -113,7 +119,10 @@ impl ProxyEventHandler {
                             service.id = id;
                             Some(service)
                         }
-                        Err(_) => None,
+                        Err(e) => {
+                            log::error!("Failed to load etcd Service: {} {}", id, e);
+                            None
+                        }
                     }
                 }
                 _ => None,
@@ -150,7 +159,10 @@ impl ProxyEventHandler {
                             rule.id = id;
                             Some(rule)
                         }
-                        Err(_) => None,
+                        Err(e) => {
+                            log::error!("Failed to load etcd Global rule: {} {}", id, e);
+                            None
+                        }
                     }
                 }
                 _ => None,
