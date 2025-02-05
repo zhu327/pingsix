@@ -1,9 +1,9 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
-use std::{collections::BTreeMap, sync::RwLock};
 
 use arc_swap::ArcSwap;
+use dashmap::DashMap;
 use log::debug;
 use matchit::{InsertError, Router as MatchRouter};
 use once_cell::sync::Lazy;
@@ -272,8 +272,7 @@ impl MatchEntry {
 }
 
 /// Global map to store global rules, initialized lazily.
-pub static ROUTE_MAP: Lazy<RwLock<HashMap<String, Arc<ProxyRoute>>>> =
-    Lazy::new(|| RwLock::new(HashMap::new()));
+pub static ROUTE_MAP: Lazy<DashMap<String, Arc<ProxyRoute>>> = Lazy::new(DashMap::new);
 static GLOBAL_MATCH: Lazy<ArcSwap<MatchEntry>> =
     Lazy::new(|| ArcSwap::new(Arc::new(MatchEntry::default())));
 
@@ -284,8 +283,7 @@ pub fn global_match_fetch() -> Arc<MatchEntry> {
 pub fn reload_global_match() {
     let mut matcher = MatchEntry::default();
 
-    let routes = ROUTE_MAP.read().unwrap();
-    for route in routes.values() {
+    for route in ROUTE_MAP.iter() {
         debug!("Inserting route: {}", route.inner.id);
         matcher.insert_route(route.clone()).unwrap();
     }
@@ -323,7 +321,7 @@ pub fn load_static_routes(config: &config::Config) -> Result<()> {
 /// Fetches an upstream by its ID.
 pub fn route_fetch(id: &str) -> Option<Arc<ProxyRoute>> {
     match ROUTE_MAP.get(id) {
-        Some(rule) => Some(rule),
+        Some(rule) => Some(rule.value().clone()),
         None => {
             log::warn!("Route with id '{}' not found", id);
             None

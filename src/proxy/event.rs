@@ -223,7 +223,7 @@ impl ProxyEventHandler {
                 ProxyRoute::new_with_upstream_and_plugins(route.clone(), handler.work_stealing)
             {
                 proxy_route.set_id(id);
-                ROUTE_MAP.insert(Arc::new(proxy_route));
+                ROUTE_MAP.insert_resource(Arc::new(proxy_route));
                 reload_global_match();
             }
         });
@@ -235,7 +235,7 @@ impl ProxyEventHandler {
                 ProxyUpstream::new_with_health_check(upstream.clone(), handler.work_stealing)
             {
                 proxy_upstream.set_id(id);
-                UPSTREAM_MAP.insert(Arc::new(proxy_upstream));
+                UPSTREAM_MAP.insert_resource(Arc::new(proxy_upstream));
             }
         });
     }
@@ -246,7 +246,7 @@ impl ProxyEventHandler {
                 ProxyService::new_with_upstream_and_plugins(service.clone(), handler.work_stealing)
             {
                 proxy_service.set_id(id);
-                SERVICE_MAP.insert(Arc::new(proxy_service));
+                SERVICE_MAP.insert_resource(Arc::new(proxy_service));
             }
         });
     }
@@ -255,7 +255,7 @@ impl ProxyEventHandler {
         self.handle_resource::<GlobalRule, _>(event, "global_rules", |_handler, id, rule| {
             if let Ok(mut proxy_global_rule) = ProxyGlobalRule::new_with_plugins(rule.clone()) {
                 proxy_global_rule.set_id(id);
-                GLOBAL_RULE_MAP.insert(Arc::new(proxy_global_rule));
+                GLOBAL_RULE_MAP.insert_resource(Arc::new(proxy_global_rule));
                 reload_global_plugin();
             }
         });

@@ -1,8 +1,6 @@
-use std::{
-    collections::HashMap,
-    sync::{Arc, RwLock},
-};
+use std::sync::Arc;
 
+use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use pingora_error::Result;
 
@@ -16,7 +14,7 @@ use super::{
 
 /// Fetches a service by its ID.
 pub fn service_fetch(id: &str) -> Option<Arc<ProxyService>> {
-    SERVICE_MAP.get(id)
+    SERVICE_MAP.get(id).map(|s| s.value().clone())
 }
 
 /// Represents a proxy service that manages upstreams.
@@ -78,8 +76,7 @@ impl ProxyService {
 }
 
 /// Global map to store services, initialized lazily.
-pub static SERVICE_MAP: Lazy<RwLock<HashMap<String, Arc<ProxyService>>>> =
-    Lazy::new(|| RwLock::new(HashMap::new()));
+pub static SERVICE_MAP: Lazy<DashMap<String, Arc<ProxyService>>> = Lazy::new(DashMap::new);
 
 /// Loads services from the given configuration.
 pub fn load_static_services(config: &config::Config) -> Result<()> {

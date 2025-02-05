@@ -8,10 +8,11 @@ pub mod upstream;
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    sync::{Arc, RwLock},
+    sync::Arc,
     time::Instant,
 };
 
+use dashmap::DashMap;
 use pingora_http::RequestHeader;
 use pingora_proxy::Session;
 
@@ -157,50 +158,33 @@ pub trait Identifiable {
 pub trait MapOperations<T> {
     fn reload_resource(&self, resources: Vec<Arc<T>>);
 
-    fn remove(&self, id: &str);
-    fn insert(&self, resource: Arc<T>);
-    fn get(&self, id: &str) -> Option<Arc<T>>;
+    fn insert_resource(&self, resource: Arc<T>);
 }
 
-impl<T> MapOperations<T> for RwLock<HashMap<String, Arc<T>>>
+impl<T> MapOperations<T> for DashMap<String, Arc<T>>
 where
     T: Identifiable,
 {
     // reload_resource：根据新的资源更新 map，删除不在 resources 中的条目
     fn reload_resource(&self, resources: Vec<Arc<T>>) {
-        let mut map = self.write().unwrap();
-
         // Log the old and new resources
         for resource in resources.iter() {
             log::info!("Inserting/Updating resource: {}", resource.id());
         }
 
         let resource_ids: HashSet<String> = resources.iter().map(|r| r.id()).collect();
-        map.retain(|key, _| resource_ids.contains(key));
+        self.retain(|key, _| resource_ids.contains(key));
 
         for resource in resources {
             let key = resource.id();
             log::info!("Inserting resource with id: {}", key);
-            map.insert(key, resource);
+            self.insert(key, resource);
         }
     }
 
-    // remove：根据 id 从 map 中删除条目
-    fn remove(&self, id: &str) {
-        let mut map = self.write().unwrap();
-        map.remove(id);
-    }
-
-    // insert：插入新的资源
-    fn insert(&self, resource: Arc<T>) {
-        let mut map = self.write().unwrap();
+    // insert_resource：插入新的资源
+    fn insert_resource(&self, resource: Arc<T>) {
         let key = resource.id();
-        map.insert(key, resource);
-    }
-
-    // get：根据 id 从 map 中获取资源
-    fn get(&self, id: &str) -> Option<Arc<T>> {
-        let map = self.read().unwrap();
-        map.get(id).cloned()
+        self.insert(key, resource);
     }
 }

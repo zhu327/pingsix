@@ -1,9 +1,7 @@
-use std::{
-    collections::HashMap,
-    sync::{Arc, RwLock},
-};
+use std::{collections::HashMap, sync::Arc};
 
 use arc_swap::ArcSwap;
+use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use pingora_error::Result;
 
@@ -55,8 +53,7 @@ impl ProxyGlobalRule {
 }
 
 /// Global map to store global rules, initialized lazily.
-pub static GLOBAL_RULE_MAP: Lazy<RwLock<HashMap<String, Arc<ProxyGlobalRule>>>> =
-    Lazy::new(|| RwLock::new(HashMap::new()));
+pub static GLOBAL_RULE_MAP: Lazy<DashMap<String, Arc<ProxyGlobalRule>>> = Lazy::new(DashMap::new);
 static GLOBAL_PLUGIN: Lazy<ArcSwap<ProxyPluginExecutor>> =
     Lazy::new(|| ArcSwap::new(Arc::new(ProxyPluginExecutor::default())));
 
@@ -66,14 +63,11 @@ pub fn global_plugin_fetch() -> Arc<ProxyPluginExecutor> {
 
 /// reload ProxyPluginExecutor
 pub fn reload_global_plugin() {
-    // 获取 GLOBAL_RULE_MAP 的可读锁
-    let global_rules = GLOBAL_RULE_MAP.read().unwrap();
-
     // 创建一个 HashMap 用来去重插件
     let mut unique_plugins: HashMap<String, Arc<dyn ProxyPlugin>> = HashMap::new();
 
     // 遍历 GLOBAL_RULE_MAP 中的所有 ProxyGlobalRule
-    for rule in global_rules.values() {
+    for rule in GLOBAL_RULE_MAP.iter() {
         for plugin in &rule.plugins {
             // 使用 plugin.name() 作为唯一标识符，去重
             let plugin_name = plugin.name(); // 假设 ProxyPlugin 实现了 name() 方法
@@ -119,7 +113,7 @@ pub fn load_static_global_rules(config: &config::Config) -> Result<()> {
 
 pub fn global_rule_fetch(id: &str) -> Option<Arc<ProxyGlobalRule>> {
     match GLOBAL_RULE_MAP.get(id) {
-        Some(rule) => Some(rule),
+        Some(rule) => Some(rule.value().clone()),
         None => {
             log::warn!("Global rule with id '{}' not found", id);
             None

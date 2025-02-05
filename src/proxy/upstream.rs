@@ -1,9 +1,6 @@
-use std::{
-    collections::HashMap,
-    sync::{Arc, RwLock},
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
+use dashmap::DashMap;
 use http::Uri;
 use log::info;
 use once_cell::sync::Lazy;
@@ -364,8 +361,7 @@ impl From<config::HealthCheck> for Box<HttpHealthCheck> {
 }
 
 // Define a global upstream map, initialized lazily
-pub static UPSTREAM_MAP: Lazy<RwLock<HashMap<String, Arc<ProxyUpstream>>>> =
-    Lazy::new(|| RwLock::new(HashMap::new()));
+pub static UPSTREAM_MAP: Lazy<DashMap<String, Arc<ProxyUpstream>>> = Lazy::new(DashMap::new);
 
 /// Loads upstreams from the given configuration.
 pub fn load_static_upstreams(config: &config::Config) -> Result<()> {
@@ -397,7 +393,7 @@ pub fn load_static_upstreams(config: &config::Config) -> Result<()> {
 /// Fetches an upstream by its ID.
 pub fn upstream_fetch(id: &str) -> Option<Arc<ProxyUpstream>> {
     match UPSTREAM_MAP.get(id) {
-        Some(rule) => Some(rule),
+        Some(rule) => Some(rule.value().clone()),
         None => {
             log::warn!("Upstream with id '{}' not found", id);
             None
