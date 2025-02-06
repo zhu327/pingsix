@@ -105,7 +105,7 @@ pub fn build_plugin_executor(route: Arc<ProxyRoute>) -> Arc<ProxyPluginExecutor>
     let service_plugins = route
         .inner
         .service_id
-        .as_deref() // 将 Option<String> 转换为 Option<&str>
+        .as_deref()
         .and_then(service_fetch)
         .map_or_else(Vec::new, |service| service.plugins.clone());
 
@@ -329,7 +329,7 @@ impl ProxyPlugin for ProxyPluginExecutor {
     }
 }
 
-pub fn regex_template_uri(uri: &str, regex_templates: &[&str]) -> String {
+pub fn apply_regex_uri_template(uri: &str, regex_templates: &[&str]) -> String {
     for i in (0..regex_templates.len()).step_by(2) {
         let pattern = regex_templates[i];
         let redirect_template = regex_templates[i + 1];
@@ -370,7 +370,7 @@ mod tests {
         ];
         let uri = "/iresty/a/b/c";
 
-        let result = regex_template_uri(uri, &regex_templates);
+        let result = apply_regex_uri_template(uri, &regex_templates);
 
         assert_eq!(result, "/a-b-c");
     }
@@ -385,7 +385,7 @@ mod tests {
         ];
         let uri = "/theothers/x/y";
 
-        let result = regex_template_uri(uri, &regex_templates);
+        let result = apply_regex_uri_template(uri, &regex_templates);
 
         assert_eq!(result, "/theothers/x-y");
     }
@@ -400,7 +400,7 @@ mod tests {
         ];
         let uri = "/api/test";
 
-        let result = regex_template_uri(uri, &regex_templates);
+        let result = apply_regex_uri_template(uri, &regex_templates);
 
         assert_eq!(result, "/api/test");
     }
@@ -415,7 +415,7 @@ mod tests {
         ];
         let uri = "";
 
-        let result = regex_template_uri(uri, &regex_templates);
+        let result = apply_regex_uri_template(uri, &regex_templates);
 
         assert_eq!(result, "");
     }
@@ -430,7 +430,7 @@ mod tests {
         ];
         let uri = "/iresty/a/b/c/d/e/f";
 
-        let result = regex_template_uri(uri, &regex_templates);
+        let result = apply_regex_uri_template(uri, &regex_templates);
 
         assert_eq!(result, "/a/b/c/d-e-f");
     }
@@ -445,7 +445,7 @@ mod tests {
         ];
         let uri = "/iresty/a/!/@";
 
-        let result = regex_template_uri(uri, &regex_templates);
+        let result = apply_regex_uri_template(uri, &regex_templates);
 
         assert_eq!(result, "/a-!-@");
     }
@@ -455,7 +455,7 @@ mod tests {
         let regex_templates = ["^/iresty/(.*)/(.*)/(.*)", "", "^/theothers/(.*)/(.*)", ""];
         let uri = "/iresty/a/b/c";
 
-        let result = regex_template_uri(uri, &regex_templates);
+        let result = apply_regex_uri_template(uri, &regex_templates);
 
         assert_eq!(result, "");
     }

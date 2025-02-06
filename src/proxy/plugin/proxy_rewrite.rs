@@ -12,7 +12,7 @@ use serde_yaml::Value as YamlValue;
 use std::sync::Arc;
 use validator::{Validate, ValidationError};
 
-use super::{regex_template_uri, ProxyPlugin};
+use super::{apply_regex_uri_template, ProxyPlugin};
 use crate::proxy::ProxyContext;
 
 pub const PLUGIN_NAME: &str = "proxy-rewrite";
@@ -140,7 +140,7 @@ impl PluginProxyRewrite {
         if !self.config.regex_uri.is_empty() {
             if let Some(pq) = path_and_query {
                 let query = pq.query().unwrap_or("");
-                let new_path = regex_template_uri(
+                let new_path = apply_regex_uri_template(
                     pq.path(),
                     &self
                         .config

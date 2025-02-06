@@ -25,8 +25,9 @@ fn main() {
     env_logger::init();
 
     // 加载配置和命令行参数
-    let opt = Opt::parse_args();
-    let config = Config::load_yaml_with_opt_override(&opt).expect("Failed to load configuration");
+    let cli_options = Opt::parse_args();
+    let config =
+        Config::load_yaml_with_opt_override(&cli_options).expect("Failed to load configuration");
 
     // 配置同步
     let etcd_config = if let Some(etcd_cfg) = &config.pingsix.etcd {
@@ -46,7 +47,7 @@ fn main() {
     };
 
     // 创建服务器实例
-    let mut pingsix_server = Server::new_with_opt_and_conf(Some(opt), config.pingora);
+    let mut pingsix_server = Server::new_with_opt_and_conf(Some(cli_options), config.pingora);
 
     // 初始化 HTTP 服务
     let mut http_service =
@@ -79,27 +80,28 @@ fn main() {
 // 添加监听器的辅助函数
 fn add_listeners(http_service: &mut Service<HttpProxy<HttpService>>, cfg: &config::Pingsix) {
     for list_cfg in cfg.listeners.iter() {
-        match &list_cfg.tls {
-            Some(Tls {
-                cert_path,
-                key_path,
-            }) => {
-                let mut settings = TlsSettings::intermediate(cert_path, key_path)
-                    .expect("Adding TLS listener shouldn't fail");
-                if list_cfg.offer_h2 {
-                    settings.enable_h2();
-                }
-                http_service.add_tls_with_settings(&list_cfg.address.to_string(), None, settings);
+        if let Some(Tls {
+            cert_path,
+            key_path,
+        }) = &list_cfg.tls
+        {
+            // ... TLS 配置
+            let mut settings = TlsSettings::intermediate(cert_path, key_path)
+                .expect("Adding TLS listener shouldn't fail");
+            if list_cfg.offer_h2 {
+                settings.enable_h2();
             }
-            None => {
-                if list_cfg.offer_h2c {
-                    let http_logic = http_service.app_logic_mut().unwrap();
-                    let mut http_server_options = HttpServerOptions::default();
-                    http_server_options.h2c = true;
-                    http_logic.server_options = Some(http_server_options);
-                }
-                http_service.add_tcp(&list_cfg.address.to_string());
+            http_service.add_tls_with_settings(&list_cfg.address.to_string(), None, settings);
+        } else {
+            // 无 TLS
+            if list_cfg.offer_h2c {
+                //... H2C 配置
+                let http_logic = http_service.app_logic_mut().unwrap();
+                let mut http_server_options = HttpServerOptions::default();
+                http_server_options.h2c = true;
+                http_logic.server_options = Some(http_server_options);
             }
+            http_service.add_tcp(&list_cfg.address.to_string());
         }
     }
 }

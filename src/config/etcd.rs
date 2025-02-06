@@ -139,6 +139,7 @@ impl EtcdConfigSync {
     async fn run_sync_loop(&self, shutdown: &mut ShutdownWatch) {
         loop {
             tokio::select! {
+                biased; // 优先处理关闭信号
                 // Shutdown signal handling
                 _ = shutdown.changed() => {
                     if *shutdown.borrow() {
@@ -159,6 +160,7 @@ impl EtcdConfigSync {
             }
 
             tokio::select! {
+                biased; // 优先处理关闭信号
                 // Shutdown signal handling during watch
                 _ = shutdown.changed() => {
                     if *shutdown.borrow() {

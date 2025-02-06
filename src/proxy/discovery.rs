@@ -203,11 +203,16 @@ fn parse_host_and_port(addr: &str) -> Result<(String, Option<u32>)> {
     };
 
     let host = caps.get(1).or(caps.get(2)).unwrap().as_str();
-    let port_opt = caps.get(3).map(|p| p.as_str());
-    let port = port_opt
-        .map(|p| p.parse::<u32>())
-        .transpose()
-        .or_err_with(InternalError, || "Invalid port")?;
+
+    let port = if let Some(port_str) = caps.get(3).map(|p| p.as_str()) {
+        Some(
+            port_str
+                .parse::<u32>()
+                .or_err_with(InternalError, || "Invalid port")?,
+        )
+    } else {
+        None
+    };
 
     // Ensure IPv6 addresses are enclosed in square brackets
     let host = if host.contains(':') {

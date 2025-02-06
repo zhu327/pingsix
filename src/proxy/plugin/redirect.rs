@@ -12,7 +12,7 @@ use validator::{Validate, ValidationError};
 
 use crate::proxy::{get_request_host, ProxyContext};
 
-use super::{regex_template_uri, ProxyPlugin};
+use super::{apply_regex_uri_template, ProxyPlugin};
 
 pub const PLUGIN_NAME: &str = "redirect";
 
@@ -144,7 +144,7 @@ impl PluginRedirect {
         if let Some(pq) = parts.path_and_query.take() {
             let path = pq.path();
             let query = pq.query().unwrap_or("");
-            let new_path = regex_template_uri(
+            let new_path = apply_regex_uri_template(
                 path,
                 &self
                     .config

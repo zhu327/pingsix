@@ -164,9 +164,11 @@ pub struct Sentry {
 
 impl Listener {
     fn validate_tls_for_offer_h2(&self) -> Result<(), ValidationError> {
-        (self.offer_h2 && self.tls.is_none())
-            .then(|| Err(ValidationError::new("tls_required_for_h2")))
-            .map_or(Ok(()), |err| err)
+        if self.offer_h2 && self.tls.is_none() {
+            Err(ValidationError::new("tls_required_for_h2"))
+        } else {
+            Ok(())
+        }
     }
 }
 

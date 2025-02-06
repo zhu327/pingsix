@@ -154,6 +154,25 @@ pub struct MatchEntry {
 }
 
 impl MatchEntry {
+    fn insert_into_router(
+        router: &mut MatchRouter<Vec<Arc<ProxyRoute>>>,
+        uri: &str,
+        proxy_route: Arc<ProxyRoute>,
+    ) -> Result<(), InsertError> {
+        match router.at_mut(uri) {
+            Ok(routes) => {
+                routes.value.push(proxy_route);
+                routes
+                    .value
+                    .sort_by(|a, b| b.inner.priority.cmp(&a.inner.priority));
+            }
+            Err(_) => {
+                router.insert(uri, vec![proxy_route])?;
+            }
+        }
+        Ok(())
+    }
+
     /// Inserts a route into the match entry.
     pub fn insert_route(&mut self, proxy_route: Arc<ProxyRoute>) -> Result<(), InsertError> {
         let hosts = proxy_route.get_hosts();
@@ -161,46 +180,30 @@ impl MatchEntry {
 
         if hosts.is_empty() {
             // Insert for non-host URIs
-            Self::insert_route_for_uri(&mut self.non_host_uri, &uris, proxy_route)?;
+            for uri in &uris {
+                Self::insert_into_router(&mut self.non_host_uri, uri, proxy_route.clone())?;
+            }
         } else {
             // Insert for host URIs
             for host in hosts.iter() {
                 let reversed_host = host.chars().rev().collect::<String>();
+                let inner_router = self.host_uris.at_mut(reversed_host.as_str());
 
-                if self.host_uris.at(reversed_host.as_str()).is_err() {
-                    let mut inner = MatchRouter::new();
-                    for uri in uris.iter() {
-                        inner.insert(uri, vec![proxy_route.clone()])?;
+                let inner_router = match inner_router {
+                    Ok(router) => router.value,
+                    Err(_) => {
+                        let new_router = MatchRouter::new();
+                        self.host_uris.insert(reversed_host.clone(), new_router)?;
+                        self.host_uris.at_mut(reversed_host.as_str()).unwrap().value
                     }
-                    self.host_uris.insert(reversed_host, inner)?;
-                } else {
-                    let inner = self.host_uris.at_mut(reversed_host.as_str()).unwrap().value;
-                    Self::insert_route_for_uri(inner, &uris, proxy_route.clone())?;
+                };
+
+                for uri in &uris {
+                    Self::insert_into_router(inner_router, uri, proxy_route.clone())?;
                 }
             }
         }
 
-        Ok(())
-    }
-
-    /// Inserts a route for a given URI.
-    fn insert_route_for_uri(
-        match_router: &mut MatchRouter<Vec<Arc<ProxyRoute>>>,
-        uris: &[String],
-        proxy_route: Arc<ProxyRoute>,
-    ) -> Result<(), InsertError> {
-        for uri in uris.iter() {
-            if match_router.at(uri).is_err() {
-                match_router.insert(uri, vec![proxy_route.clone()])?;
-            } else {
-                let routes = match_router.at_mut(uri).unwrap();
-                routes.value.push(proxy_route.clone());
-                // Sort by priority
-                routes
-                    .value
-                    .sort_by(|a, b| b.inner.priority.cmp(&a.inner.priority));
-            }
-        }
         Ok(())
     }
 
@@ -226,18 +229,18 @@ impl MatchEntry {
             .map(|h| h.chars().rev().collect::<String>())
         {
             if let Ok(v) = self.host_uris.at(&reversed_host) {
-                if let Some(result) = Self::match_uri(v.value, uri, method) {
+                if let Some(result) = Self::match_uri_method(v.value, uri, method) {
                     return Some(result);
                 }
             }
         }
 
         // Fall back to non-host URI matching
-        Self::match_uri(&self.non_host_uri, uri, method)
+        Self::match_uri_method(&self.non_host_uri, uri, method)
     }
 
     /// Matches a URI to a route.
-    fn match_uri(
+    fn match_uri_method(
         match_router: &MatchRouter<Vec<Arc<ProxyRoute>>>,
         uri: &str,
         method: &str,
@@ -255,14 +258,7 @@ impl MatchEntry {
                 }
 
                 // Match method
-                if route
-                    .inner
-                    .methods
-                    .iter()
-                    .map(|method| method.to_string())
-                    .collect::<Vec<String>>()
-                    .contains(&method.to_string())
-                {
+                if route.inner.methods.iter().any(|m| m.to_string() == method) {
                     return Some((params, route.clone()));
                 }
             }

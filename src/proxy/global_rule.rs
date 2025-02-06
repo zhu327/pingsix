@@ -70,7 +70,7 @@ pub fn reload_global_plugin() {
     for rule in GLOBAL_RULE_MAP.iter() {
         for plugin in &rule.plugins {
             // 使用 plugin.name() 作为唯一标识符，去重
-            let plugin_name = plugin.name(); // 假设 ProxyPlugin 实现了 name() 方法
+            let plugin_name = plugin.name();
             unique_plugins.insert(plugin_name.to_string(), plugin.clone());
         }
     }

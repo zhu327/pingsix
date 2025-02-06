@@ -24,7 +24,9 @@ use crate::{
 
 #[derive(Debug)]
 enum ApiError {
-    EtcdError(String),
+    EtcdGetError(String),
+    EtcdPutError(String),
+    EtcdDeleteError(String),
     ValidationError(String),
     MissingParameter(String),
     InvalidRequest(String),
@@ -34,7 +36,9 @@ enum ApiError {
 impl fmt::Display for ApiError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ApiError::EtcdError(msg) => write!(f, "Etcd error: {}", msg),
+            ApiError::EtcdGetError(msg) => write!(f, "Etcd get error: {}", msg),
+            ApiError::EtcdPutError(msg) => write!(f, "Etcd put error: {}", msg),
+            ApiError::EtcdDeleteError(msg) => write!(f, "Etcd delete error: {}", msg),
             ApiError::ValidationError(msg) => write!(f, "Validation error: {}", msg),
             ApiError::MissingParameter(msg) => write!(f, "Missing parameter: {}", msg),
             ApiError::InvalidRequest(msg) => write!(f, "Invalid request: {}", msg),
@@ -45,7 +49,28 @@ impl fmt::Display for ApiError {
 
 impl Error for ApiError {}
 
+impl From<ApiError> for Response<Vec<u8>> {
+    fn from(error: ApiError) -> Self {
+        match error {
+            // ... 匹配不同的错误类型，返回不同的状态码和错误信息
+            ApiError::EtcdGetError(_)
+            | ApiError::EtcdPutError(_)
+            | ApiError::EtcdDeleteError(_)
+            | ApiError::InternalError(_) => {
+                ResponseHelper::error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string())
+            }
+            ApiError::ValidationError(_)
+            | ApiError::MissingParameter(_)
+            | ApiError::InvalidRequest(_) => {
+                ResponseHelper::error(StatusCode::BAD_REQUEST, &error.to_string())
+            }
+        }
+    }
+}
+
 type ApiResult<T> = Result<T, ApiError>;
+type RequestParams = BTreeMap<String, String>;
+type HttpHandler = Box<dyn Handler + Send + Sync>;
 
 // Unified response handler
 struct ResponseHelper;
@@ -72,16 +97,6 @@ impl ResponseHelper {
             .body(message.as_bytes().to_vec())
             .unwrap()
     }
-
-    pub fn from_api_error(error: ApiError) -> Response<Vec<u8>> {
-        match error {
-            ApiError::EtcdError(msg) => Self::error(StatusCode::INTERNAL_SERVER_ERROR, &msg),
-            ApiError::ValidationError(msg) => Self::error(StatusCode::BAD_REQUEST, &msg),
-            ApiError::MissingParameter(msg) => Self::error(StatusCode::BAD_REQUEST, &msg),
-            ApiError::InvalidRequest(msg) => Self::error(StatusCode::BAD_REQUEST, &msg),
-            ApiError::InternalError(msg) => Self::error(StatusCode::INTERNAL_SERVER_ERROR, &msg),
-        }
-    }
 }
 
 #[async_trait]
@@ -90,14 +105,14 @@ trait Handler {
         &self,
         etcd: &EtcdClientWrapper,
         session: &mut ServerSession,
-        params: BTreeMap<String, String>,
+        params: RequestParams,
     ) -> ApiResult<Response<Vec<u8>>>;
 }
 
 pub struct AdminHttpApp {
     config: Admin,
     etcd: EtcdClientWrapper,
-    router: Router<HashMap<Method, Box<dyn Handler + Send + Sync>>>,
+    router: Router<HashMap<Method, HttpHandler>>,
 }
 
 impl AdminHttpApp {
@@ -127,12 +142,7 @@ impl AdminHttpApp {
         this
     }
 
-    fn route(
-        &mut self,
-        path: &str,
-        method: Method,
-        handler: Box<dyn Handler + Send + Sync>,
-    ) -> &mut Self {
+    fn route(&mut self, path: &str, method: Method, handler: HttpHandler) -> &mut Self {
         if self.router.at(path).is_err() {
             let mut handlers = HashMap::new();
             handlers.insert(method, handler);
@@ -170,13 +180,13 @@ impl ServeHttp for AdminHttpApp {
         match self.router.at(&path) {
             Ok(Match { value, params }) => match value.get(&method) {
                 Some(handler) => {
-                    let params: BTreeMap<String, String> = params
+                    let params: RequestParams = params
                         .iter()
                         .map(|(k, v)| (k.to_string(), v.to_string()))
                         .collect();
                     match handler.handle(&self.etcd, http_session, params).await {
                         Ok(resp) => resp,
-                        Err(e) => ResponseHelper::from_api_error(e),
+                        Err(e) => e.into(),
                     }
                 }
                 None => ResponseHelper::error(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed"),
@@ -194,7 +204,7 @@ impl Handler for ResourcePutHandler {
         &self,
         etcd: &EtcdClientWrapper,
         http_session: &mut ServerSession,
-        params: BTreeMap<String, String>,
+        params: RequestParams,
     ) -> ApiResult<Response<Vec<u8>>> {
         validate_content_type(http_session)?;
 
@@ -213,7 +223,7 @@ impl Handler for ResourcePutHandler {
         validate_resource(resource_type, &body_data)?;
         etcd.put(&key, body_data)
             .await
-            .map_err(|e| ApiError::EtcdError(e.to_string()))?;
+            .map_err(|e| ApiError::EtcdPutError(e.to_string()))?;
         Ok(ResponseHelper::success(Vec::new(), None))
     }
 }
@@ -231,7 +241,7 @@ impl Handler for ResourceGetHandler {
         &self,
         etcd: &EtcdClientWrapper,
         _http_session: &mut ServerSession,
-        params: BTreeMap<String, String>,
+        params: RequestParams,
     ) -> ApiResult<Response<Vec<u8>>> {
         let resource_type = params
             .get("resource")
@@ -245,7 +255,7 @@ impl Handler for ResourceGetHandler {
         );
 
         match etcd.get(&key).await {
-            Err(e) => Err(ApiError::EtcdError(e.to_string())),
+            Err(e) => Err(ApiError::EtcdGetError(e.to_string())),
             Ok(Some(value)) => {
                 let json_value: serde_json::Value = serde_json::from_slice(&value)
                     .map_err(|e| ApiError::InvalidRequest(format!("Invalid JSON data: {}", e)))?;
@@ -267,7 +277,7 @@ impl Handler for ResourceDeleteHandler {
         &self,
         etcd: &EtcdClientWrapper,
         _http_session: &mut ServerSession,
-        params: BTreeMap<String, String>,
+        params: RequestParams,
     ) -> ApiResult<Response<Vec<u8>>> {
         let key = format!(
             "{}/{}",
@@ -281,7 +291,7 @@ impl Handler for ResourceDeleteHandler {
 
         etcd.delete(&key)
             .await
-            .map_err(|e| ApiError::EtcdError(e.to_string()))?;
+            .map_err(|e| ApiError::EtcdDeleteError(e.to_string()))?;
         Ok(ResponseHelper::success(Vec::new(), None))
     }
 }
