@@ -174,17 +174,14 @@ impl ProxyHttp for HttpService {
         if let Some(route) = ctx.route.as_ref() {
             if let Some(upstream) = route.resolve_upstream() {
                 if let Some(retries) = upstream.get_retries() {
-                    if retries == 0 || ctx.tries >= retries {
-                        return e;
-                    }
-                    if let Some(timeout) = upstream.get_retry_timeout() {
-                        if ctx.request_start.elapsed().as_millis() > (timeout * 1000) as _ {
-                            return e;
+                    if retries > 0 && ctx.tries < retries {
+                        if let Some(timeout) = upstream.get_retry_timeout() {
+                            if ctx.request_start.elapsed().as_millis() <= (timeout * 1000) as _ {
+                                ctx.tries += 1;
+                                e.set_retry(true);
+                            }
                         }
                     }
-                    ctx.tries += 1;
-                    e.set_retry(true);
-                    return e;
                 }
             }
         }

@@ -110,24 +110,24 @@ impl ProxyRoute {
         }
     }
 
-    /// Selects an HTTP peer for a given session.
     pub fn select_http_peer<'a>(&'a self, session: &'a mut Session) -> Result<Box<HttpPeer>> {
-        let upstream = self
-            .resolve_upstream()
-            .ok_or_else(|| Error::new_str("Failed to retrieve upstream configuration for route"))?;
-
-        let mut backend = upstream
-            .select_backend(session)
-            .ok_or_else(|| Error::new_str("Unable to determine backend for the request"))?;
-
-        backend
-            .ext
-            .get_mut::<HttpPeer>()
-            .map(|peer| {
-                self.set_timeout(peer);
-                Box::new(peer.clone())
+        self.resolve_upstream()
+            .ok_or_else(|| Error::new_str("Failed to retrieve upstream configuration for route"))
+            .and_then(|upstream| {
+                upstream
+                    .select_backend(session)
+                    .ok_or_else(|| Error::new_str("Unable to determine backend for the request"))
             })
-            .ok_or_else(|| Error::new_str("Missing selected backend metadata for HttpPeer"))
+            .and_then(|mut backend| {
+                backend
+                    .ext
+                    .get_mut::<HttpPeer>()
+                    .map(|peer| {
+                        self.set_timeout(peer);
+                        Box::new(peer.clone())
+                    })
+                    .ok_or_else(|| Error::new_str("Missing selected backend metadata for HttpPeer"))
+            })
     }
 
     /// Sets the timeout for an `HttpPeer` based on the route configuration.

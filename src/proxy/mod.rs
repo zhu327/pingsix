@@ -184,7 +184,6 @@ where
 
     // insert_resource：插入新的资源
     fn insert_resource(&self, resource: Arc<T>) {
-        let key = resource.id();
-        self.insert(key, resource);
+        self.insert(resource.id(), resource);
     }
 }

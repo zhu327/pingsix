@@ -23,37 +23,34 @@ use serde_yaml::Value as YamlValue;
 use super::{route::ProxyRoute, service::service_fetch, ProxyContext};
 
 /// Type alias for plugin initialization functions
-pub type PluginCreateFn = Arc<dyn Fn(YamlValue) -> Result<Arc<dyn ProxyPlugin>> + Send + Sync>;
+pub type PluginCreateFn = fn(YamlValue) -> Result<Arc<dyn ProxyPlugin>>;
 
 /// Registry of plugin builders
 static PLUGIN_BUILDER_REGISTRY: Lazy<HashMap<&'static str, PluginCreateFn>> = Lazy::new(|| {
     let arr: Vec<(&str, PluginCreateFn)> = vec![
-        (echo::PLUGIN_NAME, Arc::new(echo::create_echo_plugin)), // 412
+        (echo::PLUGIN_NAME, echo::create_echo_plugin), // 412
         (
             prometheus::PLUGIN_NAME, // 500
-            Arc::new(prometheus::create_prometheus_plugin),
+            prometheus::create_prometheus_plugin,
         ),
         (
             limit_count::PLUGIN_NAME, // 503
-            Arc::new(limit_count::create_limit_count_plugin),
+            limit_count::create_limit_count_plugin,
         ),
         (
             grpc_web::PLUGIN_NAME, // 505
-            Arc::new(grpc_web::create_grpc_web_plugin),
+            grpc_web::create_grpc_web_plugin,
         ),
-        (
-            redirect::PLUGIN_NAME,
-            Arc::new(redirect::create_redirect_plugin),
-        ), // 900
-        (gzip::PLUGIN_NAME, Arc::new(gzip::create_gzip_plugin)), // 995
-        (brotli::PLUGIN_NAME, Arc::new(brotli::create_brotli_plugin)), // 996
+        (redirect::PLUGIN_NAME, redirect::create_redirect_plugin), // 900
+        (gzip::PLUGIN_NAME, gzip::create_gzip_plugin),             // 995
+        (brotli::PLUGIN_NAME, brotli::create_brotli_plugin),       // 996
         (
             proxy_rewrite::PLUGIN_NAME, // 1008
-            Arc::new(proxy_rewrite::create_proxy_rewrite_plugin),
+            proxy_rewrite::create_proxy_rewrite_plugin,
         ),
         (
             ip_restriction::PLUGIN_NAME, // 3000
-            Arc::new(ip_restriction::create_ip_restriction_plugin),
+            ip_restriction::create_ip_restriction_plugin,
         ),
     ];
     arr.into_iter().collect()

@@ -75,7 +75,7 @@ impl EtcdConfigSync {
 
         let options = GetOptions::new().with_prefix();
         let response = client
-            .get(self.config.prefix.as_bytes(), Some(options))
+            .get(self.config.prefix.as_str(), Some(options))
             .await
             .map_err(|e| EtcdError::ListOperationFailed(e.to_string()))?;
 
@@ -106,7 +106,7 @@ impl EtcdConfigSync {
             .ok_or(EtcdError::ClientNotInitialized)?;
 
         let (mut watcher, mut stream) = client
-            .watch(self.config.prefix.as_bytes(), Some(options))
+            .watch(self.config.prefix.as_str(), Some(options))
             .await
             .map_err(|e| EtcdError::WatchOperationFailed(e.to_string()))?;
 

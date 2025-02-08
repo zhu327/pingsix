@@ -66,8 +66,13 @@ impl ServiceDiscovery for DnsDiscovery {
             .resolver
             .lookup_ip(name)
             .await
-            .or_err_with(InternalError, || {
-                format!("DNS discovery failed for domain: {}", name)
+            .map_err(|e| {
+                log::warn!("DNS discovery failed for domain: {} failed: {}", name, e);
+                Error::because(
+                    InternalError,
+                    format!("DNS discovery failed for domain: {}", name),
+                    e,
+                )
             })?
             .iter()
             .map(|ip| {
