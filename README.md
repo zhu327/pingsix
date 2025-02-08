@@ -1,34 +1,35 @@
 # PingSIX
 
-PingSIX is a high-performance and scalable API gateway tailored for modern cloud-native environments. Inspired by Cloudflare's Pingora and APISIX, PingSIX combines flexibility, robustness, and the efficiency of Rust to provide a powerful reverse proxy and API management solution.
+PingSIX is a high-performance and scalable API gateway designed for modern cloud-native environments. Inspired by Cloudflare Pingora and APISIX, PingSIX combines Rust's flexibility, robustness, and efficiency to provide powerful reverse proxy and API management capabilities.
 
 ## Key Features
 
-- **High Performance**: Built with Rust, leveraging multi-threading for exceptional performance.
-- **Dynamic Configuration**: Supports dynamic configuration via etcd for seamless distributed deployment, enabling real-time updates across distributed systems.
-- **Flexible Routing**: Offers advanced routing based on host, URI, and methods with support for priority-based rules.
-- **Plugin Ecosystem**: Includes a range of plugins for compression, access control, gRPC support, and more.
-- **Observability**: Exposes metrics via Prometheus and integrates with Sentry for debugging and monitoring.
-- **Distributed Configuration Management**: Admin API for resource management through etcd, fully compatible with APISIX's Admin API.
+- **High Performance**: Built with Rust, utilizing multi-threading for exceptional performance.
+- **Dynamic Configuration**: Supports dynamic configuration via etcd for real-time updates across distributed systems.
+- **Flexible Routing**: Advanced routing based on host, URI, and HTTP methods with priority-based rules.
+- **Plugin Ecosystem**: Includes plugins for compression, access control, gRPC support, and more, with support for custom plugin extensions.
+- **Observability**: Exposes Prometheus metrics and integrates with Sentry for error tracking and monitoring.
+- **Distributed Configuration Management**: Admin API compatible with APISIX Admin API for resource management.
 - **Global Rules and Services**: Implements reusable global plugin behaviors and service configurations to simplify plugin and upstream reuse.
-- **Upstream Health Checks**: Provides active health checks for upstream reliability.
+- **Upstream Health Checks**: Provides active health checks to ensure upstream reliability.
 
-## Plugin Highlights
+## Plugin Overview
 
-PingSIX includes the following plugins, inspired by APISIX:
+PingSIX includes multiple built-in plugins that enhance API gateway capabilities, including but not limited to:
 
 - **brotli**: Brotli compression for HTTP responses, optimizing bandwidth usage.
 - **gzip**: Gzip compression for HTTP responses.
 - **echo**: A utility plugin for testing, allowing custom headers and response bodies.
 - **grpc_web**: Support for handling gRPC-Web requests.
 - **ip_restriction**: IP-based access control.
-- **limit_count**: Rate limiting with customizable policies.
-- **prometheus**: Metrics exposure for monitoring API gateway performance and health.
-- **proxy_rewrite**: Dynamic modification of request/response proxying rules.
+- **limit_count**: Rate limiting based on request count.
+- **prometheus**: Exposes API monitoring metrics.
+- **proxy_rewrite**: Supports dynamic modification of proxy request/response rules.
+- **redirect**: Allows redirecting requests to a specified URL.
 
-## Configuration
+## Configuration Example
 
-PingSIX now supports YAML-based configuration inspired by the APISIX model. It includes support for global rules, services, and upstream configurations. Below is an example configuration:
+PingSIX uses a YAML configuration format, supporting global rules, services, and upstream configurations. Example:
 
 ```yaml
 pingora:
@@ -107,7 +108,28 @@ global_rules:
       prometheus: {}
 ```
 
-## Usage
+## etcd Admin API
+
+If etcd is enabled as a dynamic configuration store, PingSIX supports resource management using the Admin API, fully compatible with APISIX Admin API.
+
+Example:
+
+**Create a Route**
+```bash
+curl http://127.0.0.1:8082/apisix/admin/routes/1 \
+     -H "X-API-KEY: pingsix" \
+     -X PUT -d '{
+       "uri": "/test",
+       "upstream": {
+         "type": "roundrobin",
+         "nodes": { "httpbin.org": 1 }
+       }
+     }'
+```
+
+For more API details, refer to [APISIX Admin API documentation](https://apisix.apache.org/docs/apisix/admin-api/).
+
+## Running PingSIX
 
 Run PingSIX with the configuration file:
 
@@ -115,9 +137,7 @@ Run PingSIX with the configuration file:
 cargo run -- -c config.yaml
 ```
 
-This will start the API gateway with the specified settings.
-
-## Installation
+## Installation Guide
 
 1. Clone the repository:
    ```bash
@@ -135,12 +155,12 @@ This will start the API gateway with the specified settings.
 
 ## Observability
 
-- **Prometheus Metrics**: Exposes metrics at `0.0.0.0:8081` (configurable).
-- **Sentry Integration**: Tracks errors and performance metrics using Sentry.
+- **Prometheus Metrics**: Exposes API monitoring data at `0.0.0.0:8081` (configurable).
+- **Sentry Tracking**: Integrates with Sentry for error analysis and performance monitoring.
 
 ## Extensibility
 
-PingSIX is designed with extensibility in mind. Its plugin system allows developers to use built-in plugins or create custom ones to suit specific requirements.
+PingSIX is designed with a flexible plugin system, allowing developers to use built-in plugins or create custom ones to meet specific requirements.
 
 ## License
 
@@ -148,8 +168,8 @@ PingSIX is licensed under the Apache License 2.0. See [LICENSE](./LICENSE) for d
 
 ## Contributing
 
-Contributions are welcome! Please submit a pull request or open an issue for discussions or suggestions.
+Contributions are welcome! Please submit a PR or open an issue for discussions or suggestions.
 
 ## Acknowledgments
 
-This project is inspired by [Cloudflare Pingora](https://github.com/cloudflare/pingora) and [APISIX](https://apisix.apache.org/).
+This project is inspired by [Cloudflare Pingora](https://github.com/cloudflare/pingora) and [APISIX](https://apisix.apache.org/), with gratitude for their excellent open-source contributions.
