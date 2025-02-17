@@ -13,13 +13,9 @@ use std::{
 };
 
 use dashmap::DashMap;
-use pingora_http::RequestHeader;
-use pingora_proxy::Session;
 
 use plugin::ProxyPluginExecutor;
 use route::ProxyRoute;
-
-use crate::config;
 
 /// Proxy context.
 ///
@@ -44,110 +40,6 @@ impl Default for ProxyContext {
             vars: HashMap::new(),
         }
     }
-}
-
-/// Build request selector key.
-pub fn request_selector_key(
-    session: &mut Session,
-    hash_on: &config::UpstreamHashOn,
-    key: &str,
-) -> String {
-    match hash_on {
-        config::UpstreamHashOn::VARS => handle_vars(session, key),
-        config::UpstreamHashOn::HEAD => get_req_header_value(session.req_header(), key)
-            .unwrap_or_default()
-            .to_string(),
-        config::UpstreamHashOn::COOKIE => get_cookie_value(session.req_header(), key)
-            .unwrap_or_default()
-            .to_string(),
-    }
-}
-
-/// Handles variable-based request selection.
-fn handle_vars(session: &mut Session, key: &str) -> String {
-    if key.starts_with("arg_") {
-        if let Some(name) = key.strip_prefix("arg_") {
-            return get_query_value(session.req_header(), name)
-                .unwrap_or_default()
-                .to_string();
-        }
-    }
-
-    match key {
-        "uri" => session.req_header().uri.path().to_string(),
-        "request_uri" => session
-            .req_header()
-            .uri
-            .path_and_query()
-            .map_or_else(|| "".to_string(), |pq| pq.to_string()),
-        "query_string" => session
-            .req_header()
-            .uri
-            .query()
-            .unwrap_or_default()
-            .to_string(),
-        "remote_addr" => session
-            .client_addr()
-            .map_or_else(|| "".to_string(), |addr| addr.to_string()),
-        "remote_port" => session
-            .client_addr()
-            .and_then(|s| s.as_inet())
-            .map_or_else(|| "".to_string(), |i| i.port().to_string()),
-        "server_addr" => session
-            .server_addr()
-            .map_or_else(|| "".to_string(), |addr| addr.to_string()),
-        _ => "".to_string(),
-    }
-}
-
-fn get_query_value<'a>(req_header: &'a RequestHeader, name: &str) -> Option<&'a str> {
-    if let Some(query) = req_header.uri.query() {
-        for item in query.split('&') {
-            if let Some((k, v)) = item.split_once('=') {
-                if k == name {
-                    return Some(v.trim());
-                }
-            }
-        }
-    }
-    None
-}
-
-fn get_req_header_value<'a>(req_header: &'a RequestHeader, key: &str) -> Option<&'a str> {
-    if let Some(value) = req_header.headers.get(key) {
-        if let Ok(value) = value.to_str() {
-            return Some(value);
-        }
-    }
-    None
-}
-
-fn get_cookie_value<'a>(req_header: &'a RequestHeader, cookie_name: &str) -> Option<&'a str> {
-    if let Some(cookie_value) = get_req_header_value(req_header, "Cookie") {
-        for item in cookie_value.split(';') {
-            if let Some((k, v)) = item.split_once('=') {
-                if k == cookie_name {
-                    return Some(v.trim());
-                }
-            }
-        }
-    }
-
-    log::warn!("Cookie '{}' not found or malformed.", cookie_name);
-    None
-}
-
-/// Retrieves the request host from the request header.
-pub fn get_request_host(header: &RequestHeader) -> Option<&str> {
-    if let Some(host) = header.uri.host() {
-        return Some(host);
-    }
-    if let Some(host) = header.headers.get(http::header::HOST) {
-        if let Ok(value) = host.to_str().map(|host| host.split(':').next()) {
-            return value;
-        }
-    }
-    None
 }
 
 pub trait Identifiable {

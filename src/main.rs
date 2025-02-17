@@ -3,6 +3,7 @@ mod admin;
 mod config;
 mod proxy;
 mod service;
+mod utils;
 
 use pingora::services::{background::background_service, listening::Service};
 use pingora_core::{

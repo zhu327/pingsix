@@ -10,7 +10,7 @@ use prometheus::{
 };
 use serde_yaml::Value as YamlValue;
 
-use crate::proxy::{get_request_host, ProxyContext};
+use crate::{proxy::ProxyContext, utils::request::get_request_host};
 
 use super::ProxyPlugin;
 

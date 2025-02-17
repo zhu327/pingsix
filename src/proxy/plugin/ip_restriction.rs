@@ -1,9 +1,8 @@
-use std::{net::IpAddr, str::FromStr, sync::Arc};
+use std::{net::IpAddr, sync::Arc};
 
 use async_trait::async_trait;
-use http::{header, HeaderName, StatusCode};
+use http::{header, StatusCode};
 use ipnetwork::IpNetwork;
-use once_cell::sync::Lazy;
 use pingora_error::{ErrorType::ReadError, OrErr, Result};
 use pingora_http::ResponseHeader;
 use pingora_proxy::Session;
@@ -11,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_yaml::Value as YamlValue;
 
 use crate::proxy::ProxyContext;
+use crate::utils::request::get_client_ip;
 
 use super::ProxyPlugin;
 
@@ -104,41 +104,4 @@ impl PluginIPRestriction {
 
         Ok(true)
     }
-}
-
-static HTTP_HEADER_X_FORWARDED_FOR: Lazy<http::HeaderName> =
-    Lazy::new(|| HeaderName::from_str("X-Forwarded-For").unwrap());
-
-static HTTP_HEADER_X_REAL_IP: Lazy<http::HeaderName> =
-    Lazy::new(|| HeaderName::from_str("X-Real-Ip").unwrap());
-
-/// Get remote address from session.
-fn get_remote_addr(session: &Session) -> Option<(String, u16)> {
-    session
-        .client_addr()
-        .and_then(|addr| addr.as_inet())
-        .map(|addr| (addr.ip().to_string(), addr.port()))
-}
-
-/// Gets client IP from `X-Forwarded-For`, `X-Real-IP`, or remote address.
-fn get_client_ip(session: &Session) -> String {
-    if let Some(value) = session.get_header(HTTP_HEADER_X_FORWARDED_FOR.clone()) {
-        if let Ok(forwarded) = value.to_str() {
-            if let Some(ip) = forwarded.split(',').next() {
-                return ip.trim().to_string();
-            }
-        }
-    }
-
-    if let Some(value) = session.get_header(HTTP_HEADER_X_REAL_IP.clone()) {
-        if let Ok(real_ip) = value.to_str() {
-            return real_ip.trim().to_string();
-        }
-    }
-
-    if let Some((addr, _)) = get_remote_addr(session) {
-        return addr;
-    }
-
-    "".to_string()
 }

@@ -19,9 +19,9 @@ use pingora_proxy::Session;
 use pingora_runtime::Runtime;
 use tokio::sync::watch;
 
-use crate::config;
+use crate::{config, utils::request::request_selector_key};
 
-use super::{discovery::HybridDiscovery, request_selector_key, Identifiable, MapOperations};
+use super::{discovery::HybridDiscovery, Identifiable, MapOperations};
 
 /// Proxy load balancer.
 ///

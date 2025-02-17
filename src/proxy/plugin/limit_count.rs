@@ -9,10 +9,7 @@ use pingora_proxy::Session;
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value as YamlValue;
 
-use crate::{
-    config::UpstreamHashOn,
-    proxy::{request_selector_key, ProxyContext},
-};
+use crate::{config::UpstreamHashOn, proxy::ProxyContext, utils::request::request_selector_key};
 
 use super::ProxyPlugin;
 

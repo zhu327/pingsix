@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_yaml::Value as YamlValue;
 use validator::{Validate, ValidationError};
 
-use crate::proxy::{get_request_host, ProxyContext};
+use crate::{proxy::ProxyContext, utils::request::get_request_host};
 
 use super::{apply_regex_uri_template, ProxyPlugin};
 
