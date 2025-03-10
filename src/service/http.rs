@@ -69,7 +69,12 @@ impl ProxyHttp for HttpService {
         }
 
         // execute global rule plugins
-        if global_plugin_fetch().request_filter(session, ctx).await? {
+        if ctx
+            .global_plugin
+            .clone()
+            .request_filter(session, ctx)
+            .await?
+        {
             return Ok(true);
         };
 
@@ -84,10 +89,13 @@ impl ProxyHttp for HttpService {
             ctx.route_params = Some(route_params);
             ctx.route = Some(route.clone());
             ctx.plugin = build_plugin_executor(route);
+
+            ctx.global_plugin = global_plugin_fetch();
         }
 
         // execute global rule plugins
-        global_plugin_fetch()
+        ctx.global_plugin
+            .clone()
             .early_request_filter(session, ctx)
             .await?;
 
@@ -103,7 +111,8 @@ impl ProxyHttp for HttpService {
         ctx: &mut Self::CTX,
     ) -> Result<()> {
         // execute global rule plugins
-        global_plugin_fetch()
+        ctx.global_plugin
+            .clone()
             .upstream_request_filter(session, upstream_request, ctx)
             .await?;
 
@@ -127,7 +136,8 @@ impl ProxyHttp for HttpService {
         ctx: &mut Self::CTX,
     ) -> Result<()> {
         // execute global rule plugins
-        global_plugin_fetch()
+        ctx.global_plugin
+            .clone()
             .response_filter(session, upstream_response, ctx)
             .await?;
 
@@ -146,7 +156,9 @@ impl ProxyHttp for HttpService {
         ctx: &mut Self::CTX,
     ) -> Result<Option<Duration>> {
         // execute global rule plugins
-        global_plugin_fetch().response_body_filter(session, body, end_of_stream, ctx)?;
+        ctx.global_plugin
+            .clone()
+            .response_body_filter(session, body, end_of_stream, ctx)?;
 
         // execute plugins
         ctx.plugin
@@ -157,7 +169,7 @@ impl ProxyHttp for HttpService {
 
     async fn logging(&self, session: &mut Session, e: Option<&Error>, ctx: &mut Self::CTX) {
         // execute global rule plugins
-        global_plugin_fetch().logging(session, e, ctx).await;
+        ctx.global_plugin.clone().logging(session, e, ctx).await;
 
         // execute plugins
         ctx.plugin.clone().logging(session, e, ctx).await;

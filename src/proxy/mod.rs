@@ -26,6 +26,7 @@ pub struct ProxyContext {
     pub tries: usize,
     pub request_start: Instant,
     pub plugin: Arc<ProxyPluginExecutor>,
+    pub global_plugin: Arc<ProxyPluginExecutor>,
     pub vars: HashMap<String, String>,
 }
 
@@ -37,6 +38,7 @@ impl Default for ProxyContext {
             tries: 0,
             request_start: Instant::now(),
             plugin: Arc::new(ProxyPluginExecutor::default()),
+            global_plugin: Arc::new(ProxyPluginExecutor::default()),
             vars: HashMap::new(),
         }
     }
