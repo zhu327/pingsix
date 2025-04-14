@@ -4,6 +4,7 @@ pub mod global_rule;
 pub mod plugin;
 pub mod route;
 pub mod service;
+pub mod ssl;
 pub mod upstream;
 
 use std::{

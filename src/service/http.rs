@@ -15,7 +15,7 @@ use pingora_proxy::{ProxyHttp, Session};
 use crate::proxy::{
     global_rule::global_plugin_fetch,
     plugin::{build_plugin_executor, ProxyPlugin},
-    route::global_match_fetch,
+    route::global_route_match_fetch,
     ProxyContext,
 };
 
@@ -34,20 +34,6 @@ impl ProxyHttp for HttpService {
         Self::CTX::default()
     }
 
-    /// Selects an upstream peer for the request
-    async fn upstream_peer(
-        &self,
-        session: &mut Session,
-        ctx: &mut Self::CTX,
-    ) -> Result<Box<HttpPeer>> {
-        let peer = ctx.route.as_ref().unwrap().select_http_peer(session);
-        if let Ok(ref peer) = peer {
-            ctx.vars
-                .insert("upstream".to_string(), peer._address.to_string());
-        }
-        peer
-    }
-
     /// Set up downstream modules.
     ///
     /// set up [ResponseCompressionBuilder] for gzip and brotli compression.
@@ -57,6 +43,27 @@ impl ProxyHttp for HttpService {
         modules.add_module(ResponseCompressionBuilder::enable(0));
         // Add the gRPC web module
         modules.add_module(Box::new(GrpcWeb));
+    }
+
+    /// Handle the incoming request before any downstream module is executed.
+    async fn early_request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<()> {
+        // Match request to pipeline
+        if let Some((route_params, route)) = global_route_match_fetch().match_request(session) {
+            ctx.route_params = Some(route_params);
+            ctx.route = Some(route.clone());
+            ctx.plugin = build_plugin_executor(route);
+
+            ctx.global_plugin = global_plugin_fetch();
+        }
+
+        // execute global rule plugins
+        ctx.global_plugin
+            .clone()
+            .early_request_filter(session, ctx)
+            .await?;
+
+        // execute plugins
+        ctx.plugin.clone().early_request_filter(session, ctx).await
     }
 
     /// Filters incoming requests
@@ -82,25 +89,18 @@ impl ProxyHttp for HttpService {
         ctx.plugin.clone().request_filter(session, ctx).await
     }
 
-    /// Handle the incoming request before any downstream module is executed.
-    async fn early_request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<()> {
-        // Match request to pipeline
-        if let Some((route_params, route)) = global_match_fetch().match_request(session) {
-            ctx.route_params = Some(route_params);
-            ctx.route = Some(route.clone());
-            ctx.plugin = build_plugin_executor(route);
-
-            ctx.global_plugin = global_plugin_fetch();
+    /// Selects an upstream peer for the request
+    async fn upstream_peer(
+        &self,
+        session: &mut Session,
+        ctx: &mut Self::CTX,
+    ) -> Result<Box<HttpPeer>> {
+        let peer = ctx.route.as_ref().unwrap().select_http_peer(session);
+        if let Ok(ref peer) = peer {
+            ctx.vars
+                .insert("upstream".to_string(), peer._address.to_string());
         }
-
-        // execute global rule plugins
-        ctx.global_plugin
-            .clone()
-            .early_request_filter(session, ctx)
-            .await?;
-
-        // execute plugins
-        ctx.plugin.clone().early_request_filter(session, ctx).await
+        peer
     }
 
     // Modify the request before it is sent to the upstream

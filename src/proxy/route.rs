@@ -268,14 +268,14 @@ impl MatchEntry {
 
 /// Global map to store global rules, initialized lazily.
 pub static ROUTE_MAP: Lazy<DashMap<String, Arc<ProxyRoute>>> = Lazy::new(DashMap::new);
-static GLOBAL_MATCH: Lazy<ArcSwap<MatchEntry>> =
+static GLOBAL_ROUTE_MATCH: Lazy<ArcSwap<MatchEntry>> =
     Lazy::new(|| ArcSwap::new(Arc::new(MatchEntry::default())));
 
-pub fn global_match_fetch() -> Arc<MatchEntry> {
-    GLOBAL_MATCH.load().clone()
+pub fn global_route_match_fetch() -> Arc<MatchEntry> {
+    GLOBAL_ROUTE_MATCH.load().clone()
 }
 
-pub fn reload_global_match() {
+pub fn reload_global_route_match() {
     let mut matcher = MatchEntry::default();
 
     for route in ROUTE_MAP.iter() {
@@ -283,7 +283,7 @@ pub fn reload_global_match() {
         matcher.insert_route(route.clone()).unwrap();
     }
 
-    GLOBAL_MATCH.store(Arc::new(matcher));
+    GLOBAL_ROUTE_MATCH.store(Arc::new(matcher));
 }
 
 /// Loads routes from the given configuration.
@@ -308,7 +308,7 @@ pub fn load_static_routes(config: &config::Config) -> Result<()> {
 
     ROUTE_MAP.reload_resource(proxy_routes);
 
-    reload_global_match();
+    reload_global_route_match();
 
     Ok(())
 }

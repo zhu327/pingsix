@@ -31,6 +31,9 @@ pub struct Config {
     #[validate(nested)]
     #[serde(default)]
     pub global_rules: Vec<GlobalRule>,
+    #[validate(nested)]
+    #[serde(default)]
+    pub ssls: Vec<SSL>,
 }
 
 // Config file load and validation
@@ -491,6 +494,16 @@ pub struct GlobalRule {
     pub id: String,
     #[serde(default)]
     pub plugins: HashMap<String, YamlValue>,
+}
+
+#[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
+pub struct SSL {
+    #[serde(default)]
+    pub id: String,
+    pub cert: String,
+    pub key: String,
+    #[validate(length(min = 1))]
+    pub snis: Vec<String>,
 }
 
 #[cfg(test)]

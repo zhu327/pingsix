@@ -5,6 +5,8 @@ mod proxy;
 mod service;
 mod utils;
 
+use std::ops::DerefMut;
+
 use pingora::services::{background::background_service, listening::Service};
 use pingora_core::{
     apps::HttpServerOptions,
@@ -15,10 +17,14 @@ use pingora_proxy::{http_proxy_service_with_name, HttpProxy};
 use sentry::IntoDsn;
 
 use admin::AdminHttpApp;
-use config::{etcd::EtcdConfigSync, Config, Tls};
+use config::{etcd::EtcdConfigSync, Config};
 use proxy::{
-    event::ProxyEventHandler, global_rule::load_static_global_rules, route::load_static_routes,
-    service::load_static_services, upstream::load_static_upstreams,
+    event::ProxyEventHandler,
+    global_rule::load_static_global_rules,
+    route::load_static_routes,
+    service::load_static_services,
+    ssl::{load_static_ssls, DynamicCert},
+    upstream::load_static_upstreams,
 };
 use service::http::HttpService;
 
@@ -44,6 +50,7 @@ fn main() {
         load_static_services(&config).expect("Failed to load static services");
         load_static_global_rules(&config).expect("Failed to load static global rules");
         load_static_routes(&config).expect("Failed to load  static routes");
+        load_static_ssls(&config).expect("Failed to load  static ssls");
         None
     };
 
@@ -81,18 +88,22 @@ fn main() {
 // 添加监听器的辅助函数
 fn add_listeners(http_service: &mut Service<HttpProxy<HttpService>>, cfg: &config::Pingsix) {
     for list_cfg in cfg.listeners.iter() {
-        if let Some(Tls {
-            cert_path,
-            key_path,
-        }) = &list_cfg.tls
-        {
+        if let Some(tls) = &list_cfg.tls {
             // ... TLS 配置
-            let mut settings = TlsSettings::intermediate(cert_path, key_path)
-                .expect("Adding TLS listener shouldn't fail");
+            let dynamic_cert = DynamicCert::new(tls);
+            let mut tls_settings = TlsSettings::with_callbacks(dynamic_cert)
+                .expect("Init dynamic cert shouldn't fail");
+
+            tls_settings
+                .deref_mut()
+                .deref_mut()
+                .set_max_proto_version(Some(pingora::tls::ssl::SslVersion::TLS1_2))
+                .expect("Init dynamic cert shouldn't fail");
+
             if list_cfg.offer_h2 {
-                settings.enable_h2();
+                tls_settings.enable_h2();
             }
-            http_service.add_tls_with_settings(&list_cfg.address.to_string(), None, settings);
+            http_service.add_tls_with_settings(&list_cfg.address.to_string(), None, tls_settings);
         } else {
             // 无 TLS
             if list_cfg.offer_h2c {

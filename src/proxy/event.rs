@@ -4,13 +4,14 @@ use etcd_client::{Event, GetResponse};
 
 use crate::config::{
     etcd::{json_to_resource, EtcdEventHandler},
-    GlobalRule, Route, Service, Upstream,
+    GlobalRule, Route, Service, Upstream, SSL,
 };
 
 use super::{
     global_rule::{global_rule_fetch, reload_global_plugin, ProxyGlobalRule, GLOBAL_RULE_MAP},
-    route::{reload_global_match, route_fetch, ProxyRoute, ROUTE_MAP},
+    route::{reload_global_route_match, route_fetch, ProxyRoute, ROUTE_MAP},
     service::{service_fetch, ProxyService, SERVICE_MAP},
+    ssl::{reload_global_ssl_match, ssl_fetch, ProxySSL, SSL_MAP},
     upstream::{upstream_fetch, ProxyUpstream, UPSTREAM_MAP},
     Identifiable, MapOperations,
 };
@@ -65,7 +66,7 @@ impl ProxyEventHandler {
             .collect();
 
         ROUTE_MAP.reload_resource(proxy_routes);
-        reload_global_match();
+        reload_global_route_match();
     }
 
     fn handle_upstreams(&self, response: &GetResponse) {
@@ -189,6 +190,48 @@ impl ProxyEventHandler {
         reload_global_plugin();
     }
 
+    fn handle_ssls(&self, response: &GetResponse) {
+        let ssls: Vec<SSL> = response
+            .kvs()
+            .iter()
+            .filter_map(|kv| match parse_key(kv.key()) {
+                Ok((id, key_type)) if key_type == "ssls" => {
+                    match json_to_resource::<SSL>(kv.value()) {
+                        Ok(mut ssl) => {
+                            ssl.id = id;
+                            Some(ssl)
+                        }
+                        Err(e) => {
+                            log::error!("Failed to load etcd SSL: {} {}", id, e);
+                            None
+                        }
+                    }
+                }
+                _ => None,
+            })
+            .collect();
+
+        let proxy_ssls: Vec<Arc<ProxySSL>> = ssls
+            .iter()
+            .map(|ssl| {
+                // 尝试从缓存或其他地方获取现有的 ProxyRoute
+                if let Some(proxy_ssl) = ssl_fetch(&ssl.id) {
+                    if proxy_ssl.inner == *ssl {
+                        return proxy_ssl; // 如果已经有匹配的ProxyRoute则直接返回
+                    }
+                }
+
+                log::info!("Configuring SSL: {}", ssl.id);
+
+                // 创建新的 ProxySSL
+                Arc::new(ProxySSL::from(ssl.clone()))
+            })
+            .collect();
+
+        SSL_MAP.reload_resource(proxy_ssls);
+        reload_global_ssl_match();
+    }
+
     // 通用的资源处理函数
     fn handle_resource<T, F>(&self, event: &Event, key_type: &str, handler: F)
     where
@@ -224,7 +267,7 @@ impl ProxyEventHandler {
             {
                 proxy_route.set_id(id);
                 ROUTE_MAP.insert_resource(Arc::new(proxy_route));
-                reload_global_match();
+                reload_global_route_match();
             }
         });
     }
@@ -260,6 +303,16 @@ impl ProxyEventHandler {
             }
         });
     }
+
+    fn handle_ssl_event(&self, event: &Event) {
+        self.handle_resource::<SSL, _>(event, "ssls", |_handler, id, ssl| {
+            let mut proxy_ssl = ProxySSL::from(ssl.clone());
+
+            proxy_ssl.set_id(id);
+            SSL_MAP.insert_resource(Arc::new(proxy_ssl));
+            reload_global_ssl_match();
+        });
+    }
 }
 
 impl EtcdEventHandler for ProxyEventHandler {
@@ -285,6 +338,9 @@ impl EtcdEventHandler for ProxyEventHandler {
                     "global_rules" => {
                         self.handle_global_rule_event(event);
                     }
+                    "ssls" => {
+                        self.handle_ssl_event(event);
+                    }
                     _ => {
                         log::warn!("Unhandled PUT event for key type: {}", key_type);
                     }
@@ -303,7 +359,7 @@ impl EtcdEventHandler for ProxyEventHandler {
                                 log::info!("DELETE Route: {}", id);
                                 // Handle the removal of a route
                                 ROUTE_MAP.remove(&id);
-                                reload_global_match();
+                                reload_global_route_match();
                             }
                             "upstreams" => {
                                 log::info!("DELETE Upstream: {}", id);
@@ -320,6 +376,12 @@ impl EtcdEventHandler for ProxyEventHandler {
                                 // Handle the removal of a global rule
                                 GLOBAL_RULE_MAP.remove(&id);
                                 reload_global_plugin();
+                            }
+                            "ssls" => {
+                                log::info!("DELETE SSL: {}", id);
+                                // Handle the removal of a route
+                                SSL_MAP.remove(&id);
+                                reload_global_ssl_match();
                             }
                             _ => {
                                 log::warn!("Unhandled DELETE event for key type: {}", key_type);
@@ -339,6 +401,7 @@ impl EtcdEventHandler for ProxyEventHandler {
         self.handle_services(response);
         self.handle_routes(response);
         self.handle_global_rules(response);
+        self.handle_ssls(response);
     }
 }
 
