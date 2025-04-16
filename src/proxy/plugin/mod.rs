@@ -3,6 +3,7 @@ pub mod echo;
 pub mod grpc_web;
 pub mod gzip;
 pub mod ip_restriction;
+pub mod key_auth;
 pub mod limit_count;
 pub mod prometheus;
 pub mod proxy_rewrite;
@@ -47,6 +48,10 @@ static PLUGIN_BUILDER_REGISTRY: Lazy<HashMap<&'static str, PluginCreateFn>> = La
         (
             proxy_rewrite::PLUGIN_NAME, // 1008
             proxy_rewrite::create_proxy_rewrite_plugin,
+        ),
+        (
+            key_auth::PLUGIN_NAME, // 2500
+            key_auth::create_key_auth_plugin,
         ),
         (
             ip_restriction::PLUGIN_NAME, // 3000

@@ -57,7 +57,7 @@ fn handle_vars(session: &mut Session, key: &str) -> String {
     }
 }
 
-fn get_query_value<'a>(req_header: &'a RequestHeader, name: &str) -> Option<&'a str> {
+pub fn get_query_value<'a>(req_header: &'a RequestHeader, name: &str) -> Option<&'a str> {
     if let Some(query) = req_header.uri.query() {
         for item in query.split('&') {
             if let Some((k, v)) = item.split_once('=') {
@@ -70,7 +70,43 @@ fn get_query_value<'a>(req_header: &'a RequestHeader, name: &str) -> Option<&'a 
     None
 }
 
-fn get_req_header_value<'a>(req_header: &'a RequestHeader, key: &str) -> Option<&'a str> {
+/// Remove query parameter from request header URI
+///
+/// # Arguments
+/// * `req_header` - The HTTP request header to modify
+/// * `name` - Name of the query parameter to remove
+///
+/// # Returns
+/// Result indicating success or failure of the URI modification
+pub fn remove_query_from_header(
+    req_header: &mut RequestHeader,
+    name: &str,
+) -> Result<(), http::uri::InvalidUri> {
+    if let Some(query) = req_header.uri.query() {
+        let mut query_list = vec![];
+        for item in query.split('&') {
+            if let Some((k, v)) = item.split_once('=') {
+                if k != name {
+                    query_list.push(format!("{k}={v}"));
+                }
+            } else if item != name {
+                query_list.push(item.to_string());
+            }
+        }
+        let query = query_list.join("&");
+        let mut new_path = req_header.uri.path().to_string();
+        if !query.is_empty() {
+            new_path = format!("{new_path}?{query}");
+        }
+        return new_path
+            .parse::<http::Uri>()
+            .map(|uri| req_header.set_uri(uri));
+    }
+
+    Ok(())
+}
+
+pub fn get_req_header_value<'a>(req_header: &'a RequestHeader, key: &str) -> Option<&'a str> {
     if let Some(value) = req_header.headers.get(key) {
         if let Ok(value) = value.to_str() {
             return Some(value);

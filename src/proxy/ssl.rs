@@ -142,14 +142,18 @@ pub struct DynamicCert {
 
 impl DynamicCert {
     pub fn new(tls: &config::Tls) -> Box<Self> {
-        let cert_bytes = std::fs::read(tls.cert_path.clone()).unwrap();
-        let key_bytes = std::fs::read(tls.key_path.clone()).unwrap();
+        let cert_bytes =
+            std::fs::read(tls.cert_path.clone()).expect("Failed to read TLS certificate file");
+        let key_bytes =
+            std::fs::read(tls.key_path.clone()).expect("Failed to read TLS private key file");
 
         Box::new(Self {
             default: Arc::new(ProxySSL::from(config::SSL {
                 id: String::new(),
-                cert: String::from_utf8(cert_bytes).unwrap(),
-                key: String::from_utf8(key_bytes).unwrap(),
+                cert: String::from_utf8(cert_bytes)
+                    .expect("Failed to convert certificate bytes to UTF-8 string"),
+                key: String::from_utf8(key_bytes)
+                    .expect("Failed to convert private key bytes to UTF-8 string"),
                 snis: Vec::new(),
             })),
         })
