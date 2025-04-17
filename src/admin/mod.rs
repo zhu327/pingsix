@@ -19,7 +19,7 @@ use crate::{
         etcd::{json_to_resource, EtcdClientWrapper},
         Admin, Pingsix,
     },
-    proxy::plugin::build_plugin,
+    plugin::build_plugin,
 };
 
 #[derive(Debug)]

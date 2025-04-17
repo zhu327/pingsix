@@ -1,7 +1,6 @@
 pub mod discovery;
 pub mod event;
 pub mod global_rule;
-pub mod plugin;
 pub mod route;
 pub mod service;
 pub mod ssl;
@@ -15,7 +14,8 @@ use std::{
 
 use dashmap::DashMap;
 
-use plugin::ProxyPluginExecutor;
+use crate::plugin::ProxyPluginExecutor;
+
 use route::ProxyRoute;
 
 /// Proxy context.

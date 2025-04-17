@@ -62,7 +62,7 @@ pub struct MatchEntry {
 
 impl MatchEntry {
     /// Inserts a ssl into the match entry.
-    pub fn insert_ssl(&mut self, proxy_ssl: Arc<ProxySSL>) -> Result<(), InsertError> {
+    fn insert_ssl(&mut self, proxy_ssl: Arc<ProxySSL>) -> Result<(), InsertError> {
         let snis = proxy_ssl.get_snis();
 
         // Insert for host URIs
@@ -75,7 +75,7 @@ impl MatchEntry {
     }
 
     /// Matches a sni to a ssl.
-    pub fn match_sni(&self, sni: String) -> Option<Arc<ProxySSL>> {
+    fn match_sni(&self, sni: String) -> Option<Arc<ProxySSL>> {
         let reversed_sni = sni.chars().rev().collect::<String>();
 
         log::debug!("match sni: sni={:?}", sni,);

@@ -21,7 +21,7 @@ use pingora_proxy::Session;
 use regex::Regex;
 use serde_yaml::Value as YamlValue;
 
-use super::{route::ProxyRoute, service::service_fetch, ProxyContext};
+use crate::proxy::{route::ProxyRoute, service::service_fetch, ProxyContext};
 
 /// Type alias for plugin initialization functions
 pub type PluginCreateFn = fn(YamlValue) -> Result<Arc<dyn ProxyPlugin>>;

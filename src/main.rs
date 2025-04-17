@@ -1,6 +1,7 @@
 #![allow(clippy::upper_case_acronyms)]
 mod admin;
 mod config;
+mod plugin;
 mod proxy;
 mod service;
 mod utils;

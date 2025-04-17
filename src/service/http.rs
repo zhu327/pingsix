@@ -12,11 +12,9 @@ use pingora_error::{Error, Result};
 use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_proxy::{ProxyHttp, Session};
 
-use crate::proxy::{
-    global_rule::global_plugin_fetch,
+use crate::{
     plugin::{build_plugin_executor, ProxyPlugin},
-    route::global_route_match_fetch,
-    ProxyContext,
+    proxy::{global_rule::global_plugin_fetch, route::global_route_match_fetch, ProxyContext},
 };
 
 /// Proxy service.

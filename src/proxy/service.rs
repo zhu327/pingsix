@@ -4,10 +4,12 @@ use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use pingora_error::Result;
 
-use crate::config;
+use crate::{
+    config,
+    plugin::{build_plugin, ProxyPlugin},
+};
 
 use super::{
-    plugin::{build_plugin, ProxyPlugin},
     upstream::{upstream_fetch, ProxyUpstream},
     Identifiable, MapOperations,
 };

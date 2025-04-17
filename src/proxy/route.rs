@@ -11,11 +11,13 @@ use pingora_core::upstreams::peer::HttpPeer;
 use pingora_error::{Error, Result};
 use pingora_proxy::Session;
 
-use crate::{config, utils::request::get_request_host};
+use crate::{
+    config,
+    plugin::{build_plugin, ProxyPlugin},
+    utils::request::get_request_host,
+};
 
 use super::{
-    plugin::build_plugin,
-    plugin::ProxyPlugin,
     service::service_fetch,
     upstream::{upstream_fetch, ProxyUpstream},
     Identifiable, MapOperations,

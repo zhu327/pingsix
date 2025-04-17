@@ -5,12 +5,12 @@ use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use pingora_error::Result;
 
-use crate::config;
-
-use super::{
+use crate::{
+    config,
     plugin::{build_plugin, ProxyPlugin, ProxyPluginExecutor},
-    Identifiable, MapOperations,
 };
+
+use super::{Identifiable, MapOperations};
 
 /// Represents a proxy service that manages upstreams.
 pub struct ProxyGlobalRule {
