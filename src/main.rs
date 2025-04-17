@@ -97,7 +97,7 @@ fn add_listeners(http_service: &mut Service<HttpProxy<HttpService>>, cfg: &confi
             tls_settings
                 .deref_mut()
                 .deref_mut()
-                .set_max_proto_version(Some(pingora::tls::ssl::SslVersion::TLS1_2))
+                .set_max_proto_version(Some(pingora::tls::ssl::SslVersion::TLS1_3))
                 .expect("Init dynamic cert shouldn't fail");
 
             if list_cfg.offer_h2 {

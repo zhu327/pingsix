@@ -350,6 +350,12 @@ fn validate_resource(resource_type: &str, body_data: &[u8]) -> ApiResult<()> {
             rule.validate()
                 .map_err(|e| ApiError::ValidationError(e.to_string()))
         }
+        "ssls" => {
+            let ssl = json_to_resource::<config::SSL>(body_data)
+                .map_err(|e| ApiError::InvalidRequest(format!("Invalid JSON data: {}", e)))?;
+            ssl.validate()
+                .map_err(|e| ApiError::ValidationError(e.to_string()))
+        }
         _ => Err(ApiError::InvalidRequest("Unsupported resource type".into())),
     }
 }
