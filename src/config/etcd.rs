@@ -2,7 +2,8 @@ use std::{error::Error, fmt, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use etcd_client::{Client, ConnectOptions, Event, GetOptions, GetResponse, WatchOptions};
-use pingora_core::{server::ShutdownWatch, services::background::BackgroundService};
+use pingora::server::ListenFds;
+use pingora_core::{server::ShutdownWatch, services::Service};
 use tokio::{sync::Mutex, time::sleep};
 
 use super::Etcd;
@@ -32,8 +33,8 @@ impl std::error::Error for EtcdError {}
 
 pub struct EtcdConfigSync {
     config: Etcd,
-    client: Arc<Mutex<Option<Client>>>,
-    revision: Arc<Mutex<i64>>,
+    client: Option<Client>,
+    revision: i64,
     handler: Box<dyn EtcdEventHandler + Send + Sync>,
 }
 
@@ -46,41 +47,35 @@ impl EtcdConfigSync {
 
         Self {
             config,
-            client: Arc::new(Mutex::new(None)),
-            revision: Arc::new(Mutex::new(0)),
+            client: None,
+            revision: 0,
             handler,
         }
     }
 
-    /// 获取初始化的 etcd 客户端
-    async fn get_client(&self) -> Result<Arc<Mutex<Option<Client>>>, EtcdError> {
-        let mut client_guard = self.client.lock().await;
-
-        if client_guard.is_none() {
+    /// 获取或初始化 etcd 客户端
+    async fn get_client(&mut self) -> Result<&mut Client, EtcdError> {
+        if self.client.is_none() {
             log::info!("Creating new etcd client...");
-            *client_guard = Some(create_client(&self.config).await?);
+            self.client = Some(create_client(&self.config).await?);
         }
 
-        Ok(self.client.clone())
+        self.client.as_mut().ok_or(EtcdError::ClientNotInitialized)
     }
 
     /// 初始化时同步 etcd 数据
-    async fn list(&self) -> Result<(), EtcdError> {
-        let client_arc = self.get_client().await?;
-        let mut client_guard = client_arc.lock().await;
-
-        let client = client_guard
-            .as_mut()
-            .ok_or(EtcdError::ClientNotInitialized)?;
+    async fn list(&mut self) -> Result<(), EtcdError> {
+        let prefix = self.config.prefix.clone(); // Clone prefix before mutable borrow
+        let client = self.get_client().await?;
 
         let options = GetOptions::new().with_prefix();
         let response = client
-            .get(self.config.prefix.as_str(), Some(options))
+            .get(prefix.as_str(), Some(options))
             .await
             .map_err(|e| EtcdError::ListOperationFailed(e.to_string()))?;
 
         if let Some(header) = response.header() {
-            *self.revision.lock().await = header.revision();
+            self.revision = header.revision();
         } else {
             return Err(EtcdError::Other(
                 "Failed to get header from response".to_string(),
@@ -92,21 +87,17 @@ impl EtcdConfigSync {
     }
 
     /// 监听 etcd 数据变更
-    async fn watch(&self) -> Result<(), EtcdError> {
-        let start_revision = *self.revision.lock().await + 1;
+    async fn watch(&mut self) -> Result<(), EtcdError> {
+        let prefix = self.config.prefix.clone(); // Clone prefix before mutable borrow
+        let start_revision = self.revision + 1;
         let options = WatchOptions::new()
             .with_start_revision(start_revision)
             .with_prefix();
 
-        let client_arc = self.get_client().await?;
-        let mut client_guard = client_arc.lock().await;
-
-        let client = client_guard
-            .as_mut()
-            .ok_or(EtcdError::ClientNotInitialized)?;
+        let client = self.get_client().await?;
 
         let (mut watcher, mut stream) = client
-            .watch(self.config.prefix.as_str(), Some(options))
+            .watch(prefix.as_str(), Some(options))
             .await
             .map_err(|e| EtcdError::WatchOperationFailed(e.to_string()))?;
 
@@ -130,13 +121,13 @@ impl EtcdConfigSync {
     }
 
     /// 重置客户端
-    async fn reset_client(&self) {
+    async fn reset_client(&mut self) {
         log::warn!("Resetting etcd client...");
-        *self.client.lock().await = None;
+        self.client = None;
     }
 
     /// 主任务循环
-    async fn run_sync_loop(&self, shutdown: &mut ShutdownWatch) {
+    async fn run_sync_loop(&mut self, mut shutdown: ShutdownWatch) {
         loop {
             tokio::select! {
                 biased; // 优先处理关闭信号
@@ -183,9 +174,17 @@ impl EtcdConfigSync {
 }
 
 #[async_trait]
-impl BackgroundService for EtcdConfigSync {
-    async fn start(&self, mut shutdown: ShutdownWatch) {
-        self.run_sync_loop(&mut shutdown).await;
+impl Service for EtcdConfigSync {
+    async fn start_service(&mut self, _fds: Option<ListenFds>, shutdown: ShutdownWatch) {
+        self.run_sync_loop(shutdown).await
+    }
+
+    fn name(&self) -> &'static str {
+        "etcd config sync"
+    }
+
+    fn threads(&self) -> Option<usize> {
+        Some(1)
     }
 }
 

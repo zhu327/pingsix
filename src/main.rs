@@ -1,6 +1,7 @@
 #![allow(clippy::upper_case_acronyms)]
 mod admin;
 mod config;
+mod logging;
 mod plugin;
 mod proxy;
 mod service;
@@ -8,7 +9,7 @@ mod utils;
 
 use std::ops::DerefMut;
 
-use pingora::services::{background::background_service, listening::Service};
+use pingora::services::listening::Service;
 use pingora_core::{
     apps::HttpServerOptions,
     listeners::tls::TlsSettings,
@@ -19,6 +20,7 @@ use sentry::IntoDsn;
 
 use admin::AdminHttpApp;
 use config::{etcd::EtcdConfigSync, Config};
+use logging::Logger;
 use proxy::{
     event::ProxyEventHandler,
     global_rule::load_static_global_rules,
@@ -30,12 +32,20 @@ use proxy::{
 use service::http::HttpService;
 
 fn main() {
-    env_logger::init();
-
     // 加载配置和命令行参数
     let cli_options = Opt::parse_args();
     let config =
         Config::load_yaml_with_opt_override(&cli_options).expect("Failed to load configuration");
+
+    // 初始化日志
+    let logger = if let Some(log_cfg) = &config.pingsix.log {
+        let logger = Logger::new(log_cfg.clone());
+        logger.init_env_logger();
+        Some(logger)
+    } else {
+        env_logger::init();
+        None
+    };
 
     // 配置同步
     let etcd_config = if let Some(etcd_cfg) = &config.pingsix.etcd {
@@ -58,6 +68,18 @@ fn main() {
     // 创建服务器实例
     let mut pingsix_server = Server::new_with_opt_and_conf(Some(cli_options), config.pingora);
 
+    // 添加日志服务
+    if let Some(log_service) = logger {
+        log::info!("Adding log sync service...");
+        pingsix_server.add_service(log_service);
+    }
+
+    // 添加 Etcd 配置同步服务
+    if let Some(etcd_sync) = etcd_config {
+        log::info!("Adding etcd config sync service...");
+        pingsix_server.add_service(etcd_sync);
+    }
+
     // 初始化 HTTP 服务
     let mut http_service =
         http_proxy_service_with_name(&pingsix_server.configuration, HttpService {}, "pingsix");
@@ -68,13 +90,6 @@ fn main() {
 
     // 添加扩展服务（如 Sentry 和 Prometheus, Admin）
     add_optional_services(&mut pingsix_server, &config.pingsix);
-
-    // 添加 Etcd 配置同步服务
-    if let Some(etcd_config) = etcd_config {
-        log::info!("Adding etcd config sync service...");
-        let etcd_service = background_service("etcd config sync", etcd_config);
-        pingsix_server.add_service(etcd_service);
-    }
 
     // 启动服务器
     log::info!("Bootstrapping...");

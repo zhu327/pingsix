@@ -125,6 +125,9 @@ pub struct Pingsix {
 
     #[validate(nested)]
     pub sentry: Option<Sentry>,
+
+    #[validate(nested)]
+    pub log: Option<Log>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Validate)]
@@ -136,6 +139,16 @@ pub struct Listener {
     pub offer_h2: bool,
     #[serde(default)]
     pub offer_h2c: bool,
+}
+
+impl Listener {
+    fn validate_tls_for_offer_h2(&self) -> Result<(), ValidationError> {
+        if self.offer_h2 && self.tls.is_none() {
+            Err(ValidationError::new("tls_required_for_h2"))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Validate)]
@@ -165,14 +178,9 @@ pub struct Sentry {
     pub dsn: String,
 }
 
-impl Listener {
-    fn validate_tls_for_offer_h2(&self) -> Result<(), ValidationError> {
-        if self.offer_h2 && self.tls.is_none() {
-            Err(ValidationError::new("tls_required_for_h2"))
-        } else {
-            Ok(())
-        }
-    }
+#[derive(Clone, Debug, Serialize, Deserialize, Validate)]
+pub struct Log {
+    pub access_log: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
