@@ -9,6 +9,7 @@ pub mod limit_count;
 pub mod prometheus;
 pub mod proxy_rewrite;
 pub mod redirect;
+pub mod request_id;
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -54,6 +55,10 @@ static PLUGIN_BUILDER_REGISTRY: Lazy<HashMap<&'static str, PluginCreateFn>> = La
             proxy_rewrite::PLUGIN_NAME, // 1008
             proxy_rewrite::create_proxy_rewrite_plugin,
         ),
+        (
+            request_id::PLUGIN_NAME,
+            request_id::create_request_id_plugin,
+        ), // 12015
         (
             key_auth::PLUGIN_NAME, // 2500
             key_auth::create_key_auth_plugin,

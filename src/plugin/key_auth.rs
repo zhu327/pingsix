@@ -23,7 +23,6 @@ pub fn create_key_auth_plugin(cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> {
 }
 
 /// Configuration for the Key Auth plugin.
-/// Specifies the response body and optional headers.
 #[derive(Default, Debug, Serialize, Deserialize)]
 struct PluginConfig {
     #[serde(default = "PluginConfig::default_header")]
@@ -49,7 +48,7 @@ impl PluginConfig {
     }
 }
 
-/// Echo plugin implementation.
+/// Key Auth plugin implementation.
 pub struct PluginKeyAuth {
     config: PluginConfig,
 }
