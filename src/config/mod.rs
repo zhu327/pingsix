@@ -180,7 +180,7 @@ pub struct Sentry {
 
 #[derive(Clone, Debug, Serialize, Deserialize, Validate)]
 pub struct Log {
-    pub access_log: String,
+    pub path: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

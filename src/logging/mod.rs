@@ -2,13 +2,14 @@ use std::io::{self, Write};
 
 use async_trait::async_trait;
 use env_logger::Builder;
+use log::LevelFilter;
 use pingora::{
     server::{ListenFds, ShutdownWatch},
     services::Service,
 };
 use tokio::{
-    fs::{create_dir_all, metadata, File},
-    io::AsyncWriteExt,
+    fs::{create_dir_all, metadata, OpenOptions},
+    io::{AsyncWriteExt, BufWriter},
     sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
 };
 
@@ -57,6 +58,7 @@ impl Logger {
     pub fn init_env_logger(&self) {
         let writer = self.create_async_writer();
         Builder::from_env(env_logger::Env::default())
+            .filter(None, LevelFilter::Info)
             .target(env_logger::Target::Pipe(Box::new(writer)))
             .init();
     }
@@ -65,7 +67,7 @@ impl Logger {
 #[async_trait]
 impl Service for Logger {
     async fn start_service(&mut self, _fds: Option<ListenFds>, mut shutdown: ShutdownWatch) {
-        let log_file_path = &self.config.access_log;
+        let log_file_path = &self.config.path;
 
         if let Some(parent) = std::path::Path::new(log_file_path).parent() {
             if metadata(parent).await.is_err() {
@@ -75,16 +77,15 @@ impl Service for Logger {
             }
         }
 
-        // Check if the file exists, create it if it doesn't
-        let mut file = if metadata(log_file_path).await.is_ok() {
-            File::open(log_file_path)
+        let mut file = BufWriter::new(
+            OpenOptions::new()
+                .write(true)
+                .append(true)
+                .create(true)
+                .open(log_file_path)
                 .await
-                .expect("Failed to open log file")
-        } else {
-            File::create(log_file_path)
-                .await
-                .expect("Failed to create log file")
-        };
+                .expect("Failed to open or create log file"),
+        );
 
         loop {
             tokio::select! {

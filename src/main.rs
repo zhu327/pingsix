@@ -48,7 +48,7 @@ fn main() {
     };
 
     // 配置同步
-    let etcd_config = if let Some(etcd_cfg) = &config.pingsix.etcd {
+    let etcd_sync = if let Some(etcd_cfg) = &config.pingsix.etcd {
         log::info!("Adding etcd config sync...");
         let event_handler = ProxyEventHandler::new(config.pingora.work_stealing);
         Some(EtcdConfigSync::new(
@@ -75,9 +75,9 @@ fn main() {
     }
 
     // 添加 Etcd 配置同步服务
-    if let Some(etcd_sync) = etcd_config {
+    if let Some(etcd_service) = etcd_sync {
         log::info!("Adding etcd config sync service...");
-        pingsix_server.add_service(etcd_sync);
+        pingsix_server.add_service(etcd_service);
     }
 
     // 初始化 HTTP 服务

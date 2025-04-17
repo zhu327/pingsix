@@ -1,5 +1,6 @@
 pub mod brotli;
 pub mod echo;
+pub mod file_logger;
 pub mod grpc_web;
 pub mod gzip;
 pub mod ip_restriction;
@@ -29,6 +30,10 @@ pub type PluginCreateFn = fn(YamlValue) -> Result<Arc<dyn ProxyPlugin>>;
 /// Registry of plugin builders
 static PLUGIN_BUILDER_REGISTRY: Lazy<HashMap<&'static str, PluginCreateFn>> = Lazy::new(|| {
     let arr: Vec<(&str, PluginCreateFn)> = vec![
+        (
+            file_logger::PLUGIN_NAME,
+            file_logger::create_file_logger_plugin,
+        ), // 399
         (echo::PLUGIN_NAME, echo::create_echo_plugin), // 412
         (
             prometheus::PLUGIN_NAME, // 500
