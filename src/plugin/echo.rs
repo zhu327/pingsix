@@ -50,7 +50,7 @@ impl ProxyPlugin for PluginEcho {
     }
 
     async fn request_filter(&self, session: &mut Session, _ctx: &mut ProxyContext) -> Result<bool> {
-        let mut resp = ResponseHeader::build(StatusCode::OK, Some(4))?;
+        let mut resp = ResponseHeader::build(StatusCode::OK, None)?;
 
         // Insert headers from the config
         for (k, v) in &self.config.headers {

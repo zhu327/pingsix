@@ -1,4 +1,5 @@
 pub mod brotli;
+pub mod cors;
 pub mod echo;
 pub mod file_logger;
 pub mod grpc_web;
@@ -67,6 +68,7 @@ static PLUGIN_BUILDER_REGISTRY: Lazy<HashMap<&'static str, PluginCreateFn>> = La
             ip_restriction::PLUGIN_NAME, // 3000
             ip_restriction::create_ip_restriction_plugin,
         ),
+        (cors::PLUGIN_NAME, cors::create_cors_plugin), // 4000
     ];
     arr.into_iter().collect()
 });
