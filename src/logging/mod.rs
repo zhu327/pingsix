@@ -2,7 +2,6 @@ use std::io::{self, Write};
 
 use async_trait::async_trait;
 use env_logger::Builder;
-use log::LevelFilter;
 use pingora::{
     server::{ListenFds, ShutdownWatch},
     services::Service,
@@ -11,6 +10,7 @@ use tokio::{
     fs::{create_dir_all, metadata, OpenOptions},
     io::{AsyncWriteExt, BufWriter},
     sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
+    time::{interval, Duration},
 };
 
 use crate::config;
@@ -57,8 +57,7 @@ impl Logger {
 
     pub fn init_env_logger(&self) {
         let writer = self.create_async_writer();
-        Builder::from_env(env_logger::Env::default())
-            .filter(None, LevelFilter::Info)
+        Builder::from_env(env_logger::Env::default().default_filter_or("info"))
             .target(env_logger::Target::Pipe(Box::new(writer)))
             .init();
     }
@@ -87,6 +86,8 @@ impl Service for Logger {
                 .expect("Failed to open or create log file"),
         );
 
+        let mut flush_interval = interval(Duration::from_secs(5));
+
         loop {
             tokio::select! {
                 biased;
@@ -97,7 +98,11 @@ impl Service for Logger {
                         break;
                     }
                 },
-
+                _ = flush_interval.tick() => {
+                    if let Err(e) = file.flush().await {
+                        log::error!("Failed to flush to log file: {}", e);
+                    }
+                },
                 data = self.receiver.recv() => {
                     match data {
                         Some(data) => {
