@@ -9,7 +9,6 @@ use pingora_http::ResponseHeader;
 use pingora_proxy::Session;
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value as YamlValue;
-use validator::{Validate, ValidationError};
 
 use crate::{proxy::ProxyContext, utils::request};
 
@@ -22,14 +21,10 @@ pub fn create_jwt_auth_plugin(cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> {
     let config: PluginConfig =
         serde_yaml::from_value(cfg).or_err_with(ReadError, || "Invalid jwt auth plugin config")?;
 
-    config
-        .validate()
-        .or_err_with(ReadError, || "Invalid jwt auth plugin config")?;
-
     Ok(Arc::new(PluginJWTAuth { config }))
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginConfig {
     /// HTTP Header 中 JWT 的字段名，默认是 `authorization`
     #[serde(default = "PluginConfig::default_header")]
@@ -57,8 +52,7 @@ pub struct PluginConfig {
 
     /// 使用的签名算法
     #[serde(default = "PluginConfig::default_algorithm")]
-    #[validate(custom(function = "PluginConfig::validate_algorithm"))]
-    pub algorithm: String, // enum: HS256, HS512, RS256, ES256
+    pub algorithm: Algorithm,
 
     /// 是否是 base64 编码的 Secret
     #[serde(default)]
@@ -86,27 +80,13 @@ impl PluginConfig {
         "jwt".to_string()
     }
 
-    fn default_algorithm() -> String {
-        "HS256".to_string()
-    }
-
-    fn validate_algorithm(algorithm: &String) -> Result<(), ValidationError> {
-        if algorithm == "HS256"
-            || algorithm == "HS512"
-            || algorithm == "RS256"
-            || algorithm == "ES256"
-        {
-            Ok(())
-        } else {
-            Err(ValidationError::new(
-                "algorithm must be one of 'HS256', 'HS512', 'RS256', or 'ES256'",
-            ))
-        }
+    fn default_algorithm() -> Algorithm {
+        Algorithm::HS256
     }
 
     fn get_decoding_key(&self) -> Result<DecodingKey, &'static str> {
-        match self.algorithm.as_str() {
-            "HS256" | "HS512" => {
+        match self.algorithm {
+            Algorithm::HS256 | Algorithm::HS512 => {
                 let secret = self.secret.as_ref().ok_or("missing secret")?;
                 let key: Vec<u8> = if self.base64_secret {
                     general_purpose::STANDARD
@@ -117,7 +97,7 @@ impl PluginConfig {
                 };
                 Ok(DecodingKey::from_secret(&key))
             }
-            "RS256" | "ES256" => {
+            Algorithm::RS256 | Algorithm::ES256 => {
                 let public_key = self.public_key.as_ref().ok_or("missing public_key")?;
                 Ok(DecodingKey::from_rsa_pem(public_key.as_bytes()).map_err(|_| "bad pem")?)
             }
@@ -161,17 +141,6 @@ impl ProxyPlugin for PluginJWTAuth {
             }
         };
 
-        let algorithm = match self.config.algorithm.as_str() {
-            "HS256" => Algorithm::HS256,
-            "HS512" => Algorithm::HS512,
-            "RS256" => Algorithm::RS256,
-            "ES256" => Algorithm::ES256,
-            _ => {
-                self.send_unauthorized_response(session).await?;
-                return Ok(true);
-            }
-        };
-
         let key = match self.config.get_decoding_key() {
             Ok(k) => k,
             Err(_) => {
@@ -180,8 +149,8 @@ impl ProxyPlugin for PluginJWTAuth {
             }
         };
 
-        // 3. 解析 JWT
-        let mut validation = Validation::new(algorithm);
+        // 解析 JWT
+        let mut validation = Validation::new(self.config.algorithm);
         validation.leeway = self.config.lifetime_grace_period;
 
         let token_data = match decode::<Claims>(&token, &key, &validation) {
@@ -193,12 +162,10 @@ impl ProxyPlugin for PluginJWTAuth {
         };
 
         if self.config.store_in_ctx {
-            ctx.vars.insert(
-                "jwt-auth-payload".to_string(),
-                serde_json::to_value(&token_data.claims.extra)
-                    .unwrap_or_default()
-                    .to_string(),
-            );
+            let payload_value = serde_json::to_value(&token_data.claims.extra)
+                .or_err_with(ReadError, || "Invalid jwt auth payload")?;
+            ctx.vars
+                .insert("jwt-auth-payload".to_string(), payload_value.to_string());
         }
 
         Ok(false)
@@ -283,6 +250,7 @@ impl PluginJWTAuth {
 
         let mut header = ResponseHeader::build(StatusCode::UNAUTHORIZED, None)?;
         header.insert_header(header::CONTENT_LENGTH, msg.len().to_string())?;
+        header.insert_header("WWW-Authenticate", "Bearer error=\"invalid_token\"")?;
         session
             .write_response_header(Box::new(header), false)
             .await?;

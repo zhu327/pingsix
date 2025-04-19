@@ -81,6 +81,7 @@ impl Service for Logger {
                 .write(true)
                 .append(true)
                 .create(true)
+                .mode(0o644)
                 .open(log_file_path)
                 .await
                 .expect("Failed to open or create log file"),

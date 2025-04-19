@@ -8,6 +8,7 @@ use pingora_proxy::Session;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value as YamlValue;
+use validator::{Validate, ValidationError};
 
 use crate::{proxy::ProxyContext, utils::request};
 
@@ -20,27 +21,41 @@ pub fn create_cors_plugin(cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> {
     let config: PluginConfig =
         serde_yaml::from_value(cfg).or_err_with(ReadError, || "Invalid echo plugin config")?;
 
+    config
+        .validate()
+        .or_err_with(ReadError, || "Invalid cors plugin config")?;
+
+    if let Some(regex_list) = &config.allow_origins_by_regex {
+        for re in regex_list {
+            Regex::new(re).or_err_with(ReadError, || "Invalid cors plugin config")?;
+        }
+    }
+
     Ok(Arc::new(PluginCors { config }))
 }
 
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Serialize, Deserialize, Default, Validate)]
+#[validate(schema(function = "PluginConfig::validate"))]
 pub struct PluginConfig {
     /// you can use '*' to allow all origins when no credentials,
     /// '**' to allow forcefully (it will bring some security risks, be carefully),
     /// multiple origin use ',' to split. default: *
     #[serde(default = "PluginConfig::default_star")]
+    #[validate(custom(function = "PluginConfig::validate_origins"))]
     pub allow_origins: String,
 
     /// you can use '*' to allow all methods when no credentials,
     /// '**' to allow forcefully (it will bring some security risks, be carefully),
     /// multiple method use ',' to split. default: *
     #[serde(default = "PluginConfig::default_star")]
+    #[validate(custom(function = "PluginConfig::validate_methods"))]
     pub allow_methods: String,
 
     /// you can use '*' to allow all headers when no credentials,
     /// '**' to allow forcefully (it will bring some security risks, be carefully),
     /// multiple header use ',' to split. default: *
     #[serde(default = "PluginConfig::default_star")]
+    #[validate(custom(function = "PluginConfig::validate_headers"))]
     pub allow_headers: String,
 
     /// multiple header use ',' to split.
@@ -74,22 +89,80 @@ impl PluginConfig {
         5
     }
 
+    fn validate(&self) -> Result<(), ValidationError> {
+        if self.allow_credential && self.allow_origins == "*" {
+            return Err(ValidationError::new(
+                "allow_credential cannot be used with allow_origins='*'",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_origins(origins: &str) -> Result<(), ValidationError> {
+        if origins.is_empty() {
+            return Err(ValidationError::new("allow_origins cannot be empty"));
+        }
+        if origins != "*" && origins != "**" {
+            for origin in origins.split(',').map(str::trim) {
+                if origin.is_empty() {
+                    return Err(ValidationError::new("allow_origins contains empty origin"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_methods(methods: &str) -> Result<(), ValidationError> {
+        if methods != "*" && methods != "**" {
+            for method in methods.split(',').map(str::trim) {
+                if !["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"]
+                    .contains(&method.to_uppercase().as_str())
+                {
+                    return Err(ValidationError::new("invalid HTTP method"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_headers(headers: &str) -> Result<(), ValidationError> {
+        if headers != "*" && headers != "**" {
+            for header in headers.split(',').map(str::trim) {
+                if !header.chars().all(|c| c.is_alphanumeric() || c == '-') {
+                    return Err(ValidationError::new("invalid header name"));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn is_origin_allowed(&self, origin: &str) -> bool {
-        if self.allow_origins == "*" {
+        if self.allow_origins.is_empty() {
+            return false;
+        }
+        if self.allow_origins == "*" || self.allow_origins == "**" {
             return true;
         }
-
-        let allowed_set: HashSet<_> = self.allow_origins.split(',').map(str::trim).collect();
-
+        let allowed_set: HashSet<_> = self
+            .allow_origins
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
         if allowed_set.contains(origin) {
             return true;
         }
 
         if let Some(regex_list) = &self.allow_origins_by_regex {
             for re in regex_list {
-                if let Ok(re) = Regex::new(re) {
-                    if re.is_match(origin) {
-                        return true;
+                match Regex::new(re) {
+                    Ok(re) => {
+                        if re.is_match(origin) {
+                            return true;
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("Invalid regex in allow_origins_by_regex: {} - {}", re, e);
                     }
                 }
             }

@@ -97,7 +97,13 @@ impl LogFormat {
         let estimated_len = self.segments.iter().fold(0, |acc, seg| {
             acc + match seg {
                 Segment::Static(s) => s.len(),
-                Segment::Variable(_) => 32, // 假设变量值平均 32 字节
+                Segment::Variable(var) => match var.as_str() {
+                    "status" => 4,            // 3-4 字节（如 "200"）
+                    "request_method" => 8,    // 3-7 字节（如 "GET"）
+                    "request_id" => 36,       // UUID 长度
+                    "http_user_agent" => 128, // 浏览器 UA 可能较长
+                    _ => 32,                  // 默认值
+                },
             }
         });
 

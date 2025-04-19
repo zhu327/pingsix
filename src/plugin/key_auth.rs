@@ -84,6 +84,7 @@ impl ProxyPlugin for PluginKeyAuth {
 
             let mut header = ResponseHeader::build(StatusCode::UNAUTHORIZED, None)?;
             header.insert_header(header::CONTENT_LENGTH, msg.len().to_string())?;
+            header.insert_header("WWW-Authenticate", "ApiKey error=\"invalid_key\"")?;
             session
                 .write_response_header(Box::new(header), false)
                 .await?;

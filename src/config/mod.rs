@@ -180,7 +180,17 @@ pub struct Sentry {
 
 #[derive(Clone, Debug, Serialize, Deserialize, Validate)]
 pub struct Log {
+    #[validate(length(min = 1), custom(function = "Log::validate_path"))]
     pub path: String,
+}
+
+impl Log {
+    fn validate_path(path: &str) -> Result<(), ValidationError> {
+        if path.contains('\0') || path.trim().is_empty() {
+            return Err(ValidationError::new("Invalid log file path"));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
