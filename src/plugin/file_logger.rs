@@ -32,7 +32,7 @@ struct PluginConfig {
 }
 
 impl PluginConfig {
-    pub fn default_log_format() -> String {
+    fn default_log_format() -> String {
         "$remote_addr \"$request_method $uri\" $status".to_string()
     }
 }

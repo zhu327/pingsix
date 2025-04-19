@@ -115,7 +115,7 @@ pub fn get_req_header_value<'a>(req_header: &'a RequestHeader, key: &str) -> Opt
     None
 }
 
-fn get_cookie_value<'a>(req_header: &'a RequestHeader, cookie_name: &str) -> Option<&'a str> {
+pub fn get_cookie_value<'a>(req_header: &'a RequestHeader, cookie_name: &str) -> Option<&'a str> {
     if let Some(cookie_value) = get_req_header_value(req_header, "Cookie") {
         for item in cookie_value.split(';') {
             if let Some((k, v)) = item.split_once('=') {

@@ -7,6 +7,7 @@ use pingora_http::ResponseHeader;
 use pingora_proxy::Session;
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value as YamlValue;
+use validator::Validate;
 
 use crate::{proxy::ProxyContext, utils::request};
 
@@ -19,16 +20,21 @@ pub fn create_key_auth_plugin(cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> {
     let config: PluginConfig =
         serde_yaml::from_value(cfg).or_err_with(ReadError, || "Invalid key auth plugin config")?;
 
+    config
+        .validate()
+        .or_err_with(ReadError, || "Invalid key auth plugin config")?;
+
     Ok(Arc::new(PluginKeyAuth { config }))
 }
 
 /// Configuration for the Key Auth plugin.
-#[derive(Default, Debug, Serialize, Deserialize)]
+#[derive(Default, Debug, Serialize, Deserialize, Validate)]
 struct PluginConfig {
     #[serde(default = "PluginConfig::default_header")]
     header: String,
     #[serde(default = "PluginConfig::default_query")]
     query: String,
+    #[validate(length(min = 1))]
     key: String,
     #[serde(default = "PluginConfig::default_hide_credentials")]
     hide_credentials: bool,

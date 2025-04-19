@@ -9,6 +9,7 @@ use rand::seq::IteratorRandom;
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value as YamlValue;
 use uuid::Uuid;
+use validator::{Validate, ValidationError};
 
 use crate::{proxy::ProxyContext, utils::request};
 
@@ -21,33 +22,48 @@ pub fn create_request_id_plugin(cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> 
     let config: PluginConfig = serde_yaml::from_value(cfg)
         .or_err_with(ReadError, || "Invalid request id plugin config")?;
 
+    config
+        .validate()
+        .or_err_with(ReadError, || "Invalid request id plugin config")?;
+
     Ok(Arc::new(PluginRequestID { config }))
 }
 
 /// Configuration for the Request ID plugin.
-#[derive(Default, Debug, Serialize, Deserialize)]
+#[derive(Default, Debug, Serialize, Deserialize, Validate)]
 struct PluginConfig {
     #[serde(default = "PluginConfig::default_header_name")]
     header_name: String,
     #[serde(default = "PluginConfig::default_include_in_response")]
     include_in_response: bool,
     #[serde(default = "PluginConfig::default_algorithm")]
+    #[validate(custom(function = "PluginConfig::validate_algorithm"))]
     algorithm: String,
     #[serde(default)]
     range_id: RangeID,
 }
 
 impl PluginConfig {
-    pub fn default_header_name() -> String {
+    fn default_header_name() -> String {
         "X-Request-Id".to_string()
     }
 
-    pub fn default_include_in_response() -> bool {
+    fn default_include_in_response() -> bool {
         true
     }
 
-    pub fn default_algorithm() -> String {
+    fn default_algorithm() -> String {
         "uuid".to_string()
+    }
+
+    fn validate_algorithm(algorithm: &String) -> Result<(), ValidationError> {
+        if algorithm == "uuid" || algorithm == "range_id" {
+            Ok(())
+        } else {
+            Err(ValidationError::new(
+                "algorithm must be either 'uuid' or 'range_id'",
+            ))
+        }
     }
 }
 

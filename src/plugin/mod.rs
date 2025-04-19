@@ -5,6 +5,7 @@ pub mod file_logger;
 pub mod grpc_web;
 pub mod gzip;
 pub mod ip_restriction;
+pub mod jwt_auth;
 pub mod key_auth;
 pub mod limit_count;
 pub mod prometheus;
@@ -63,6 +64,10 @@ static PLUGIN_BUILDER_REGISTRY: Lazy<HashMap<&'static str, PluginCreateFn>> = La
         (
             key_auth::PLUGIN_NAME, // 2500
             key_auth::create_key_auth_plugin,
+        ),
+        (
+            jwt_auth::PLUGIN_NAME, // 2510
+            jwt_auth::create_jwt_auth_plugin,
         ),
         (
             ip_restriction::PLUGIN_NAME, // 3000

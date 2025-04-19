@@ -8,6 +8,7 @@ use pingora_limits::rate::Rate;
 use pingora_proxy::Session;
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value as YamlValue;
+use validator::Validate;
 
 use crate::{config::UpstreamHashOn, proxy::ProxyContext, utils::request::request_selector_key};
 
@@ -19,20 +20,26 @@ pub fn create_limit_count_plugin(cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>>
     let config: PluginConfig = serde_yaml::from_value(cfg)
         .or_err_with(ReadError, || "Invalid limit count plugin config")?;
 
+    config
+        .validate()
+        .or_err_with(ReadError, || "Invalid limit count plugin config")?;
+
     let rate = Rate::new(Duration::from_secs(config.time_window as _));
 
     Ok(Arc::new(PluginRateLimit { config, rate }))
 }
 
-#[derive(Default, Debug, Serialize, Deserialize)]
+#[derive(Default, Debug, Serialize, Deserialize, Validate)]
 struct PluginConfig {
     key_type: UpstreamHashOn,
+    #[validate(length(min = 1))]
     key: String,
     time_window: u32,
     count: u32,
 
     #[serde(default = "PluginConfig::default_rejected_code")]
     rejected_code: u16,
+    #[serde(default)]
     rejected_msg: Option<String>,
     #[serde(default = "PluginConfig::default_show_limit_quota_header")]
     show_limit_quota_header: bool,
