@@ -33,8 +33,6 @@ use service::http::HttpService;
 
 // Service name constants
 const PINGSIX_SERVICE: &str = "pingsix";
-const ADMIN_SERVICE: &str = "Admin HTTP";
-const PROMETHEUS_SERVICE: &str = "Prometheus HTTP";
 
 fn main() {
     // Load configuration and command-line arguments
@@ -66,8 +64,7 @@ fn main() {
             Box::new(event_handler),
         ))
     } else {
-        log::info!("Loading services, upstreams, and routes...");
-        // Assuming these functions return counts or can be modified to log details
+        log::info!("Loading static services, upstreams, and routes...");
         if let Err(e) = load_static_ssls(&config) {
             eprintln!("Failed to load static SSLs: {}", e);
             std::process::exit(1);
@@ -191,13 +188,13 @@ fn add_optional_services(server: &mut Server, cfg: &config::Pingsix) {
     }
 
     if cfg.etcd.is_some() && cfg.admin.is_some() {
-        log::info!("Adding {}...", ADMIN_SERVICE);
+        log::info!("Adding Admin HTTP...");
         let admin_service_http = AdminHttpApp::admin_http_service(cfg);
         server.add_service(admin_service_http);
     }
 
     if let Some(prometheus_cfg) = &cfg.prometheus {
-        log::info!("Adding {}...", PROMETHEUS_SERVICE);
+        log::info!("Adding Prometheus HTTP...");
         let mut prometheus_service_http = Service::prometheus_http_service();
         prometheus_service_http.add_tcp(&prometheus_cfg.address.to_string());
         server.add_service(prometheus_service_http);

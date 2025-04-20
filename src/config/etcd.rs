@@ -73,7 +73,7 @@ impl EtcdConfigSync {
 
     /// Synchronize etcd data on initialization.
     async fn list(&mut self) -> Result<(), EtcdError> {
-        let prefix = self.config.prefix.clone(); // Clone prefix before mutable borrow
+        let prefix = self.config.prefix.clone();
         let client = self.get_client().await?;
 
         let options = GetOptions::new().with_prefix();
@@ -98,7 +98,7 @@ impl EtcdConfigSync {
 
     /// Watch for etcd data changes.
     async fn watch(&mut self) -> Result<(), EtcdError> {
-        let prefix = self.config.prefix.clone(); // Clone prefix before mutable borrow
+        let prefix = self.config.prefix.clone();
         let start_revision = self.revision + 1;
         let options = WatchOptions::new()
             .with_start_revision(start_revision)
@@ -133,7 +133,7 @@ impl EtcdConfigSync {
     }
 
     /// Reset the client on failure.
-    async fn reset_client(&mut self) {
+    fn reset_client(&mut self) {
         log::warn!("Resetting etcd client for prefix '{}'", self.config.prefix);
         self.client = None;
     }
@@ -155,7 +155,7 @@ impl EtcdConfigSync {
                 result = self.list() => {
                     if let Err(err) = result {
                         log::error!("List operation failed for prefix '{}': {:?}", self.config.prefix, err);
-                        self.reset_client().await;
+                        self.reset_client();
                         sleep(LIST_RETRY_DELAY).await;
                         continue;
                     }
@@ -176,7 +176,7 @@ impl EtcdConfigSync {
                 result = self.watch() => {
                     if let Err(err) = result {
                         log::error!("Watch operation failed for prefix '{}': {:?}", self.config.prefix, err);
-                        self.reset_client().await;
+                        self.reset_client();
                         sleep(WATCH_RETRY_DELAY).await;
                     }
                 }
@@ -192,7 +192,7 @@ impl Service for EtcdConfigSync {
     }
 
     fn name(&self) -> &'static str {
-        "etcd config sync"
+        "Etcd config SYNC"
     }
 
     fn threads(&self) -> Option<usize> {

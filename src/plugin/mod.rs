@@ -25,7 +25,7 @@ use pingora_proxy::Session;
 use regex::Regex;
 use serde_yaml::Value as YamlValue;
 
-use crate::proxy::{route::ProxyRoute, service::service_fetch, ProxyContext};
+use crate::proxy::ProxyContext;
 
 /// Type alias for plugin initialization functions
 pub type PluginCreateFn = fn(YamlValue) -> Result<Arc<dyn ProxyPlugin>>;
@@ -98,50 +98,6 @@ pub fn build_plugin(name: &str, cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> 
         .get(name)
         .or_err(ReadError, "Unknown plugin type")?;
     builder(cfg)
-}
-
-/// Builds a `ProxyPluginExecutor` by combining plugins from both a route and its associated service.
-///
-/// # Arguments
-/// - `route`: A reference-counted pointer to a `ProxyRoute` instance containing route-specific plugins.
-///
-/// # Returns
-/// - `Arc<ProxyPluginExecutor>`: A reference-counted pointer to a `ProxyPluginExecutor` that manages the merged plugin list.
-///
-/// # Process
-/// - Retrieves route-specific plugins from the `route`.
-/// - If the route is associated with a service (via `service_id`), retrieves service-specific plugins.
-/// - Combines the route and service plugins, ensuring unique entries by their name.
-/// - Sorts the merged plugin list by priority in descending order.
-/// - Constructs and returns the `ProxyPluginExecutor` instance.
-///
-/// # Notes
-/// - Plugins from the route take precedence over those from the service in case of naming conflicts.
-///   If a plugin with the same name exists in both route and service, only the route's plugin is retained.
-pub fn build_plugin_executor(route: Arc<ProxyRoute>) -> Arc<ProxyPluginExecutor> {
-    let mut plugin_map: HashMap<String, Arc<dyn ProxyPlugin>> = HashMap::new();
-
-    // Merge route and service plugins
-    let service_plugins = route
-        .inner
-        .service_id
-        .as_deref()
-        .and_then(service_fetch)
-        .map_or_else(Vec::new, |service| service.plugins.clone());
-
-    for plugin in route.plugins.iter().chain(service_plugins.iter()) {
-        plugin_map
-            .entry(plugin.name().to_string())
-            .or_insert_with(|| plugin.clone());
-    }
-
-    // Sort by priority in descending order
-    let mut merged_plugins: Vec<_> = plugin_map.into_values().collect();
-    merged_plugins.sort_by_key(|b| std::cmp::Reverse(b.priority()));
-
-    Arc::new(ProxyPluginExecutor {
-        plugins: merged_plugins,
-    })
 }
 
 #[async_trait]
@@ -249,104 +205,6 @@ pub trait ProxyPlugin: Send + Sync {
     /// An error log is already emitted if there is any error. This phase is used for collecting
     /// metrics and sending access logs.
     async fn logging(&self, _session: &mut Session, _e: Option<&Error>, _ctx: &mut ProxyContext) {}
-}
-
-/// A struct that manages the execution of proxy plugins.
-///
-/// # Fields
-/// - `plugins`: A vector of reference-counted pointers to `ProxyPlugin` instances.
-///   These plugins are executed in the order of their priorities, typically determined
-///   during the construction of the `ProxyPluginExecutor`.
-///
-/// # Purpose
-/// - This struct is responsible for holding and managing a collection of proxy plugins.
-/// - It is typically used to facilitate the execution of plugins in a proxy routing context,
-///   where plugins can perform various tasks such as authentication, logging, traffic shaping, etc.
-///
-/// # Usage
-/// - The plugins are expected to be sorted by their priority (in descending order) during
-///   the initialization of the `ProxyPluginExecutor`.
-#[derive(Default)]
-pub struct ProxyPluginExecutor {
-    pub plugins: Vec<Arc<dyn ProxyPlugin>>,
-}
-
-#[async_trait]
-impl ProxyPlugin for ProxyPluginExecutor {
-    fn name(&self) -> &str {
-        "plugin-executor"
-    }
-
-    fn priority(&self) -> i32 {
-        0
-    }
-
-    async fn request_filter(&self, session: &mut Session, ctx: &mut ProxyContext) -> Result<bool> {
-        for plugin in self.plugins.iter() {
-            if plugin.request_filter(session, ctx).await? {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-
-    async fn early_request_filter(
-        &self,
-        session: &mut Session,
-        ctx: &mut ProxyContext,
-    ) -> Result<()> {
-        for plugin in self.plugins.iter() {
-            plugin.early_request_filter(session, ctx).await?;
-        }
-        Ok(())
-    }
-
-    async fn upstream_request_filter(
-        &self,
-        session: &mut Session,
-        upstream_request: &mut RequestHeader,
-        ctx: &mut ProxyContext,
-    ) -> Result<()> {
-        for plugin in self.plugins.iter() {
-            plugin
-                .upstream_request_filter(session, upstream_request, ctx)
-                .await?;
-        }
-        Ok(())
-    }
-
-    async fn response_filter(
-        &self,
-        session: &mut Session,
-        upstream_response: &mut ResponseHeader,
-        ctx: &mut ProxyContext,
-    ) -> Result<()> {
-        for plugin in self.plugins.iter() {
-            plugin
-                .response_filter(session, upstream_response, ctx)
-                .await?;
-        }
-        Ok(())
-    }
-
-    fn response_body_filter(
-        &self,
-        session: &mut Session,
-        body: &mut Option<Bytes>,
-        end_of_stream: bool,
-        ctx: &mut ProxyContext,
-    ) -> Result<()> {
-        for plugin in self.plugins.iter() {
-            plugin.response_body_filter(session, body, end_of_stream, ctx)?;
-        }
-        Ok(())
-    }
-
-    async fn logging(&self, session: &mut Session, e: Option<&Error>, ctx: &mut ProxyContext) {
-        for plugin in self.plugins.iter() {
-            plugin.logging(session, e, ctx).await;
-        }
-    }
 }
 
 /// Applies regex-based URI rewriting based on provided precompiled patterns.

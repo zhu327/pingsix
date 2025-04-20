@@ -17,11 +17,21 @@ use std::{
     time::Instant,
 };
 
+use async_trait::async_trait;
+use bytes::Bytes;
 use dashmap::DashMap;
+use once_cell::sync::Lazy;
+use pingora_error::{Error, Result};
+use pingora_http::{RequestHeader, ResponseHeader};
+use pingora_proxy::Session;
 
-use crate::{config::Identifiable, plugin::ProxyPluginExecutor};
+use crate::{config::Identifiable, plugin::ProxyPlugin};
 
 use route::ProxyRoute;
+
+/// Defalut empty plugin executor for new ProxyContext.
+static DEAULT_PLUGIN_EXECUTOR: Lazy<Arc<ProxyPluginExecutor>> =
+    Lazy::new(|| Arc::new(ProxyPluginExecutor::default()));
 
 /// Holds the context for each proxy request.
 pub struct ProxyContext {
@@ -48,8 +58,8 @@ impl Default for ProxyContext {
             route_params: None,
             tries: 0,
             request_start: Instant::now(),
-            plugin: Arc::new(ProxyPluginExecutor::default()),
-            global_plugin: Arc::new(ProxyPluginExecutor::default()),
+            plugin: DEAULT_PLUGIN_EXECUTOR.clone(),
+            global_plugin: DEAULT_PLUGIN_EXECUTOR.clone(),
             vars: HashMap::new(),
         }
     }
@@ -110,5 +120,103 @@ where
         let key = resource.id();
         log::info!("Inserting resource '{}'", key);
         self.insert(key.to_string(), resource);
+    }
+}
+
+/// A struct that manages the execution of proxy plugins.
+///
+/// # Fields
+/// - `plugins`: A vector of reference-counted pointers to `ProxyPlugin` instances.
+///   These plugins are executed in the order of their priorities, typically determined
+///   during the construction of the `ProxyPluginExecutor`.
+///
+/// # Purpose
+/// - This struct is responsible for holding and managing a collection of proxy plugins.
+/// - It is typically used to facilitate the execution of plugins in a proxy routing context,
+///   where plugins can perform various tasks such as authentication, logging, traffic shaping, etc.
+///
+/// # Usage
+/// - The plugins are expected to be sorted by their priority (in descending order) during
+///   the initialization of the `ProxyPluginExecutor`.
+#[derive(Default)]
+pub struct ProxyPluginExecutor {
+    pub plugins: Vec<Arc<dyn ProxyPlugin>>,
+}
+
+#[async_trait]
+impl ProxyPlugin for ProxyPluginExecutor {
+    fn name(&self) -> &str {
+        "plugin-executor"
+    }
+
+    fn priority(&self) -> i32 {
+        0
+    }
+
+    async fn request_filter(&self, session: &mut Session, ctx: &mut ProxyContext) -> Result<bool> {
+        for plugin in self.plugins.iter() {
+            if plugin.request_filter(session, ctx).await? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    async fn early_request_filter(
+        &self,
+        session: &mut Session,
+        ctx: &mut ProxyContext,
+    ) -> Result<()> {
+        for plugin in self.plugins.iter() {
+            plugin.early_request_filter(session, ctx).await?;
+        }
+        Ok(())
+    }
+
+    async fn upstream_request_filter(
+        &self,
+        session: &mut Session,
+        upstream_request: &mut RequestHeader,
+        ctx: &mut ProxyContext,
+    ) -> Result<()> {
+        for plugin in self.plugins.iter() {
+            plugin
+                .upstream_request_filter(session, upstream_request, ctx)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn response_filter(
+        &self,
+        session: &mut Session,
+        upstream_response: &mut ResponseHeader,
+        ctx: &mut ProxyContext,
+    ) -> Result<()> {
+        for plugin in self.plugins.iter() {
+            plugin
+                .response_filter(session, upstream_response, ctx)
+                .await?;
+        }
+        Ok(())
+    }
+
+    fn response_body_filter(
+        &self,
+        session: &mut Session,
+        body: &mut Option<Bytes>,
+        end_of_stream: bool,
+        ctx: &mut ProxyContext,
+    ) -> Result<()> {
+        for plugin in self.plugins.iter() {
+            plugin.response_body_filter(session, body, end_of_stream, ctx)?;
+        }
+        Ok(())
+    }
+
+    async fn logging(&self, session: &mut Session, e: Option<&Error>, ctx: &mut ProxyContext) {
+        for plugin in self.plugins.iter() {
+            plugin.logging(session, e, ctx).await;
+        }
     }
 }

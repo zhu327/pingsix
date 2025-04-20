@@ -37,45 +37,27 @@ pub fn create_cors_plugin(cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> {
 #[derive(Debug, Serialize, Deserialize, Default, Validate)]
 #[validate(schema(function = "PluginConfig::validate"))]
 pub struct PluginConfig {
-    /// Specifies allowed origins. Use '*' to allow all origins when no credentials are used,
-    /// or '**' to forcefully allow all origins (WARNING: This poses security risks, use with caution).
-    /// Multiple origins can be specified, separated by commas. Default: *
     #[serde(default = "PluginConfig::default_star")]
     #[validate(custom(function = "PluginConfig::validate_origins"))]
     pub allow_origins: String,
 
-    /// Specifies allowed HTTP methods. Use '*' to allow all methods when no credentials are used,
-    /// or '**' to forcefully allow all methods (WARNING: This poses security risks, use with caution).
-    /// Multiple methods can be specified, separated by commas. Default: *
     #[serde(default = "PluginConfig::default_star")]
     #[validate(custom(function = "PluginConfig::validate_methods"))]
     pub allow_methods: String,
 
-    /// Specifies allowed headers. Use '*' to allow all headers when no credentials are used,
-    /// or '**' to forcefully allow all headers (WARNING: This poses security risks, use with caution).
-    /// Multiple headers can be specified, separated by commas. Default: *
     #[serde(default = "PluginConfig::default_star")]
     #[validate(custom(function = "PluginConfig::validate_headers"))]
     pub allow_headers: String,
 
-    /// Specifies headers to expose to the client. Multiple headers can be specified, separated by commas.
-    /// If not specified, no custom headers are exposed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expose_headers: Option<String>,
 
-    /// Maximum number of seconds the results can be cached.
-    /// -1 means no caching. The maximum value depends on the browser.
-    /// See MDN for more details. Default: 5
     #[serde(default = "PluginConfig::default_max_age")]
     pub max_age: i32,
 
-    /// Allows clients to include credentials. Per CORS specification,
-    /// if set to true, '*' cannot be used for other options.
     #[serde(default)]
     pub allow_credential: bool,
 
-    /// Regular expressions to allow specific origins when no credentials are used.
-    /// Example: [.*\\.test.com$] allows a.test.com and b.test.com
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allow_origins_by_regex: Option<Vec<String>>,
 }
@@ -210,66 +192,74 @@ pub struct PluginCors {
 
 impl PluginCors {
     fn apply_cors_headers(&self, session: &mut Session, resp: &mut ResponseHeader) -> Result<()> {
-        if let Some(origin) =
-            request::get_req_header_value(session.req_header(), header::ORIGIN.as_str())
-        {
-            if !self.config.is_origin_allowed(origin) {
-                return Ok(());
-            }
+        let origin = request::get_req_header_value(session.req_header(), header::ORIGIN.as_str())
+            .map(|s| s.to_string());
 
-            resp.insert_header(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin)?;
-            if self.config.allow_credential {
-                resp.insert_header(header::ACCESS_CONTROL_ALLOW_CREDENTIALS, "true")?;
-            }
-
-            let methods = if self.config.allow_methods == "**" {
-                "GET,POST,PUT,DELETE,PATCH,OPTIONS,HEAD".to_string()
-            } else {
-                self.config.allow_methods.clone()
-            };
-            resp.insert_header(header::ACCESS_CONTROL_ALLOW_METHODS, methods)?;
-
-            let headers = if self.config.allow_headers == "**" {
-                request::get_req_header_value(
-                    session.req_header(),
-                    header::ACCESS_CONTROL_REQUEST_HEADERS.as_str(),
-                )
-                .unwrap_or_default()
-                .to_string()
-            } else {
-                self.config.allow_headers.clone()
-            };
-            resp.insert_header(header::ACCESS_CONTROL_ALLOW_HEADERS, headers)?;
-
-            resp.insert_header(
-                header::ACCESS_CONTROL_MAX_AGE,
-                self.config.max_age.to_string(),
-            )?;
-
-            if let Some(expose) = &self.config.expose_headers {
-                resp.insert_header(header::ACCESS_CONTROL_EXPOSE_HEADERS, expose)?;
-            }
-
-            if self.config.allow_origins != "*" {
-                resp.insert_header(header::VARY, "Origin")?;
+        if let Some(origin) = origin {
+            if self.config.is_origin_allowed(&origin) {
+                self.apply_cors_headers_with_origin(session, resp, &origin)?;
             }
         }
         Ok(())
     }
 
-    fn handle_options_request(&self, session: &mut Session) -> Result<Option<ResponseHeader>> {
-        if let Some(origin) =
-            request::get_req_header_value(session.req_header(), header::ORIGIN.as_str())
-        {
-            if !self.config.is_origin_allowed(origin) {
-                return Ok(None);
-            }
+    fn apply_cors_headers_with_origin(
+        &self,
+        session: &mut Session,
+        resp: &mut ResponseHeader,
+        origin: &str,
+    ) -> Result<()> {
+        resp.insert_header(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin)?;
+        if self.config.allow_credential {
+            resp.insert_header(header::ACCESS_CONTROL_ALLOW_CREDENTIALS, "true")?;
+        }
 
-            let mut resp = ResponseHeader::build(StatusCode::NO_CONTENT, None)?;
-            self.apply_cors_headers(session, &mut resp)?;
-            Ok(Some(resp))
+        let methods = if self.config.allow_methods == "**" {
+            "GET,POST,PUT,DELETE,PATCH,OPTIONS,HEAD".to_string()
         } else {
-            Ok(None)
+            self.config.allow_methods.clone()
+        };
+        resp.insert_header(header::ACCESS_CONTROL_ALLOW_METHODS, methods)?;
+
+        let headers = if self.config.allow_headers == "**" {
+            request::get_req_header_value(
+                session.req_header(),
+                header::ACCESS_CONTROL_REQUEST_HEADERS.as_str(),
+            )
+            .unwrap_or_default()
+            .to_string()
+        } else {
+            self.config.allow_headers.clone()
+        };
+        resp.insert_header(header::ACCESS_CONTROL_ALLOW_HEADERS, headers)?;
+
+        resp.insert_header(
+            header::ACCESS_CONTROL_MAX_AGE,
+            self.config.max_age.to_string(),
+        )?;
+
+        if let Some(expose) = &self.config.expose_headers {
+            resp.insert_header(header::ACCESS_CONTROL_EXPOSE_HEADERS, expose)?;
+        }
+
+        if self.config.allow_origins != "*" {
+            resp.insert_header(header::VARY, "Origin")?;
+        }
+
+        Ok(())
+    }
+
+    fn handle_options_request(&self, session: &mut Session) -> Result<Option<ResponseHeader>> {
+        let origin = request::get_req_header_value(session.req_header(), header::ORIGIN.as_str())
+            .map(|s| s.to_string());
+
+        match origin {
+            Some(origin) if self.config.is_origin_allowed(&origin) => {
+                let mut resp = ResponseHeader::build(StatusCode::NO_CONTENT, None)?;
+                self.apply_cors_headers_with_origin(session, &mut resp, &origin)?;
+                Ok(Some(resp))
+            }
+            _ => Ok(None),
         }
     }
 }

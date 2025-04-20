@@ -66,6 +66,14 @@ impl PluginConfig {
     }
 }
 
+/// Source of the API key (header, query, or none).
+#[derive(PartialEq)]
+enum KeySource {
+    Header,
+    Query,
+    None,
+}
+
 /// Key Auth plugin implementation.
 /// Validates API keys from HTTP headers or query parameters.
 /// Note: For production environments, consider using more secure mechanisms like HMAC signatures
@@ -126,12 +134,4 @@ impl ProxyPlugin for PluginKeyAuth {
 
         Ok(false)
     }
-}
-
-/// Source of the API key (header, query, or none).
-#[derive(PartialEq)]
-enum KeySource {
-    Header,
-    Query,
-    None,
 }

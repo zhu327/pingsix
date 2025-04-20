@@ -7,10 +7,10 @@ use pingora_error::Result;
 
 use crate::{
     config::{self, Identifiable},
-    plugin::{build_plugin, ProxyPlugin, ProxyPluginExecutor},
+    plugin::{build_plugin, ProxyPlugin},
 };
 
-use super::MapOperations;
+use super::{MapOperations, ProxyPluginExecutor};
 
 /// Represents a proxy service that manages upstreams.
 pub struct ProxyGlobalRule {

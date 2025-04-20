@@ -137,7 +137,7 @@ impl Service for Logger {
     }
 
     fn name(&self) -> &'static str {
-        "log sync"
+        "Log SYNC"
     }
 
     fn threads(&self) -> Option<usize> {

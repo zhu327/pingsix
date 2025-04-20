@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,7 +20,7 @@ use crate::{
 use super::{
     service::service_fetch,
     upstream::{upstream_fetch, ProxyUpstream},
-    MapOperations,
+    MapOperations, ProxyPluginExecutor,
 };
 
 /// Proxy route.
@@ -143,6 +143,50 @@ impl ProxyRoute {
             p.options.read_timeout = Some(Duration::from_secs(read));
             p.options.write_timeout = Some(Duration::from_secs(send));
         }
+    }
+
+    /// Builds a `ProxyPluginExecutor` by combining plugins from both a route and its associated service.
+    ///
+    /// # Arguments
+    /// - `self`: A reference-counted pointer to a `ProxyRoute` instance containing route-specific plugins.
+    ///
+    /// # Returns
+    /// - `Arc<ProxyPluginExecutor>`: A reference-counted pointer to a `ProxyPluginExecutor` that manages the merged plugin list.
+    ///
+    /// # Process
+    /// - Retrieves route-specific plugins from the `route`.
+    /// - If the route is associated with a service (via `service_id`), retrieves service-specific plugins.
+    /// - Combines the route and service plugins, ensuring unique entries by their name.
+    /// - Sorts the merged plugin list by priority in descending order.
+    /// - Constructs and returns the `ProxyPluginExecutor` instance.
+    ///
+    /// # Notes
+    /// - Plugins from the route take precedence over those from the service in case of naming conflicts.
+    ///   If a plugin with the same name exists in both route and service, only the route's plugin is retained.
+    pub fn build_plugin_executor(&self) -> Arc<ProxyPluginExecutor> {
+        let mut plugin_map: HashMap<String, Arc<dyn ProxyPlugin>> = HashMap::new();
+
+        // Merge route and service plugins
+        let service_plugins = self
+            .inner
+            .service_id
+            .as_deref()
+            .and_then(service_fetch)
+            .map_or_else(Vec::new, |service| service.plugins.clone());
+
+        for plugin in self.plugins.iter().chain(service_plugins.iter()) {
+            plugin_map
+                .entry(plugin.name().to_string())
+                .or_insert_with(|| plugin.clone());
+        }
+
+        // Sort by priority in descending order
+        let mut merged_plugins: Vec<_> = plugin_map.into_values().collect();
+        merged_plugins.sort_by_key(|b| std::cmp::Reverse(b.priority()));
+
+        Arc::new(ProxyPluginExecutor {
+            plugins: merged_plugins,
+        })
     }
 }
 

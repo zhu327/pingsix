@@ -13,7 +13,7 @@ use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_proxy::{ProxyHttp, Session};
 
 use crate::{
-    plugin::{build_plugin_executor, ProxyPlugin},
+    plugin::ProxyPlugin,
     proxy::{global_rule::global_plugin_fetch, route::global_route_match_fetch, ProxyContext},
 };
 
@@ -48,9 +48,8 @@ impl ProxyHttp for HttpService {
         // Match request to pipeline
         if let Some((route_params, route)) = global_route_match_fetch().match_request(session) {
             ctx.route_params = Some(route_params);
-            ctx.route = Some(route.clone());
-            // Use cached plugin executor from route
-            ctx.plugin = build_plugin_executor(route);
+            ctx.plugin = route.build_plugin_executor();
+            ctx.route = Some(route);
 
             ctx.global_plugin = global_plugin_fetch();
         }

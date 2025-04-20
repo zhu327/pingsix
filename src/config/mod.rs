@@ -156,6 +156,10 @@ impl Config {
             return Err(ValidationError::new("global_rule_id_required"));
         }
 
+        if self.ssls.iter().any(|ssl| ssl.id.is_empty()) {
+            return Err(ValidationError::new("ssl_id_required"));
+        }
+
         Ok(())
     }
 
