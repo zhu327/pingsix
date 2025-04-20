@@ -16,15 +16,23 @@ use crate::{proxy::ProxyContext, utils::request};
 use super::ProxyPlugin;
 
 pub const PLUGIN_NAME: &str = "request-id";
+const PRIORITY: i32 = 12015;
 
-/// Creates an Key Auth plugin instance with the given configuration.
+// Constants for configuration and context keys
+const DEFAULT_HEADER_NAME: &str = "X-Request-Id";
+const ALGORITHM_UUID: &str = "uuid";
+const ALGORITHM_RANGE_ID: &str = "range_id";
+const REQUEST_ID_KEY: &str = "request-id";
+const DEFAULT_CHAR_SET: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIGKLMNOPQRSTUVWXYZ0123456789";
+
+/// Creates a Request ID plugin instance with the given configuration.
 pub fn create_request_id_plugin(cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> {
-    let config: PluginConfig = serde_yaml::from_value(cfg)
-        .or_err_with(ReadError, || "Invalid request id plugin config")?;
+    let config: PluginConfig =
+        serde_yaml::from_value(cfg).or_err(ReadError, "Invalid request id plugin config")?;
 
     config
         .validate()
-        .or_err_with(ReadError, || "Invalid request id plugin config")?;
+        .or_err(ReadError, "Invalid request id plugin config")?;
 
     Ok(Arc::new(PluginRequestID { config }))
 }
@@ -45,7 +53,7 @@ struct PluginConfig {
 
 impl PluginConfig {
     fn default_header_name() -> String {
-        "X-Request-Id".to_string()
+        DEFAULT_HEADER_NAME.to_string()
     }
 
     fn default_include_in_response() -> bool {
@@ -53,11 +61,11 @@ impl PluginConfig {
     }
 
     fn default_algorithm() -> String {
-        "uuid".to_string()
+        ALGORITHM_UUID.to_string()
     }
 
     fn validate_algorithm(algorithm: &String) -> Result<(), ValidationError> {
-        if algorithm == "uuid" || algorithm == "range_id" {
+        if algorithm == ALGORITHM_UUID || algorithm == ALGORITHM_RANGE_ID {
             Ok(())
         } else {
             Err(ValidationError::new(
@@ -77,7 +85,7 @@ struct RangeID {
 
 impl RangeID {
     pub fn default_char_set() -> String {
-        "abcdefghijklmnopqrstuvwxyzABCDEFGHIGKLMNOPQRSTUVWXYZ0123456789".to_string()
+        DEFAULT_CHAR_SET.to_string()
     }
 
     pub fn default_length() -> u32 {
@@ -92,18 +100,20 @@ pub struct PluginRequestID {
 impl PluginRequestID {
     fn get_request_id(&self) -> String {
         match self.config.algorithm.as_str() {
-            "uuid" => Uuid::new_v4().to_string(),
-            "range_id" => self.get_range_id(),
-            _ => Uuid::new_v4().to_string(),
+            ALGORITHM_UUID => Uuid::new_v4().to_string(),
+            ALGORITHM_RANGE_ID => self.get_range_id(),
+            _ => Uuid::new_v4().to_string(), // Fallback for invalid algorithm
         }
     }
 
     fn get_range_id(&self) -> String {
-        let chars: Vec<char> = self.config.range_id.char_set.chars().collect();
-        if chars.is_empty() {
-            return Uuid::new_v4().to_string();
-        }
-        let dist = Slice::new(&chars).unwrap();
+        let char_set = if self.config.range_id.char_set.is_empty() {
+            DEFAULT_CHAR_SET
+        } else {
+            &self.config.range_id.char_set
+        };
+        let chars: Vec<char> = char_set.chars().collect();
+        let dist = Slice::new(&chars).unwrap(); // Safe: chars is non-empty
         let mut rng = rand::thread_rng();
         (0..self.config.range_id.length)
             .map(|_| rng.sample(dist))
@@ -118,11 +128,11 @@ impl ProxyPlugin for PluginRequestID {
     }
 
     fn priority(&self) -> i32 {
-        12015
+        PRIORITY
     }
 
     async fn request_filter(&self, session: &mut Session, ctx: &mut ProxyContext) -> Result<bool> {
-        // 从头里拿request id，如果没有生成一个，写入请求头
+        // Retrieve request ID from header, or generate a new one
         let value =
             match request::get_req_header_value(session.req_header(), &self.config.header_name) {
                 Some(s) => s.to_string(),
@@ -131,12 +141,12 @@ impl ProxyPlugin for PluginRequestID {
                     session
                         .req_header_mut()
                         .insert_header(self.config.header_name.clone(), &request_id)
-                        .or_err_with(InternalError, || "Session insert header fail")?;
+                        .or_err(InternalError, "Session insert header fail")?;
                     request_id
                 }
             };
 
-        ctx.vars.insert("request-id".to_string(), value);
+        ctx.vars.insert(REQUEST_ID_KEY.to_string(), value);
 
         Ok(false)
     }
@@ -148,11 +158,11 @@ impl ProxyPlugin for PluginRequestID {
         ctx: &mut ProxyContext,
     ) -> Result<()> {
         if self.config.include_in_response {
-            let value = ctx.vars.get("request-id").unwrap();
+            let value = ctx.vars.get(REQUEST_ID_KEY).unwrap(); // Safe: inserted in request_filter
 
             upstream_response
                 .insert_header(self.config.header_name.clone(), value)
-                .or_err_with(InternalError, || "Upstream response insert header fail")?;
+                .or_err(InternalError, "Upstream response insert header fail")?;
         }
 
         Ok(())

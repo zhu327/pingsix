@@ -1,7 +1,7 @@
 use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
-use http::{Method, StatusCode};
+use http::{header, Method, StatusCode};
 use pingora_error::{ErrorType::ReadError, OrErr, Result};
 use pingora_http::ResponseHeader;
 use pingora_proxy::Session;
@@ -15,67 +15,67 @@ use crate::{proxy::ProxyContext, utils::request};
 use super::ProxyPlugin;
 
 pub const PLUGIN_NAME: &str = "cors";
+const PRIORITY: i32 = 4000;
 
 /// Creates an CORS plugin instance with the given configuration.
 pub fn create_cors_plugin(cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> {
     let config: PluginConfig =
-        serde_yaml::from_value(cfg).or_err_with(ReadError, || "Invalid echo plugin config")?;
+        serde_yaml::from_value(cfg).or_err_with(ReadError, || "Invalid cors plugin config")?;
 
     config
         .validate()
         .or_err_with(ReadError, || "Invalid cors plugin config")?;
 
-    if let Some(regex_list) = &config.allow_origins_by_regex {
-        for re in regex_list {
-            Regex::new(re).or_err_with(ReadError, || "Invalid cors plugin config")?;
-        }
-    }
+    // Pre-compile regex patterns
+    let compiled_config = config.compile_regexes()?;
 
-    Ok(Arc::new(PluginCors { config }))
+    Ok(Arc::new(PluginCors {
+        config: compiled_config,
+    }))
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Validate)]
 #[validate(schema(function = "PluginConfig::validate"))]
 pub struct PluginConfig {
-    /// you can use '*' to allow all origins when no credentials,
-    /// '**' to allow forcefully (it will bring some security risks, be carefully),
-    /// multiple origin use ',' to split. default: *
+    /// Specifies allowed origins. Use '*' to allow all origins when no credentials are used,
+    /// or '**' to forcefully allow all origins (WARNING: This poses security risks, use with caution).
+    /// Multiple origins can be specified, separated by commas. Default: *
     #[serde(default = "PluginConfig::default_star")]
     #[validate(custom(function = "PluginConfig::validate_origins"))]
     pub allow_origins: String,
 
-    /// you can use '*' to allow all methods when no credentials,
-    /// '**' to allow forcefully (it will bring some security risks, be carefully),
-    /// multiple method use ',' to split. default: *
+    /// Specifies allowed HTTP methods. Use '*' to allow all methods when no credentials are used,
+    /// or '**' to forcefully allow all methods (WARNING: This poses security risks, use with caution).
+    /// Multiple methods can be specified, separated by commas. Default: *
     #[serde(default = "PluginConfig::default_star")]
     #[validate(custom(function = "PluginConfig::validate_methods"))]
     pub allow_methods: String,
 
-    /// you can use '*' to allow all headers when no credentials,
-    /// '**' to allow forcefully (it will bring some security risks, be carefully),
-    /// multiple header use ',' to split. default: *
+    /// Specifies allowed headers. Use '*' to allow all headers when no credentials are used,
+    /// or '**' to forcefully allow all headers (WARNING: This poses security risks, use with caution).
+    /// Multiple headers can be specified, separated by commas. Default: *
     #[serde(default = "PluginConfig::default_star")]
     #[validate(custom(function = "PluginConfig::validate_headers"))]
     pub allow_headers: String,
 
-    /// multiple header use ',' to split.
+    /// Specifies headers to expose to the client. Multiple headers can be specified, separated by commas.
     /// If not specified, no custom headers are exposed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expose_headers: Option<String>,
 
-    /// maximum number of seconds the results can be cached.
-    /// -1 means no cached, the max value is depend on browser,
-    /// more details plz check MDN. default: 5
+    /// Maximum number of seconds the results can be cached.
+    /// -1 means no caching. The maximum value depends on the browser.
+    /// See MDN for more details. Default: 5
     #[serde(default = "PluginConfig::default_max_age")]
     pub max_age: i32,
 
-    /// allow client append credential. according to CORS specification,
-    /// if you set this option to 'true', you can not use '*' for other options.
+    /// Allows clients to include credentials. Per CORS specification,
+    /// if set to true, '*' cannot be used for other options.
     #[serde(default)]
     pub allow_credential: bool,
 
-    /// you can use regex to allow specific origins when no credentials,
-    /// e.g., [.*\\.test.com$] to allow a.test.com and b.test.com
+    /// Regular expressions to allow specific origins when no credentials are used.
+    /// Example: [.*\\.test.com$] allows a.test.com and b.test.com
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allow_origins_by_regex: Option<Vec<String>>,
 }
@@ -136,6 +136,45 @@ impl PluginConfig {
         Ok(())
     }
 
+    fn compile_regexes(self) -> Result<CompiledPluginConfig> {
+        let compiled_regexes = if let Some(regex_list) = &self.allow_origins_by_regex {
+            let compiled: Vec<Arc<Regex>> = regex_list
+                .iter()
+                .map(|re| {
+                    Regex::new(re)
+                        .map(Arc::new)
+                        .or_err_with(ReadError, || format!("Invalid regex: {}", re))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Some(compiled)
+        } else {
+            None
+        };
+
+        Ok(CompiledPluginConfig {
+            allow_origins: self.allow_origins,
+            allow_methods: self.allow_methods,
+            allow_headers: self.allow_headers,
+            expose_headers: self.expose_headers,
+            max_age: self.max_age,
+            allow_credential: self.allow_credential,
+            allow_origins_by_regex: compiled_regexes,
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct CompiledPluginConfig {
+    pub allow_origins: String,
+    pub allow_methods: String,
+    pub allow_headers: String,
+    pub expose_headers: Option<String>,
+    pub max_age: i32,
+    pub allow_credential: bool,
+    pub allow_origins_by_regex: Option<Vec<Arc<Regex>>>,
+}
+
+impl CompiledPluginConfig {
     fn is_origin_allowed(&self, origin: &str) -> bool {
         if self.allow_origins.is_empty() {
             return false;
@@ -155,15 +194,8 @@ impl PluginConfig {
 
         if let Some(regex_list) = &self.allow_origins_by_regex {
             for re in regex_list {
-                match Regex::new(re) {
-                    Ok(re) => {
-                        if re.is_match(origin) {
-                            return true;
-                        }
-                    }
-                    Err(e) => {
-                        log::error!("Invalid regex in allow_origins_by_regex: {} - {}", re, e);
-                    }
+                if re.is_match(origin) {
+                    return true;
                 }
             }
         }
@@ -173,53 +205,72 @@ impl PluginConfig {
 }
 
 pub struct PluginCors {
-    config: PluginConfig,
+    config: CompiledPluginConfig,
 }
 
 impl PluginCors {
     fn apply_cors_headers(&self, session: &mut Session, resp: &mut ResponseHeader) -> Result<()> {
-        let origin = request::get_req_header_value(session.req_header(), "Origin");
-        if origin.is_none() {
-            return Ok(());
-        }
+        if let Some(origin) =
+            request::get_req_header_value(session.req_header(), header::ORIGIN.as_str())
+        {
+            if !self.config.is_origin_allowed(origin) {
+                return Ok(());
+            }
 
-        let origin = origin.unwrap();
-        if !self.config.is_origin_allowed(origin) {
-            return Ok(());
-        }
+            resp.insert_header(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin)?;
+            if self.config.allow_credential {
+                resp.insert_header(header::ACCESS_CONTROL_ALLOW_CREDENTIALS, "true")?;
+            }
 
-        resp.insert_header("access-control-allow-origin", origin)?;
-        if self.config.allow_credential {
-            resp.insert_header("access-control-allow-credentials", "true")?;
-        }
+            let methods = if self.config.allow_methods == "**" {
+                "GET,POST,PUT,DELETE,PATCH,OPTIONS,HEAD".to_string()
+            } else {
+                self.config.allow_methods.clone()
+            };
+            resp.insert_header(header::ACCESS_CONTROL_ALLOW_METHODS, methods)?;
 
-        let methods = if self.config.allow_methods == "**" {
-            "GET,POST,PUT,DELETE,PATCH,OPTIONS,HEAD".to_string()
-        } else {
-            self.config.allow_methods.clone()
-        };
-        resp.insert_header("access-control-allow-methods", methods)?;
-
-        let headers = if self.config.allow_headers == "**" {
-            request::get_req_header_value(session.req_header(), "access-control-request-headers")
+            let headers = if self.config.allow_headers == "**" {
+                request::get_req_header_value(
+                    session.req_header(),
+                    header::ACCESS_CONTROL_REQUEST_HEADERS.as_str(),
+                )
                 .unwrap_or_default()
                 .to_string()
-        } else {
-            self.config.allow_headers.clone()
-        };
-        resp.insert_header("access-control-allow-headers", headers)?;
+            } else {
+                self.config.allow_headers.clone()
+            };
+            resp.insert_header(header::ACCESS_CONTROL_ALLOW_HEADERS, headers)?;
 
-        resp.insert_header("access-control-max-age", self.config.max_age.to_string())?;
+            resp.insert_header(
+                header::ACCESS_CONTROL_MAX_AGE,
+                self.config.max_age.to_string(),
+            )?;
 
-        if let Some(expose) = &self.config.expose_headers {
-            resp.insert_header("access-control-expose-headers", expose)?;
+            if let Some(expose) = &self.config.expose_headers {
+                resp.insert_header(header::ACCESS_CONTROL_EXPOSE_HEADERS, expose)?;
+            }
+
+            if self.config.allow_origins != "*" {
+                resp.insert_header(header::VARY, "Origin")?;
+            }
         }
-
-        if self.config.allow_origins != "*" {
-            resp.insert_header("vary", "Origin")?;
-        }
-
         Ok(())
+    }
+
+    fn handle_options_request(&self, session: &mut Session) -> Result<Option<ResponseHeader>> {
+        if let Some(origin) =
+            request::get_req_header_value(session.req_header(), header::ORIGIN.as_str())
+        {
+            if !self.config.is_origin_allowed(origin) {
+                return Ok(None);
+            }
+
+            let mut resp = ResponseHeader::build(StatusCode::NO_CONTENT, None)?;
+            self.apply_cors_headers(session, &mut resp)?;
+            Ok(Some(resp))
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -230,18 +281,16 @@ impl ProxyPlugin for PluginCors {
     }
 
     fn priority(&self) -> i32 {
-        4000
+        PRIORITY
     }
 
     async fn request_filter(&self, session: &mut Session, _ctx: &mut ProxyContext) -> Result<bool> {
-        // 如果是options请求，直接返回，并设置好请求头
         if session.req_header().method == Method::OPTIONS {
-            let mut resp = ResponseHeader::build(StatusCode::NO_CONTENT, None)?;
-            self.apply_cors_headers(session, &mut resp)?;
-            session.write_response_header(Box::new(resp), true).await?;
-            return Ok(true);
+            if let Some(resp) = self.handle_options_request(session)? {
+                session.write_response_header(Box::new(resp), true).await?;
+                return Ok(true);
+            }
         }
-
         Ok(false)
     }
 

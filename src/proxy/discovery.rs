@@ -31,7 +31,6 @@ pub struct DnsDiscovery {
     resolver: Arc<TokioAsyncResolver>,
     name: String,
     port: u32,
-
     scheme: UpstreamScheme,
     weight: u32,
 }
@@ -67,10 +66,10 @@ impl ServiceDiscovery for DnsDiscovery {
             .lookup_ip(name)
             .await
             .map_err(|e| {
-                log::warn!("DNS discovery failed for domain: {} failed: {}", name, e);
+                log::warn!("DNS discovery failed for domain: {}: {}", name, e);
                 Error::because(
                     InternalError,
-                    format!("DNS discovery failed for domain: {}", name),
+                    format!("DNS discovery failed for domain: {}: {}", name, e),
                     e,
                 )
             })?
@@ -115,13 +114,12 @@ impl ServiceDiscovery for HybridDiscovery {
     /// Discovers backends by combining static and DNS-based service discovery.
     async fn discover(&self) -> Result<(BTreeSet<Backend>, HashMap<u64, bool>)> {
         // Combine backends from static and DNS discoveries
-
         let mut backends = BTreeSet::new();
         let mut health_checks = HashMap::new();
 
         let futures = self.discoveries.iter().map(|discovery| async move {
             discovery.discover().await.map_err(|e| {
-                log::warn!("Hydrid discovery failed: {}", e);
+                log::warn!("Hybrid discovery failed: {}", e);
                 e
             })
         });
@@ -198,11 +196,16 @@ impl TryFrom<Upstream> for HybridDiscovery {
     }
 }
 
-/// Parses a host and port from a string.
-fn parse_host_and_port(addr: &str) -> Result<(String, Option<u32>)> {
-    let re = Regex::new(r"^(?:\[(.+?)\]|([^:]+))(?::(\d+))?$").unwrap();
+/// Regular expression for parsing host and port from an address string.
+static HOST_PORT_REGEX: once_cell::sync::Lazy<Regex> =
+    once_cell::sync::Lazy::new(|| Regex::new(r"^(?:\[(.+?)\]|([^:]+))(?::(\d+))?$").unwrap());
 
-    let caps = match re.captures(addr) {
+/// Parses a host and port from a string.
+///
+/// Supports IPv4, IPv6, and domain names, with optional port.
+/// Returns IPv6 addresses enclosed in square brackets for consistency.
+fn parse_host_and_port(addr: &str) -> Result<(String, Option<u32>)> {
+    let caps = match HOST_PORT_REGEX.captures(addr) {
         Some(caps) => caps,
         None => return Err(Error::explain(InternalError, "Invalid address format")),
     };
@@ -213,14 +216,14 @@ fn parse_host_and_port(addr: &str) -> Result<(String, Option<u32>)> {
         Some(
             port_str
                 .parse::<u32>()
-                .or_err_with(InternalError, || "Invalid port")?,
+                .or_err(InternalError, "Invalid port")?,
         )
     } else {
         None
     };
 
     // Ensure IPv6 addresses are enclosed in square brackets
-    let host = if host.contains(':') {
+    let host = if host.contains(':') && !host.starts_with('[') {
         format!("[{}]", host)
     } else {
         host.to_string()

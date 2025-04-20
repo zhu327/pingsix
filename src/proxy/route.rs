@@ -12,7 +12,7 @@ use pingora_error::{Error, Result};
 use pingora_proxy::Session;
 
 use crate::{
-    config,
+    config::{self, Identifiable},
     plugin::{build_plugin, ProxyPlugin},
     utils::request::get_request_host,
 };
@@ -20,7 +20,7 @@ use crate::{
 use super::{
     service::service_fetch,
     upstream::{upstream_fetch, ProxyUpstream},
-    Identifiable, MapOperations,
+    MapOperations,
 };
 
 /// Proxy route.
@@ -44,8 +44,8 @@ impl From<config::Route> for ProxyRoute {
 }
 
 impl Identifiable for ProxyRoute {
-    fn id(&self) -> String {
-        self.inner.id.clone()
+    fn id(&self) -> &str {
+        &self.inner.id
     }
 
     fn set_id(&mut self, id: String) {
@@ -60,14 +60,14 @@ impl ProxyRoute {
     ) -> Result<Self> {
         let mut proxy_route = Self::from(route.clone());
 
-        // 配置 upstream
+        // Configure upstream
         if let Some(upstream_config) = route.upstream {
             let mut proxy_upstream = ProxyUpstream::try_from(upstream_config)?;
             proxy_upstream.start_health_check(work_stealing);
             proxy_route.upstream = Some(Arc::new(proxy_upstream));
         }
 
-        // 加载插件
+        // Load plugins
         for (name, value) in route.plugins {
             let plugin = build_plugin(&name, value)?;
             proxy_route.plugins.push(plugin);
@@ -163,6 +163,7 @@ impl MatchEntry {
         match router.at_mut(uri) {
             Ok(routes) => {
                 routes.value.push(proxy_route);
+                // Sort routes by priority (higher priority values take precedence)
                 routes
                     .value
                     .sort_by(|a, b| b.inner.priority.cmp(&a.inner.priority));
@@ -186,6 +187,8 @@ impl MatchEntry {
             }
         } else {
             // Insert for host URIs
+            // Host strings are reversed to enable suffix/wildcard matching with matchit's prefix-based router
+            // (e.g., "*.example.com" becomes "moc.elpmaxe.*" for efficient matching)
             for host in hosts.iter() {
                 let reversed_host = host.chars().rev().collect::<String>();
                 let inner_router = self.host_uris.at_mut(reversed_host.as_str());
@@ -225,6 +228,7 @@ impl MatchEntry {
         );
 
         // Attempt to match using host_uris if a valid host is provided
+        // Host is reversed to match the format used during insertion (e.g., "moc.elpmaxe.*")
         if let Some(reversed_host) = host
             .filter(|h| !h.is_empty())
             .map(|h| h.chars().rev().collect::<String>())
@@ -259,7 +263,7 @@ impl MatchEntry {
                 }
 
                 // Match method
-                if route.inner.methods.iter().any(|m| m.to_string() == method) {
+                if route.inner.methods.iter().any(|m| *m == method) {
                     return Some((params, route.clone()));
                 }
             }
@@ -282,7 +286,10 @@ pub fn reload_global_route_match() {
 
     for route in ROUTE_MAP.iter() {
         debug!("Inserting route: {}", route.inner.id);
-        matcher.insert_route(route.clone()).unwrap();
+        if let Err(e) = matcher.insert_route(route.clone()) {
+            log::error!("Failed to insert route {}: {}", route.inner.id, e);
+            // Continue with other routes to avoid partial failures stopping the process
+        }
     }
 
     GLOBAL_ROUTE_MATCH.store(Arc::new(matcher));
@@ -308,20 +315,9 @@ pub fn load_static_routes(config: &config::Config) -> Result<()> {
         })
         .collect::<Result<Vec<_>>>()?;
 
-    ROUTE_MAP.reload_resource(proxy_routes);
+    ROUTE_MAP.reload_resources(proxy_routes);
 
     reload_global_route_match();
 
     Ok(())
-}
-
-/// Fetches an upstream by its ID.
-pub fn route_fetch(id: &str) -> Option<Arc<ProxyRoute>> {
-    match ROUTE_MAP.get(id) {
-        Some(rule) => Some(rule.value().clone()),
-        None => {
-            log::warn!("Route with id '{}' not found", id);
-            None
-        }
-    }
 }

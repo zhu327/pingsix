@@ -8,4 +8,4 @@ pub mod logging;
 pub mod plugin;
 pub mod proxy;
 pub mod service;
-pub mod utils;
+pub(crate) mod utils;

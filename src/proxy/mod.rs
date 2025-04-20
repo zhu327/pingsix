@@ -1,3 +1,8 @@
+//! Module for proxy context and resource management.
+//!
+//! This module defines the `ProxyContext` used per request and the generic
+//! `MapOperations` trait for managing resources in a thread-safe map.
+
 pub mod discovery;
 pub mod event;
 pub mod global_rule;
@@ -14,20 +19,25 @@ use std::{
 
 use dashmap::DashMap;
 
-use crate::plugin::ProxyPluginExecutor;
+use crate::{config::Identifiable, plugin::ProxyPluginExecutor};
 
 use route::ProxyRoute;
 
-/// Proxy context.
-///
-/// Holds the context for each request.
+/// Holds the context for each proxy request.
 pub struct ProxyContext {
+    /// The matched proxy route, if any.
     pub route: Option<Arc<ProxyRoute>>,
+    /// Parameters extracted from the route pattern.
     pub route_params: Option<BTreeMap<String, String>>,
+    /// Number of retry attempts so far.
     pub tries: usize,
+    /// Timestamp when the request started.
     pub request_start: Instant,
+    /// Executor for route-specific plugins.
     pub plugin: Arc<ProxyPluginExecutor>,
+    /// Executor for global plugins.
     pub global_plugin: Arc<ProxyPluginExecutor>,
+    /// Custom variables available to plugins.
     pub vars: HashMap<String, String>,
 }
 
@@ -45,14 +55,21 @@ impl Default for ProxyContext {
     }
 }
 
-pub trait Identifiable {
-    fn id(&self) -> String;
-    fn set_id(&mut self, id: String);
-}
-
+/// Trait for performing common operations on a map of resources.
+///
+/// Provides methods to fetch, bulk reload, and insert individual resources.
 pub trait MapOperations<T> {
-    fn reload_resource(&self, resources: Vec<Arc<T>>);
+    /// Get a resource by its identifier.
+    ///
+    /// Returns `Some(Arc<T>)` if found, otherwise logs a warning and returns `None`.
+    fn get(&self, id: &str) -> Option<Arc<T>>;
 
+    /// Reload the entire set of resources.
+    ///
+    /// Removes entries not present in `resources`, and inserts or updates all given resources.
+    fn reload_resources(&self, resources: Vec<Arc<T>>);
+
+    /// Insert or update a single resource.
     fn insert_resource(&self, resource: Arc<T>);
 }
 
@@ -60,25 +77,38 @@ impl<T> MapOperations<T> for DashMap<String, Arc<T>>
 where
     T: Identifiable,
 {
-    // reload_resource：根据新的资源更新 map，删除不在 resources 中的条目
-    fn reload_resource(&self, resources: Vec<Arc<T>>) {
-        // Log the old and new resources
-        for resource in resources.iter() {
-            log::info!("Inserting/Updating resource: {}", resource.id());
+    fn get(&self, id: &str) -> Option<Arc<T>> {
+        if let Some(entry) = self.get(id) {
+            Some(entry.clone())
+        } else {
+            log::warn!("Resource with id '{}' not found", id);
+            None
+        }
+    }
+
+    fn reload_resources(&self, resources: Vec<Arc<T>>) {
+        // Log incoming resources
+        for resource in &resources {
+            log::info!("Upserting resource: {}", resource.id());
         }
 
-        let resource_ids: HashSet<String> = resources.iter().map(|r| r.id()).collect();
-        self.retain(|key, _| resource_ids.contains(key));
+        // Build a set of IDs to keep
+        let valid_ids: HashSet<String> = resources.iter().map(|r| r.id().to_string()).collect();
 
+        // Remove entries not in the new set
+        self.retain(|key, _| valid_ids.contains(key));
+
+        // Insert or update all resources
         for resource in resources {
-            let key = resource.id();
-            log::info!("Inserting resource with id: {}", key);
+            let key = resource.id().to_string();
+            log::info!("Inserting or updating resource '{}'", key);
             self.insert(key, resource);
         }
     }
 
-    // insert_resource：插入新的资源
     fn insert_resource(&self, resource: Arc<T>) {
-        self.insert(resource.id(), resource);
+        let key = resource.id();
+        log::info!("Inserting resource '{}'", key);
+        self.insert(key.to_string(), resource);
     }
 }

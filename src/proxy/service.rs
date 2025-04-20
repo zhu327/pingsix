@@ -5,13 +5,13 @@ use once_cell::sync::Lazy;
 use pingora_error::Result;
 
 use crate::{
-    config,
+    config::{self, Identifiable},
     plugin::{build_plugin, ProxyPlugin},
 };
 
 use super::{
     upstream::{upstream_fetch, ProxyUpstream},
-    Identifiable, MapOperations,
+    MapOperations,
 };
 
 /// Fetches a service by its ID.
@@ -37,8 +37,8 @@ impl From<config::Service> for ProxyService {
 }
 
 impl Identifiable for ProxyService {
-    fn id(&self) -> String {
-        self.inner.id.clone()
+    fn id(&self) -> &str {
+        &self.inner.id
     }
 
     fn set_id(&mut self, id: String) {
@@ -100,7 +100,7 @@ pub fn load_static_services(config: &config::Config) -> Result<()> {
         })
         .collect::<Result<Vec<_>>>()?;
 
-    SERVICE_MAP.reload_resource(proxy_services);
+    SERVICE_MAP.reload_resources(proxy_services);
 
     Ok(())
 }

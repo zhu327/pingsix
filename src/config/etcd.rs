@@ -8,6 +8,10 @@ use tokio::{sync::Mutex, time::sleep};
 
 use super::Etcd;
 
+// Retry delay constants
+const LIST_RETRY_DELAY: Duration = Duration::from_secs(3);
+const WATCH_RETRY_DELAY: Duration = Duration::from_secs(1);
+
 #[derive(Debug)]
 pub enum EtcdError {
     ClientNotInitialized,
@@ -31,6 +35,7 @@ impl fmt::Display for EtcdError {
 
 impl std::error::Error for EtcdError {}
 
+/// Service responsible for syncing and watching etcd configuration changes.
 pub struct EtcdConfigSync {
     config: Etcd,
     client: Option<Client>,
@@ -53,17 +58,20 @@ impl EtcdConfigSync {
         }
     }
 
-    /// 获取或初始化 etcd 客户端
+    /// Get or initialize the etcd client.
     async fn get_client(&mut self) -> Result<&mut Client, EtcdError> {
         if self.client.is_none() {
-            log::info!("Creating new etcd client...");
+            log::info!(
+                "Creating new etcd client for prefix '{}'",
+                self.config.prefix
+            );
             self.client = Some(create_client(&self.config).await?);
         }
 
         self.client.as_mut().ok_or(EtcdError::ClientNotInitialized)
     }
 
-    /// 初始化时同步 etcd 数据
+    /// Synchronize etcd data on initialization.
     async fn list(&mut self) -> Result<(), EtcdError> {
         let prefix = self.config.prefix.clone(); // Clone prefix before mutable borrow
         let client = self.get_client().await?;
@@ -72,13 +80,15 @@ impl EtcdConfigSync {
         let response = client
             .get(prefix.as_str(), Some(options))
             .await
-            .map_err(|e| EtcdError::ListOperationFailed(e.to_string()))?;
+            .map_err(|e| {
+                EtcdError::ListOperationFailed(format!("Failed to list key '{}': {}", prefix, e))
+            })?;
 
         if let Some(header) = response.header() {
             self.revision = header.revision();
         } else {
             return Err(EtcdError::Other(
-                "Failed to get header from response".to_string(),
+                "Failed to get header from list response".to_string(),
             ));
         }
 
@@ -86,7 +96,7 @@ impl EtcdConfigSync {
         Ok(())
     }
 
-    /// 监听 etcd 数据变更
+    /// Watch for etcd data changes.
     async fn watch(&mut self) -> Result<(), EtcdError> {
         let prefix = self.config.prefix.clone(); // Clone prefix before mutable borrow
         let start_revision = self.revision + 1;
@@ -99,7 +109,9 @@ impl EtcdConfigSync {
         let (mut watcher, mut stream) = client
             .watch(prefix.as_str(), Some(options))
             .await
-            .map_err(|e| EtcdError::WatchOperationFailed(e.to_string()))?;
+            .map_err(|e| {
+                EtcdError::WatchOperationFailed(format!("Failed to watch key '{}': {}", prefix, e))
+            })?;
 
         watcher.request_progress().await.map_err(|e| {
             EtcdError::WatchOperationFailed(format!("Failed to request progress: {}", e))
@@ -109,7 +121,7 @@ impl EtcdConfigSync {
             EtcdError::WatchOperationFailed(format!("Failed to receive watch message: {}", e))
         })? {
             if response.canceled() {
-                log::warn!("Watch stream was canceled");
+                log::warn!("Watch stream for prefix '{}' was canceled", prefix);
                 break;
             }
 
@@ -120,21 +132,21 @@ impl EtcdConfigSync {
         Ok(())
     }
 
-    /// 重置客户端
+    /// Reset the client on failure.
     async fn reset_client(&mut self) {
-        log::warn!("Resetting etcd client...");
+        log::warn!("Resetting etcd client for prefix '{}'", self.config.prefix);
         self.client = None;
     }
 
-    /// 主任务循环
+    /// Main task loop for synchronization.
     async fn run_sync_loop(&mut self, mut shutdown: ShutdownWatch) {
         loop {
             tokio::select! {
-                biased; // 优先处理关闭信号
+                biased; // Prioritize shutdown signal
                 // Shutdown signal handling
                 _ = shutdown.changed() => {
                     if *shutdown.borrow() {
-                        log::info!("Shutdown signal received, stopping etcd config sync");
+                        log::info!("Shutdown signal received, stopping etcd config sync for prefix '{}'", self.config.prefix);
                         return;
                     }
                 },
@@ -142,20 +154,20 @@ impl EtcdConfigSync {
                 // Perform list operation
                 result = self.list() => {
                     if let Err(err) = result {
-                        log::error!("List operation failed: {:?}", err);
+                        log::error!("List operation failed for prefix '{}': {:?}", self.config.prefix, err);
                         self.reset_client().await;
-                        sleep(Duration::from_secs(3)).await;
+                        sleep(LIST_RETRY_DELAY).await;
                         continue;
                     }
                 }
             }
 
             tokio::select! {
-                biased; // 优先处理关闭信号
+                biased; // Prioritize shutdown signal
                 // Shutdown signal handling during watch
                 _ = shutdown.changed() => {
                     if *shutdown.borrow() {
-                        log::info!("Shutdown signal received, stopping etcd config sync");
+                        log::info!("Shutdown signal received, stopping etcd config sync for prefix '{}'", self.config.prefix);
                         return;
                     }
                 },
@@ -163,9 +175,9 @@ impl EtcdConfigSync {
                 // Perform watch operation
                 result = self.watch() => {
                     if let Err(err) = result {
-                        log::error!("Watch operation failed: {:?}", err);
+                        log::error!("Watch operation failed for prefix '{}': {:?}", self.config.prefix, err);
                         self.reset_client().await;
-                        sleep(Duration::from_secs(1)).await;
+                        sleep(WATCH_RETRY_DELAY).await;
                     }
                 }
             }
@@ -207,7 +219,12 @@ async fn create_client(cfg: &Etcd) -> Result<Client, EtcdError> {
 
     Client::connect(cfg.host.clone(), Some(options))
         .await
-        .map_err(|e| EtcdError::ConnectionFailed(e.to_string()))
+        .map_err(|e| {
+            EtcdError::ConnectionFailed(format!(
+                "Failed to connect to host '{:?}': {}",
+                cfg.host, e
+            ))
+        })
 }
 
 pub fn json_to_resource<T>(value: &[u8]) -> Result<T, Box<dyn Error>>
@@ -228,6 +245,7 @@ where
     Ok(resource)
 }
 
+/// Wrapper for etcd client used by Admin API, ensuring local mutability.
 pub struct EtcdClientWrapper {
     config: Etcd,
     client: Arc<Mutex<Option<Client>>>,
@@ -245,7 +263,10 @@ impl EtcdClientWrapper {
         let mut client_guard = self.client.lock().await;
 
         if client_guard.is_none() {
-            log::info!("Creating new etcd client...");
+            log::info!(
+                "Creating new etcd client for prefix '{}'",
+                self.config.prefix
+            );
             *client_guard = Some(
                 create_client(&self.config)
                     .await
@@ -264,10 +285,16 @@ impl EtcdClientWrapper {
             .as_mut()
             .ok_or(EtcdError::ClientNotInitialized)?;
 
+        let prefixed_key = self.with_prefix(key);
         client
-            .get(self.with_prefix(key), None)
+            .get(prefixed_key.as_bytes(), None)
             .await
-            .map_err(|e| EtcdError::ListOperationFailed(e.to_string()))
+            .map_err(|e| {
+                EtcdError::ListOperationFailed(format!(
+                    "Failed to get key '{}': {}",
+                    prefixed_key, e
+                ))
+            })
             .map(|resp| resp.kvs().first().map(|kv| kv.value().to_vec()))
     }
 
@@ -279,10 +306,16 @@ impl EtcdClientWrapper {
             .as_mut()
             .ok_or(EtcdError::ClientNotInitialized)?;
 
+        let prefixed_key = self.with_prefix(key);
         client
-            .put(self.with_prefix(key), value, None)
+            .put(prefixed_key.as_bytes(), value, None)
             .await
-            .map_err(|e| EtcdError::Other(format!("Put operation failed: {}", e)))?;
+            .map_err(|e| {
+                EtcdError::Other(format!(
+                    "Put operation for key '{}' failed: {}",
+                    prefixed_key, e
+                ))
+            })?;
         Ok(())
     }
 
@@ -294,10 +327,16 @@ impl EtcdClientWrapper {
             .as_mut()
             .ok_or(EtcdError::ClientNotInitialized)?;
 
+        let prefixed_key = self.with_prefix(key);
         client
-            .delete(self.with_prefix(key), None)
+            .delete(prefixed_key.as_bytes(), None)
             .await
-            .map_err(|e| EtcdError::Other(format!("Delete operation failed: {}", e)))?;
+            .map_err(|e| {
+                EtcdError::Other(format!(
+                    "Delete operation for key '{}' failed: {}",
+                    prefixed_key, e
+                ))
+            })?;
         Ok(())
     }
 

@@ -116,11 +116,12 @@ pub fn build_plugin(name: &str, cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> 
 /// - Constructs and returns the `ProxyPluginExecutor` instance.
 ///
 /// # Notes
-/// - This function ensures that plugins from the route take precedence over those from the service in case of naming conflicts.
+/// - Plugins from the route take precedence over those from the service in case of naming conflicts.
+///   If a plugin with the same name exists in both route and service, only the route's plugin is retained.
 pub fn build_plugin_executor(route: Arc<ProxyRoute>) -> Arc<ProxyPluginExecutor> {
     let mut plugin_map: HashMap<String, Arc<dyn ProxyPlugin>> = HashMap::new();
 
-    // 合并 route 和 service 的插件
+    // Merge route and service plugins
     let service_plugins = route
         .inner
         .service_id
@@ -134,7 +135,7 @@ pub fn build_plugin_executor(route: Arc<ProxyRoute>) -> Arc<ProxyPluginExecutor>
             .or_insert_with(|| plugin.clone());
     }
 
-    // 按优先级逆序排序
+    // Sort by priority in descending order
     let mut merged_plugins: Vec<_> = plugin_map.into_values().collect();
     merged_plugins.sort_by_key(|b| std::cmp::Reverse(b.priority()));
 
@@ -348,30 +349,36 @@ impl ProxyPlugin for ProxyPluginExecutor {
     }
 }
 
-pub fn apply_regex_uri_template(uri: &str, regex_templates: &[&str]) -> String {
-    for i in (0..regex_templates.len()).step_by(2) {
-        let pattern = regex_templates[i];
-        let redirect_template = regex_templates[i + 1];
-
-        // 创建正则对象
-        let re = Regex::new(pattern).unwrap();
-
-        // 如果正则匹配成功
+/// Applies regex-based URI rewriting based on provided precompiled patterns.
+///
+/// # Arguments
+/// - `uri`: The input URI to be rewritten.
+/// - `regex_patterns`: A slice of tuples containing precompiled `Regex` objects and their corresponding replacement templates.
+///
+/// # Returns
+/// - `String`: The rewritten URI if a pattern matches, or the original URI if no match is found.
+///
+/// # Notes
+/// - The regex patterns are precompiled during plugin creation (e.g., in `proxy_rewrite` or `redirect` plugins)
+///   to avoid repeated compilation overhead.
+/// - This function assumes that the regex patterns are valid, as they are validated during plugin configuration.
+pub fn apply_regex_uri_template(uri: &str, regex_patterns: &[(Regex, String)]) -> String {
+    for (re, redirect_template) in regex_patterns {
         if let Some(captures) = re.captures(uri) {
-            // 使用模板替换生成新的 URI
+            // Generate new URI by replacing capture groups in the template
             let redirect_uri = captures
                 .iter()
-                .skip(1) // 跳过第一个元素 (即完整匹配)
+                .skip(1) // Skip the full match
                 .enumerate()
                 .fold(redirect_template.to_string(), |acc, (i, capture)| {
-                    // 用捕获组替换模板中的 $1, $2, ...
+                    // Replace $1, $2, ... with capture groups
                     acc.replace(&format!("${}", i + 1), capture.unwrap().as_str())
                 });
             return redirect_uri;
         }
     }
 
-    // 如果没有匹配，返回原 URI（即进行代理转发）
+    // If no match, return original URI
     uri.to_string()
 }
 
@@ -381,100 +388,133 @@ mod tests {
 
     #[test]
     fn test_redirect_with_valid_match() {
-        let regex_templates = [
-            "^/iresty/(.*)/(.*)/(.*)",
-            "/$1-$2-$3",
-            "^/theothers/(.*)/(.*)",
-            "/theothers/$1-$2",
+        let regex_patterns = [
+            (
+                Regex::new(r"^/iresty/(.*)/(.*)/(.*)").unwrap(),
+                "/$1-$2-$3".to_string(),
+            ),
+            (
+                Regex::new(r"^/theothers/(.*)/(.*)").unwrap(),
+                "/theothers/$1-$2".to_string(),
+            ),
         ];
         let uri = "/iresty/a/b/c";
 
-        let result = apply_regex_uri_template(uri, &regex_templates);
+        let result = apply_regex_uri_template(uri, &regex_patterns);
 
         assert_eq!(result, "/a-b-c");
     }
 
     #[test]
     fn test_second_match_in_multi_patterns() {
-        let regex_templates = [
-            "^/iresty/(.*)/(.*)/(.*)",
-            "/$1-$2-$3",
-            "^/theothers/(.*)/(.*)",
-            "/theothers/$1-$2",
+        let regex_patterns = [
+            (
+                Regex::new(r"^/iresty/(.*)/(.*)/(.*)").unwrap(),
+                "/$1-$2-$3".to_string(),
+            ),
+            (
+                Regex::new(r"^/theothers/(.*)/(.*)").unwrap(),
+                "/theothers/$1-$2".to_string(),
+            ),
         ];
         let uri = "/theothers/x/y";
 
-        let result = apply_regex_uri_template(uri, &regex_templates);
+        let result = apply_regex_uri_template(uri, &regex_patterns);
 
         assert_eq!(result, "/theothers/x-y");
     }
 
     #[test]
     fn test_no_match_should_return_original_uri() {
-        let regex_templates = [
-            "^/iresty/(.*)/(.*)/(.*)",
-            "/$1-$2-$3",
-            "^/theothers/(.*)/(.*)",
-            "/theothers/$1-$2",
+        let regex_patterns = [
+            (
+                Regex::new(r"^/iresty/(.*)/(.*)/(.*)").unwrap(),
+                "/$1-$2-$3".to_string(),
+            ),
+            (
+                Regex::new(r"^/theothers/(.*)/(.*)").unwrap(),
+                "/theothers/$1-$2".to_string(),
+            ),
         ];
         let uri = "/api/test";
 
-        let result = apply_regex_uri_template(uri, &regex_templates);
+        let result = apply_regex_uri_template(uri, &regex_patterns);
 
         assert_eq!(result, "/api/test");
     }
 
     #[test]
     fn test_empty_uri() {
-        let regex_templates = [
-            "^/iresty/(.*)/(.*)/(.*)",
-            "/$1-$2-$3",
-            "^/theothers/(.*)/(.*)",
-            "/theothers/$1-$2",
+        let regex_patterns = [
+            (
+                Regex::new(r"^/iresty/(.*)/(.*)/(.*)").unwrap(),
+                "/$1-$2-$3".to_string(),
+            ),
+            (
+                Regex::new(r"^/theothers/(.*)/(.*)").unwrap(),
+                "/theothers/$1-$2".to_string(),
+            ),
         ];
         let uri = "";
 
-        let result = apply_regex_uri_template(uri, &regex_templates);
+        let result = apply_regex_uri_template(uri, &regex_patterns);
 
         assert_eq!(result, "");
     }
 
     #[test]
     fn test_uri_with_multiple_parts() {
-        let regex_templates = [
-            "^/iresty/(.*)/(.*)/(.*)",
-            "/$1-$2-$3",
-            "^/theothers/(.*)/(.*)",
-            "/theothers/$1-$2",
+        let regex_patterns = [
+            (
+                Regex::new(r"^/iresty/(.*)/(.*)/(.*)").unwrap(),
+                "/$1-$2-$3".to_string(),
+            ),
+            (
+                Regex::new(r"^/theothers/(.*)/(.*)").unwrap(),
+                "/theothers/$1-$2".to_string(),
+            ),
         ];
         let uri = "/iresty/a/b/c/d/e/f";
 
-        let result = apply_regex_uri_template(uri, &regex_templates);
+        let result = apply_regex_uri_template(uri, &regex_patterns);
 
         assert_eq!(result, "/a/b/c/d-e-f");
     }
 
     #[test]
     fn test_uri_with_special_characters() {
-        let regex_templates = [
-            "^/iresty/(.*)/(.*)/(.*)",
-            "/$1-$2-$3",
-            "^/theothers/(.*)/(.*)",
-            "/theothers/$1-$2",
+        let regex_patterns = [
+            (
+                Regex::new(r"^/iresty/(.*)/(.*)/(.*)").unwrap(),
+                "/$1-$2-$3".to_string(),
+            ),
+            (
+                Regex::new(r"^/theothers/(.*)/(.*)").unwrap(),
+                "/theothers/$1-$2".to_string(),
+            ),
         ];
         let uri = "/iresty/a/!/@";
 
-        let result = apply_regex_uri_template(uri, &regex_templates);
+        let result = apply_regex_uri_template(uri, &regex_patterns);
 
         assert_eq!(result, "/a-!-@");
     }
 
     #[test]
     fn test_empty_template_should_return_empty_string() {
-        let regex_templates = ["^/iresty/(.*)/(.*)/(.*)", "", "^/theothers/(.*)/(.*)", ""];
+        let regex_patterns = [
+            (
+                Regex::new(r"^/iresty/(.*)/(.*)/(.*)").unwrap(),
+                "".to_string(),
+            ),
+            (
+                Regex::new(r"^/theothers/(.*)/(.*)").unwrap(),
+                "".to_string(),
+            ),
+        ];
         let uri = "/iresty/a/b/c";
 
-        let result = apply_regex_uri_template(uri, &regex_templates);
+        let result = apply_regex_uri_template(uri, &regex_patterns);
 
         assert_eq!(result, "");
     }

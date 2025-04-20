@@ -19,9 +19,12 @@ use pingora_proxy::Session;
 use pingora_runtime::Runtime;
 use tokio::sync::watch;
 
-use crate::{config, utils::request::request_selector_key};
+use crate::{
+    config::{self, Identifiable},
+    utils::request::request_selector_key,
+};
 
-use super::{discovery::HybridDiscovery, Identifiable, MapOperations};
+use super::{discovery::HybridDiscovery, MapOperations};
 
 /// Proxy load balancer.
 ///
@@ -29,7 +32,6 @@ use super::{discovery::HybridDiscovery, Identifiable, MapOperations};
 pub struct ProxyUpstream {
     pub inner: config::Upstream,
     lb: SelectionLB,
-
     runtime: Option<Runtime>,
     watch: Option<watch::Sender<bool>>,
 }
@@ -37,7 +39,7 @@ pub struct ProxyUpstream {
 impl TryFrom<config::Upstream> for ProxyUpstream {
     type Error = Box<Error>;
 
-    /// Creates a new `ProxyLB` instance from an `Upstream` configuration.
+    /// Creates a new `ProxyUpstream` instance from an `Upstream` configuration.
     fn try_from(value: config::Upstream) -> Result<Self> {
         Ok(Self {
             inner: value.clone(),
@@ -49,8 +51,8 @@ impl TryFrom<config::Upstream> for ProxyUpstream {
 }
 
 impl Identifiable for ProxyUpstream {
-    fn id(&self) -> String {
-        self.inner.id.clone()
+    fn id(&self) -> &str {
+        &self.inner.id
     }
 
     fn set_id(&mut self, id: String) {
@@ -176,12 +178,12 @@ impl Drop for ProxyUpstream {
     fn drop(&mut self) {
         self.stop_health_check();
 
-        // 确保其他资源如 runtime 被释放
+        // Ensure other resources like runtime are released
         if let Some(runtime) = self.runtime.take() {
-            // 获取 runtime 的 handle
+            // Get the runtime handle
             let handler = runtime.get_handle().clone();
 
-            // 使用 handler 执行关闭逻辑
+            // Use handler to execute shutdown logic
             handler.spawn_blocking(move || {
                 runtime.shutdown_timeout(Duration::from_secs(1));
             });
@@ -247,7 +249,8 @@ where
             upstreams.health_check_frequency = Some(health_check_frequency);
         }
 
-        let background = background_service("health check", upstreams);
+        let background =
+            background_service(&format!("health check for {}", upstream.id), upstreams);
         let upstreams = background.task();
 
         let this = Self {
@@ -385,7 +388,7 @@ pub fn load_static_upstreams(config: &config::Config) -> Result<()> {
         .collect::<Result<Vec<_>>>()?;
 
     // Insert all ProxyUpstream instances into the global map.
-    UPSTREAM_MAP.reload_resource(proxy_upstreams);
+    UPSTREAM_MAP.reload_resources(proxy_upstreams);
 
     Ok(())
 }

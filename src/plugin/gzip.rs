@@ -8,25 +8,31 @@ use pingora_error::{ErrorType::ReadError, OrErr, Result};
 use pingora_proxy::Session;
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value as YamlValue;
+use validator::Validate;
 
 use crate::proxy::ProxyContext;
 
 use super::ProxyPlugin;
 
 pub const PLUGIN_NAME: &str = "gzip";
+const PRIORITY: i32 = 995;
 
 /// Creates a Gzip plugin instance with the given configuration.
 pub fn create_gzip_plugin(cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> {
     let config: PluginConfig =
         serde_yaml::from_value(cfg).or_err_with(ReadError, || "Invalid gzip plugin config")?;
+    config
+        .validate()
+        .or_err_with(ReadError, || "Gzip plugin config validation failed")?;
     Ok(Arc::new(PluginGzip { config }))
 }
 
 /// Configuration for the Gzip plugin.
-#[derive(Default, Debug, Serialize, Deserialize)]
+#[derive(Default, Debug, Serialize, Deserialize, Validate)]
 struct PluginConfig {
-    /// Compression level for Gzip (default: 1).
+    /// Compression level for Gzip (0-9).
     #[serde(default = "PluginConfig::default_comp_level")]
+    #[validate(range(min = 0, max = 9))]
     comp_level: u32,
 
     /// Enable or disable decompression (default: false).
@@ -53,7 +59,7 @@ impl ProxyPlugin for PluginGzip {
     }
 
     fn priority(&self) -> i32 {
-        995
+        PRIORITY
     }
 
     async fn early_request_filter(

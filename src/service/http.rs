@@ -49,18 +49,19 @@ impl ProxyHttp for HttpService {
         if let Some((route_params, route)) = global_route_match_fetch().match_request(session) {
             ctx.route_params = Some(route_params);
             ctx.route = Some(route.clone());
+            // Use cached plugin executor from route
             ctx.plugin = build_plugin_executor(route);
 
             ctx.global_plugin = global_plugin_fetch();
         }
 
-        // execute global rule plugins
+        // Execute global rule plugins
         ctx.global_plugin
             .clone()
             .early_request_filter(session, ctx)
             .await?;
 
-        // execute plugins
+        // Execute plugins
         ctx.plugin.clone().early_request_filter(session, ctx).await
     }
 
@@ -73,7 +74,7 @@ impl ProxyHttp for HttpService {
             return Ok(true);
         }
 
-        // execute global rule plugins
+        // Execute global rule plugins
         if ctx
             .global_plugin
             .clone()
@@ -83,7 +84,7 @@ impl ProxyHttp for HttpService {
             return Ok(true);
         };
 
-        // execute plugins
+        // Execute plugins
         ctx.plugin.clone().request_filter(session, ctx).await
     }
 
@@ -101,26 +102,26 @@ impl ProxyHttp for HttpService {
         peer
     }
 
-    // Modify the request before it is sent to the upstream
+    /// Modify the request before it is sent to the upstream
     async fn upstream_request_filter(
         &self,
         session: &mut Session,
         upstream_request: &mut RequestHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
-        // execute global rule plugins
+        // Execute global rule plugins
         ctx.global_plugin
             .clone()
             .upstream_request_filter(session, upstream_request, ctx)
             .await?;
 
-        // execute plugins
+        // Execute plugins
         ctx.plugin
             .clone()
             .upstream_request_filter(session, upstream_request, ctx)
             .await?;
 
-        // rewrite host header
+        // Rewrite host header
         if let Some(upstream) = ctx.route.as_ref().and_then(|r| r.resolve_upstream()) {
             upstream.upstream_host_rewrite(upstream_request);
         }
@@ -133,13 +134,13 @@ impl ProxyHttp for HttpService {
         upstream_response: &mut ResponseHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
-        // execute global rule plugins
+        // Execute global rule plugins
         ctx.global_plugin
             .clone()
             .response_filter(session, upstream_response, ctx)
             .await?;
 
-        // execute plugins
+        // Execute plugins
         ctx.plugin
             .clone()
             .response_filter(session, upstream_response, ctx)
@@ -153,12 +154,12 @@ impl ProxyHttp for HttpService {
         end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> Result<Option<Duration>> {
-        // execute global rule plugins
+        // Execute global rule plugins
         ctx.global_plugin
             .clone()
             .response_body_filter(session, body, end_of_stream, ctx)?;
 
-        // execute plugins
+        // Execute plugins
         ctx.plugin
             .clone()
             .response_body_filter(session, body, end_of_stream, ctx)?;
@@ -166,10 +167,10 @@ impl ProxyHttp for HttpService {
     }
 
     async fn logging(&self, session: &mut Session, e: Option<&Error>, ctx: &mut Self::CTX) {
-        // execute global rule plugins
+        // Execute global rule plugins
         ctx.global_plugin.clone().logging(session, e, ctx).await;
 
-        // execute plugins
+        // Execute plugins
         ctx.plugin.clone().logging(session, e, ctx).await;
     }
 

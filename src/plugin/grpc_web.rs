@@ -11,15 +11,20 @@ use crate::proxy::ProxyContext;
 use super::ProxyPlugin;
 
 pub const PLUGIN_NAME: &str = "grpc-web";
+const PRIORITY: i32 = 505;
 
 /// Creates a gRPC-Web plugin instance.
-/// This plugin enables support for the gRPC-Web protocol in the proxy.
+/// This plugin enables support for the gRPC-Web protocol by initializing the `GrpcWebBridge` module
+/// for each request. The configuration is currently unused, but the `cfg` parameter is provided for
+/// future extensibility.
 pub fn create_grpc_web_plugin(_cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> {
     Ok(Arc::new(PluginGrpcWeb {}))
 }
 
-/// gRPC-Web Plugin implementation.
-/// This plugin enables support for gRPC-Web protocol in the proxy.
+/// gRPC-Web plugin implementation.
+/// This plugin integrates the `GrpcWebBridge` module to enable gRPC-Web protocol support
+/// in the proxy, allowing clients to communicate with gRPC services over HTTP/1.1 or HTTP/2.
+#[derive(Default)]
 pub struct PluginGrpcWeb;
 
 #[async_trait]
@@ -29,7 +34,7 @@ impl ProxyPlugin for PluginGrpcWeb {
     }
 
     fn priority(&self) -> i32 {
-        505
+        PRIORITY
     }
 
     async fn early_request_filter(
@@ -42,7 +47,7 @@ impl ProxyPlugin for PluginGrpcWeb {
             .get_mut::<GrpcWebBridge>()
             .expect("GrpcWebBridge module added");
 
-        // initialize gRPC module for this request
+        // Initialize gRPC module for this request
         grpc.init();
         Ok(())
     }

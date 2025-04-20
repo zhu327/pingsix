@@ -1,24 +1,61 @@
 pub mod etcd;
 
-use std::{collections::HashMap, fmt, fs, net::SocketAddr};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    net::SocketAddr,
+};
 
+use http::Method;
 use log::{debug, trace};
 use pingora::server::configuration::{Opt, ServerConf};
 use pingora_error::{Error, ErrorType::*, OrErr, Result};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use serde_with::{serde_as, DisplayFromStr};
 use serde_yaml::Value as YamlValue;
 use validator::{Validate, ValidationError};
 
+/// Trait for types with an ID field, used for unique ID validation.
+pub trait Identifiable {
+    fn id(&self) -> &str;
+    fn set_id(&mut self, id: String);
+}
+
+macro_rules! impl_identifiable {
+    ($type:ty) => {
+        impl Identifiable for $type {
+            fn id(&self) -> &str {
+                &self.id
+            }
+
+            fn set_id(&mut self, id: String) {
+                self.id = id;
+            }
+        }
+    };
+}
+
+impl_identifiable!(Route);
+impl_identifiable!(Upstream);
+impl_identifiable!(Service);
+impl_identifiable!(GlobalRule);
+impl_identifiable!(SSL);
+
+/// Pingsix core config
+#[serde_as]
 #[derive(Default, Debug, Serialize, Deserialize, Validate)]
 #[validate(schema(function = "Config::validate_resource_id"))]
 pub struct Config {
+    /// pingora framework config
     #[serde(default)]
     pub pingora: ServerConf,
 
+    /// pingsix base config
     #[validate(nested)]
     pub pingsix: Pingsix,
 
+    // static resource config
     #[validate(nested)]
     #[serde(default)]
     pub routes: Vec<Route>,
@@ -69,16 +106,31 @@ impl Config {
 
         trace!("Loaded conf: {conf:?}");
 
-        // use validator to validate conf file
+        // Use validator to validate conf file
         conf.validate()
-            .or_err_with(FileReadError, || "Conf file valid failed")?;
+            .or_err_with(FileReadError, || "Conf file validation failed")?;
+
+        // Validate unique IDs
+        Self::validate_unique_ids(&conf.routes, "route")
+            .or_err_with(FileReadError, || "Route ID validation failed")?;
+        Self::validate_unique_ids(&conf.upstreams, "upstream")
+            .or_err_with(FileReadError, || "Upstream ID validation failed")?;
+        Self::validate_unique_ids(&conf.services, "service")
+            .or_err_with(FileReadError, || "Service ID validation failed")?;
+        Self::validate_unique_ids(&conf.global_rules, "global_rule")
+            .or_err_with(FileReadError, || "Global rule ID validation failed")?;
+        Self::validate_unique_ids(&conf.ssls, "ssl")
+            .or_err_with(FileReadError, || "SSL ID validation failed")?;
 
         Ok(conf)
     }
 
     #[allow(dead_code)]
     pub fn to_yaml(&self) -> String {
-        serde_yaml::to_string(self).unwrap()
+        serde_yaml::to_string(self).unwrap_or_else(|e| {
+            log::error!("Failed to serialize config to YAML: {}", e);
+            String::new()
+        })
     }
 
     pub fn merge_with_opt(&mut self, opt: &Opt) {
@@ -104,6 +156,19 @@ impl Config {
             return Err(ValidationError::new("global_rule_id_required"));
         }
 
+        Ok(())
+    }
+
+    fn validate_unique_ids<T: Identifiable>(items: &[T], resource_name: &str) -> Result<()> {
+        let mut ids = HashSet::new();
+        for item in items {
+            if !ids.insert(item.id().to_string()) {
+                return Error::e_explain(
+                    FileReadError,
+                    format!("Duplicate {} ID found: {}", resource_name, item.id()),
+                );
+            }
+        }
         Ok(())
     }
 }
@@ -206,6 +271,7 @@ pub struct Timeout {
     pub read: u64,
 }
 
+#[serde_as]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
 #[validate(schema(function = "Route::validate"))]
 pub struct Route {
@@ -216,7 +282,8 @@ pub struct Route {
     #[serde(default)]
     pub uris: Vec<String>,
     #[serde(default)]
-    pub methods: Vec<HttpMethod>,
+    #[serde_as(as = "Vec<DisplayFromStr>")]
+    pub methods: Vec<Method>,
     pub host: Option<String>,
     #[serde(default)]
     pub hosts: Vec<String>,
@@ -224,7 +291,7 @@ pub struct Route {
     pub priority: u32,
 
     #[serde(default)]
-    pub plugins: HashMap<String, YamlValue>,
+    pub plugins: HashMap<String, serde_yaml::Value>,
     #[validate(nested)]
     pub upstream: Option<Upstream>,
     pub upstream_id: Option<String>,
@@ -260,38 +327,6 @@ impl Route {
 
     fn default_priority() -> u32 {
         0
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum HttpMethod {
-    GET,
-    POST,
-    PUT,
-    DELETE,
-    PATCH,
-    HEAD,
-    OPTIONS,
-    CONNECT,
-    TRACE,
-    PURGE,
-}
-
-impl std::fmt::Display for HttpMethod {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let method = match self {
-            HttpMethod::GET => "GET",
-            HttpMethod::POST => "POST",
-            HttpMethod::PUT => "PUT",
-            HttpMethod::DELETE => "DELETE",
-            HttpMethod::PATCH => "PATCH",
-            HttpMethod::HEAD => "HEAD",
-            HttpMethod::OPTIONS => "OPTIONS",
-            HttpMethod::CONNECT => "CONNECT",
-            HttpMethod::TRACE => "TRACE",
-            HttpMethod::PURGE => "PURGE",
-        };
-        write!(f, "{}", method)
     }
 }
 
@@ -339,9 +374,11 @@ impl Upstream {
 
     // Custom validation function for `nodes` keys
     fn validate_nodes_keys(nodes: &HashMap<String, u32>) -> Result<(), ValidationError> {
-        let re =
-            Regex::new(r"(?i)^(?:(?:\d{1,3}\.){3}\d{1,3}|\[[0-9a-f:]+\]|[a-z0-9.-]+)(?::\d+)?$")
-                .unwrap();
+        // Stricter regex: IPv4, IPv6, or domain (must start with alphanumeric, allow hyphens, end with alphanumeric)
+        let re = Regex::new(
+            r"(?i)^(?:(?:\d{1,3}\.){3}\d{1,3}|\[[0-9a-f:]+\]|[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*)(?::\d+)?$"
+        )
+        .unwrap();
 
         for key in nodes.keys() {
             if !re.is_match(key) {
@@ -489,7 +526,7 @@ pub struct Service {
     #[serde(default)]
     pub id: String,
     #[serde(default)]
-    pub plugins: HashMap<String, YamlValue>,
+    pub plugins: HashMap<String, serde_yaml::Value>,
     pub upstream: Option<Upstream>,
     pub upstream_id: Option<String>,
     #[serde(default)]
@@ -527,16 +564,16 @@ pub struct SSL {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use http::Method;
 
     fn init_log() {
         let _ = env_logger::builder().is_test(true).try_init();
     }
 
     #[test]
-    fn not_a_test_i_cannot_write_yaml_by_hand() {
+    fn test_print_default_yaml() {
         init_log();
         let conf = Config::default();
-        // cargo test -- --nocapture not_a_test_i_cannot_write_yaml_by_hand
         println!("{}", conf.to_yaml());
     }
 
@@ -562,8 +599,9 @@ pingsix:
       offer_h2: true
 
 routes:
-  - id: 1
+  - id: "1"
     uri: /
+    methods: [GET, POST]
     upstream:
       nodes:
         "127.0.0.1:1980": 1
@@ -574,18 +612,17 @@ routes:
 upstreams:
   - nodes:
       "127.0.0.1:1980": 1
-    id: 1
+    id: "1"
     checks:
       active:
         type: http
 
 services:
-  - id: 1
-    upstream_id: 1
+  - id: "1"
+    upstream_id: "1"
     hosts: ["example.com"]
-        "#
-        .to_string();
-        let conf = Config::from_yaml(&conf_str).unwrap();
+        "#;
+        let conf = Config::from_yaml(conf_str).unwrap();
         assert_eq!(2, conf.pingora.client_bind_to_ipv4.len());
         assert_eq!(0, conf.pingora.client_bind_to_ipv6.len());
         assert_eq!(1, conf.pingora.version);
@@ -593,6 +630,7 @@ services:
         assert_eq!(1, conf.routes.len());
         assert_eq!(1, conf.upstreams.len());
         assert_eq!(1, conf.services.len());
+        assert_eq!(vec![Method::GET, Method::POST], conf.routes[0].methods);
         print!("{}", conf.to_yaml());
     }
 
@@ -619,31 +657,31 @@ pingsix:
       offer_h2: true
 
 routes:
-  - id: 1
+  - id: "1"
     uri: /
-    upstream_id: 1
+    methods: [GET]
+    upstream_id: "1"
 
 upstreams:
   - nodes:
       "127.0.0.1:1980": 1
-    id: 1
+    id: "1"
     checks:
       active:
         type: http
   - nodes:
       "127.0.0.1:1981": 1
-    id: 2
+    id: "2"
     checks:
       active:
         type: http
 
 services:
-  - id: 1
-    upstream_id: 1
+  - id: "1"
+    upstream_id: "1"
     hosts: ["example.com"]
-        "#
-        .to_string();
-        let conf = Config::from_yaml(&conf_str).unwrap();
+        "#;
+        let conf = Config::from_yaml(conf_str).unwrap();
         assert_eq!(2, conf.pingora.client_bind_to_ipv4.len());
         assert_eq!(0, conf.pingora.client_bind_to_ipv6.len());
         assert_eq!(1, conf.pingora.version);
@@ -651,6 +689,7 @@ services:
         assert_eq!(1, conf.routes.len());
         assert_eq!(2, conf.upstreams.len());
         assert_eq!(1, conf.services.len());
+        assert_eq!(vec![Method::GET], conf.routes[0].methods);
         print!("{}", conf.to_yaml());
     }
 
@@ -663,21 +702,18 @@ pingsix:
   listeners: []
 
 routes:
-  - id: 1
+  - id: "1"
     uri: /
     upstream:
       nodes:
         "127.0.0.1:1980": 1
-        "#
-        .to_string();
-        let conf = Config::from_yaml(&conf_str);
-        // Check for error and print the result
+        "#;
+        let conf = Config::from_yaml(conf_str);
         match conf {
             Ok(_) => panic!("Expected error, but got a valid config"),
             Err(e) => {
-                // Print the error here
                 eprintln!("Error: {:?}", e);
-                assert!(true); // You can assert true because you expect an error
+                assert!(true);
             }
         }
     }
@@ -693,21 +729,18 @@ pingsix:
       offer_h2: true
 
 routes:
-  - id: 1
+  - id: "1"
     uri: /
     upstream:
       nodes:
         "127.0.0.1:1980": 1
-        "#
-        .to_string();
-        let conf = Config::from_yaml(&conf_str);
-        // Check for error and print the result
+        "#;
+        let conf = Config::from_yaml(conf_str);
         match conf {
             Ok(_) => panic!("Expected error, but got a valid config"),
             Err(e) => {
-                // Print the error here
                 eprintln!("Error: {:?}", e);
-                assert!(true); // You can assert true because you expect an error
+                assert!(true);
             }
         }
     }
@@ -722,20 +755,17 @@ pingsix:
     - address: "[::1]:8080"
 
 routes:
-  - id: 1
+  - id: "1"
     upstream:
       nodes:
         "127.0.0.1:1980": 1
-        "#
-        .to_string();
-        let conf = Config::from_yaml(&conf_str);
-        // Check for error and print the result
+        "#;
+        let conf = Config::from_yaml(conf_str);
         match conf {
             Ok(_) => panic!("Expected error, but got a valid config"),
             Err(e) => {
-                // Print the error here
                 eprintln!("Error: {:?}", e);
-                assert!(true); // You can assert true because you expect an error
+                assert!(true);
             }
         }
     }
@@ -750,21 +780,19 @@ pingsix:
     - address: "[::1]:8080"
 
 routes:
-  - id: 1
+  - id: "1"
+    uri: /
     upstream:
       nodes:
         "127.0.0.1:1980": 1
       pass_host: rewrite
-        "#
-        .to_string();
-        let conf = Config::from_yaml(&conf_str);
-        // Check for error and print the result
+        "#;
+        let conf = Config::from_yaml(conf_str);
         match conf {
             Ok(_) => panic!("Expected error, but got a valid config"),
             Err(e) => {
-                // Print the error here
                 eprintln!("Error: {:?}", e);
-                assert!(true); // You can assert true because you expect an error
+                assert!(true);
             }
         }
     }
@@ -779,7 +807,7 @@ pingsix:
     - address: "[::1]:8080"
 
 routes:
-  - id: 1
+  - id: "1"
     uri: /
     upstream:
       nodes:
@@ -794,16 +822,13 @@ upstreams:
     checks:
       active:
         type: http
-        "#
-        .to_string();
-        let conf = Config::from_yaml(&conf_str);
-        // Check for error and print the result
+        "#;
+        let conf = Config::from_yaml(conf_str);
         match conf {
             Ok(_) => panic!("Expected error, but got a valid config"),
             Err(e) => {
-                // Print the error here
                 eprintln!("Error: {:?}", e);
-                assert!(true); // You can assert true because you expect an error
+                assert!(true);
             }
         }
     }
@@ -818,18 +843,15 @@ pingsix:
     - address: "[::1]:8080"
 
 routes:
-  - id: 1
+  - id: "1"
     uri: /
-        "#
-        .to_string();
-        let conf = Config::from_yaml(&conf_str);
-        // Check for error and print the result
+        "#;
+        let conf = Config::from_yaml(conf_str);
         match conf {
             Ok(_) => panic!("Expected error, but got a valid config"),
             Err(e) => {
-                // Print the error here
                 eprintln!("Error: {:?}", e);
-                assert!(true); // You can assert true because you expect an error
+                assert!(true);
             }
         }
     }
@@ -844,7 +866,7 @@ pingsix:
     - address: "[::1]:8080"
 
 routes:
-  - id: 1
+  - id: "1"
     uri: /
     upstream:
       nodes:
@@ -854,18 +876,80 @@ routes:
           type: http
 
 services:
-  - id: 1
+  - id: "1"
     hosts: ["example.com"]
-        "#
-        .to_string();
-        let conf = Config::from_yaml(&conf_str);
-        // Check for error and print the result
+        "#;
+        let conf = Config::from_yaml(conf_str);
         match conf {
             Ok(_) => panic!("Expected error, but got a valid config"),
             Err(e) => {
-                // Print the error here
                 eprintln!("Error: {:?}", e);
-                assert!(true); // You can assert true because you expect an error
+                assert!(true);
+            }
+        }
+    }
+
+    #[test]
+    fn test_duplicate_ids() {
+        init_log();
+        let conf_str = r#"
+---
+pingsix:
+  listeners:
+    - address: "[::1]:8080"
+
+routes:
+  - id: "1"
+    uri: /
+    upstream:
+      nodes:
+        "127.0.0.1:1980": 1
+  - id: "1"
+    uri: /other
+    upstream:
+      nodes:
+        "127.0.0.1:1981": 1
+
+upstreams:
+  - id: "1"
+    nodes:
+      "127.0.0.1:1980": 1
+  - id: "1"
+    nodes:
+      "127.0.0.1:1981": 1
+        "#;
+        let conf = Config::from_yaml(conf_str);
+        match conf {
+            Ok(_) => panic!("Expected error, but got a valid config"),
+            Err(e) => {
+                eprintln!("Error: {:?}", e);
+                assert!(true);
+            }
+        }
+    }
+
+    #[test]
+    fn test_invalid_node_key() {
+        init_log();
+        let conf_str = r#"
+---
+pingsix:
+  listeners:
+    - address: "[::1]:8080"
+
+routes:
+  - id: "1"
+    uri: /
+    upstream:
+      nodes:
+        "-invalid.com:8080": 1
+        "#;
+        let conf = Config::from_yaml(conf_str);
+        match conf {
+            Ok(_) => panic!("Expected error, but got a valid config"),
+            Err(e) => {
+                eprintln!("Error: {:?}", e);
+                assert!(true);
             }
         }
     }

@@ -31,6 +31,7 @@ enum ApiError {
     MissingParameter(String),
     InvalidRequest(String),
     InternalError(String),
+    RequestBodyReadError(String),
 }
 
 impl fmt::Display for ApiError {
@@ -43,26 +44,27 @@ impl fmt::Display for ApiError {
             ApiError::MissingParameter(msg) => write!(f, "Missing parameter: {}", msg),
             ApiError::InvalidRequest(msg) => write!(f, "Invalid request: {}", msg),
             ApiError::InternalError(msg) => write!(f, "Internal error: {}", msg),
+            ApiError::RequestBodyReadError(msg) => write!(f, "Request body read error: {}", msg),
         }
     }
 }
 
 impl Error for ApiError {}
 
-impl From<ApiError> for Response<Vec<u8>> {
-    fn from(error: ApiError) -> Self {
-        match error {
-            // ... 匹配不同的错误类型，返回不同的状态码和错误信息
+impl ApiError {
+    fn into_response(self) -> Response<Vec<u8>> {
+        match self {
             ApiError::EtcdGetError(_)
             | ApiError::EtcdPutError(_)
             | ApiError::EtcdDeleteError(_)
-            | ApiError::InternalError(_) => {
-                ResponseHelper::error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string())
+            | ApiError::InternalError(_)
+            | ApiError::RequestBodyReadError(_) => {
+                ResponseHelper::error(StatusCode::INTERNAL_SERVER_ERROR, &self.to_string())
             }
             ApiError::ValidationError(_)
             | ApiError::MissingParameter(_)
             | ApiError::InvalidRequest(_) => {
-                ResponseHelper::error(StatusCode::BAD_REQUEST, &error.to_string())
+                ResponseHelper::error(StatusCode::BAD_REQUEST, &self.to_string())
             }
         }
     }
@@ -80,22 +82,36 @@ impl ResponseHelper {
         let mut builder = Response::builder().status(StatusCode::OK);
 
         if let Some(ct) = content_type {
-            if let Ok(header_value) = HeaderValue::from_str(ct) {
-                builder = builder.header(header::CONTENT_TYPE, header_value);
-            } else {
-                // 如果 content_type 无法转换为 HeaderValue，可以选择日志记录或忽略
-                log::error!("Invalid content type: {}", ct);
+            match HeaderValue::from_str(ct) {
+                Ok(header_value) => {
+                    builder = builder.header(header::CONTENT_TYPE, header_value);
+                }
+                Err(e) => {
+                    log::error!("Invalid content type '{}': {}", ct, e);
+                }
             }
         }
 
-        builder.body(body).unwrap()
+        builder.body(body).unwrap_or_else(|e| {
+            log::error!("Failed to build success response: {}", e);
+            Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(b"Internal Server Error".to_vec())
+                .unwrap()
+        })
     }
 
     pub fn error(status: StatusCode, message: &str) -> Response<Vec<u8>> {
         Response::builder()
             .status(status)
             .body(message.as_bytes().to_vec())
-            .unwrap()
+            .unwrap_or_else(|e| {
+                log::error!("Failed to build error response: {}", e);
+                Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(b"Internal Server Error".to_vec())
+                    .unwrap()
+            })
     }
 }
 
@@ -118,8 +134,8 @@ pub struct AdminHttpApp {
 impl AdminHttpApp {
     pub fn new(cfg: &Pingsix) -> Self {
         let mut this = Self {
-            config: cfg.admin.clone().unwrap(),
-            etcd: EtcdClientWrapper::new(cfg.etcd.clone().unwrap()),
+            config: cfg.admin.clone().expect("Admin config must be present"),
+            etcd: EtcdClientWrapper::new(cfg.etcd.clone().expect("Etcd config must be present")),
             router: Router::new(),
         };
 
@@ -146,9 +162,14 @@ impl AdminHttpApp {
         if self.router.at(path).is_err() {
             let mut handlers = HashMap::new();
             handlers.insert(method, handler);
-            self.router.insert(path, handlers).unwrap();
+            self.router
+                .insert(path, handlers)
+                .expect("Route insertion should not fail");
         } else {
-            let routes = self.router.at_mut(path).unwrap();
+            let routes = self
+                .router
+                .at_mut(path)
+                .expect("Route should exist after check");
             routes.value.insert(method, handler);
         }
         self
@@ -186,7 +207,7 @@ impl ServeHttp for AdminHttpApp {
                         .collect();
                     match handler.handle(&self.etcd, http_session, params).await {
                         Ok(resp) => resp,
-                        Err(e) => e.into(),
+                        Err(e) => e.into_response(),
                     }
                 }
                 None => ResponseHelper::error(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed"),
@@ -208,7 +229,9 @@ impl Handler for ResourcePutHandler {
     ) -> ApiResult<Response<Vec<u8>>> {
         validate_content_type(http_session)?;
 
-        let body_data = read_request_body(http_session).await?;
+        let body_data = read_request_body(http_session)
+            .await
+            .map_err(|e| ApiError::RequestBodyReadError(e.to_string()))?;
         let resource_type = params
             .get("resource")
             .ok_or_else(|| ApiError::MissingParameter("resource".into()))?;
@@ -298,26 +321,28 @@ impl Handler for ResourceDeleteHandler {
 
 fn validate_api_key(http_session: &ServerSession, api_key: &str) -> ApiResult<()> {
     match http_session.get_header("x-api-key") {
-        Some(key) if key.to_str().unwrap_or("") == api_key => Ok(()),
-        _ => Err(ApiError::InvalidRequest("Must provide API key".into())),
+        Some(key) if key.as_bytes() == api_key.as_bytes() => Ok(()),
+        _ => Err(ApiError::InvalidRequest(
+            "Must provide valid API key".into(),
+        )),
     }
 }
 
 fn validate_content_type(http_session: &ServerSession) -> ApiResult<()> {
     match http_session.get_header(header::CONTENT_TYPE) {
-        Some(content_type) if content_type.to_str().unwrap_or("") == "application/json" => Ok(()),
+        Some(content_type) if content_type.as_bytes() == b"application/json" => Ok(()),
         _ => Err(ApiError::InvalidRequest(
             "Content-Type must be application/json".into(),
         )),
     }
 }
 
-async fn read_request_body(http_session: &mut ServerSession) -> ApiResult<Vec<u8>> {
+async fn read_request_body(http_session: &mut ServerSession) -> Result<Vec<u8>, ApiError> {
     let mut body_data = Vec::new();
     while let Some(bytes) = http_session
         .read_request_body()
         .await
-        .map_err(|e| ApiError::InternalError(e.to_string()))?
+        .map_err(|e| ApiError::RequestBodyReadError(e.to_string()))?
     {
         body_data.extend_from_slice(&bytes);
     }
@@ -330,33 +355,38 @@ fn validate_resource(resource_type: &str, body_data: &[u8]) -> ApiResult<()> {
             let route = validate_with_plugins::<config::Route>(body_data)?;
             route
                 .validate()
-                .map_err(|e| ApiError::ValidationError(e.to_string()))
+                .map_err(|e| ApiError::ValidationError(format!("Route validation failed: {}", e)))
         }
         "upstreams" => {
-            let upstream = json_to_resource::<config::Upstream>(body_data)
-                .map_err(|e| ApiError::InvalidRequest(format!("Invalid JSON data: {}", e)))?;
-            upstream
-                .validate()
-                .map_err(|e| ApiError::ValidationError(e.to_string()))
+            let upstream = json_to_resource::<config::Upstream>(body_data).map_err(|e| {
+                ApiError::InvalidRequest(format!("Invalid upstream JSON data: {}", e))
+            })?;
+            upstream.validate().map_err(|e| {
+                ApiError::ValidationError(format!("Upstream validation failed: {}", e))
+            })
         }
         "services" => {
             let service = validate_with_plugins::<config::Service>(body_data)?;
             service
                 .validate()
-                .map_err(|e| ApiError::ValidationError(e.to_string()))
+                .map_err(|e| ApiError::ValidationError(format!("Service validation failed: {}", e)))
         }
         "global_rules" => {
             let rule = validate_with_plugins::<config::GlobalRule>(body_data)?;
-            rule.validate()
-                .map_err(|e| ApiError::ValidationError(e.to_string()))
+            rule.validate().map_err(|e| {
+                ApiError::ValidationError(format!("GlobalRule validation failed: {}", e))
+            })
         }
         "ssls" => {
             let ssl = json_to_resource::<config::SSL>(body_data)
-                .map_err(|e| ApiError::InvalidRequest(format!("Invalid JSON data: {}", e)))?;
+                .map_err(|e| ApiError::InvalidRequest(format!("Invalid SSL JSON data: {}", e)))?;
             ssl.validate()
-                .map_err(|e| ApiError::ValidationError(e.to_string()))
+                .map_err(|e| ApiError::ValidationError(format!("SSL validation failed: {}", e)))
         }
-        _ => Err(ApiError::InvalidRequest("Unsupported resource type".into())),
+        _ => Err(ApiError::InvalidRequest(format!(
+            "Unsupported resource type: {}",
+            resource_type
+        ))),
     }
 }
 
@@ -364,10 +394,10 @@ fn validate_with_plugins<T: PluginValidatable + DeserializeOwned>(
     body_data: &[u8],
 ) -> ApiResult<T> {
     let resource = json_to_resource::<T>(body_data)
-        .map_err(|e| ApiError::InvalidRequest(format!("Invalid JSON data: {}", e)))?;
+        .map_err(|e| ApiError::InvalidRequest(format!("Invalid JSON data for resource: {}", e)))?;
     resource
         .validate_plugins()
-        .map_err(|e| ApiError::ValidationError(e.to_string()))?;
+        .map_err(|e| ApiError::ValidationError(format!("Plugin validation failed: {}", e)))?;
     Ok(resource)
 }
 
@@ -378,7 +408,8 @@ trait PluginValidatable {
 impl PluginValidatable for config::Route {
     fn validate_plugins(&self) -> Result<(), Box<dyn Error>> {
         for (name, value) in &self.plugins {
-            build_plugin(name, value.clone())?;
+            build_plugin(name, value.clone())
+                .map_err(|e| format!("Failed to build plugin '{}': {}", name, e))?;
         }
         Ok(())
     }
@@ -387,7 +418,8 @@ impl PluginValidatable for config::Route {
 impl PluginValidatable for config::Service {
     fn validate_plugins(&self) -> Result<(), Box<dyn Error>> {
         for (name, value) in &self.plugins {
-            build_plugin(name, value.clone())?;
+            build_plugin(name, value.clone())
+                .map_err(|e| format!("Failed to build plugin '{}': {}", name, e))?;
         }
         Ok(())
     }
@@ -396,7 +428,8 @@ impl PluginValidatable for config::Service {
 impl PluginValidatable for config::GlobalRule {
     fn validate_plugins(&self) -> Result<(), Box<dyn Error>> {
         for (name, value) in &self.plugins {
-            build_plugin(name, value.clone())?;
+            build_plugin(name, value.clone())
+                .map_err(|e| format!("Failed to build plugin '{}': {}", name, e))?;
         }
         Ok(())
     }

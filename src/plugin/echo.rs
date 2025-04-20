@@ -13,23 +13,23 @@ use crate::proxy::ProxyContext;
 use super::ProxyPlugin;
 
 pub const PLUGIN_NAME: &str = "echo";
+const PRIORITY: i32 = 412;
 
 /// Creates an Echo plugin instance with the given configuration.
 pub fn create_echo_plugin(cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> {
     let config: PluginConfig =
         serde_yaml::from_value(cfg).or_err_with(ReadError, || "Invalid echo plugin config")?;
-
     Ok(Arc::new(PluginEcho { config }))
 }
 
 /// Configuration for the Echo plugin.
-/// Specifies the response body and optional headers.
 #[derive(Default, Debug, Serialize, Deserialize)]
 struct PluginConfig {
-    /// The response body that will be echoed.
+    /// The response body to be sent back in the HTTP response.
     body: String,
 
-    /// Additional response headers to include in the echoed response.
+    /// Additional HTTP headers to include in the response.
+    /// Keys are header names, and values are header values.
     #[serde(default)]
     headers: HashMap<String, String>,
 }
@@ -46,7 +46,7 @@ impl ProxyPlugin for PluginEcho {
     }
 
     fn priority(&self) -> i32 {
-        412
+        PRIORITY
     }
 
     async fn request_filter(&self, session: &mut Session, _ctx: &mut ProxyContext) -> Result<bool> {

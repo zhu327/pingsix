@@ -8,25 +8,31 @@ use pingora_error::{ErrorType::ReadError, OrErr, Result};
 use pingora_proxy::Session;
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value as YamlValue;
+use validator::Validate;
 
 use crate::proxy::ProxyContext;
 
 use super::ProxyPlugin;
 
 pub const PLUGIN_NAME: &str = "brotli";
+const PRIORITY: i32 = 996;
 
 /// Creates a Brotli plugin instance with the given configuration.
 pub fn create_brotli_plugin(cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> {
     let config: PluginConfig =
         serde_yaml::from_value(cfg).or_err_with(ReadError, || "Invalid brotli plugin config")?;
+    config
+        .validate()
+        .or_err_with(ReadError, || "Brotli plugin config validation failed")?;
     Ok(Arc::new(PluginBrotli { config }))
 }
 
 /// Configuration for the Brotli plugin.
-#[derive(Default, Debug, Serialize, Deserialize)]
+#[derive(Default, Debug, Serialize, Deserialize, Validate)]
 struct PluginConfig {
     /// Compression level (0-11) for Brotli.
     #[serde(default = "PluginConfig::default_comp_level")]
+    #[validate(range(min = 0, max = 11))]
     comp_level: u32,
 
     /// Whether to enable decompression for Brotli.
@@ -52,7 +58,7 @@ impl ProxyPlugin for PluginBrotli {
     }
 
     fn priority(&self) -> i32 {
-        996
+        PRIORITY
     }
 
     async fn early_request_filter(

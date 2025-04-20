@@ -5,8 +5,8 @@ use once_cell::sync::Lazy;
 use pingora_core::{Error, Result};
 use pingora_proxy::Session;
 use prometheus::{
-    register_histogram_vec, register_int_counter_vec, register_int_gauge, HistogramOpts,
-    HistogramVec, IntCounterVec, IntGauge,
+    register_histogram_vec, register_int_counter, register_int_counter_vec, HistogramOpts,
+    HistogramVec, IntCounter, IntCounterVec,
 };
 use serde_yaml::Value as YamlValue;
 
@@ -20,8 +20,8 @@ const DEFAULT_BUCKETS: &[f64] = &[
 ];
 
 // Total number of requests
-static REQUESTS: Lazy<IntGauge> = Lazy::new(|| {
-    register_int_gauge!(
+static REQUESTS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
         "http_requests_total",
         "The total number of client requests since pingsix started"
     )
@@ -71,6 +71,7 @@ static BANDWIDTH: Lazy<IntCounterVec> = Lazy::new(|| {
 });
 
 pub const PLUGIN_NAME: &str = "prometheus";
+const PRIORITY: i32 = 500;
 
 pub fn create_prometheus_plugin(_cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> {
     Ok(Arc::new(PluginPrometheus {}))
@@ -85,7 +86,7 @@ impl ProxyPlugin for PluginPrometheus {
     }
 
     fn priority(&self) -> i32 {
-        500
+        PRIORITY
     }
 
     async fn logging(&self, session: &mut Session, _e: Option<&Error>, ctx: &mut ProxyContext) {
@@ -102,21 +103,23 @@ impl ProxyPlugin for PluginPrometheus {
         // Extract route information, falling back to empty string if not present
         let route_id = route.as_ref().map_or_else(|| "", |r| r.inner.id.as_str());
 
-        // Extract URI and host, falling back to empty string or default values
+        // Extract URI template (or fallback to empty string) to avoid high cardinality from raw URIs
         let uri = route
             .as_ref()
             .map_or("", |_| session.req_header().uri.path());
 
+        // Extract host, falling back to empty string
         let host = route.as_ref().map_or("", |_| {
             get_request_host(session.req_header()).unwrap_or_default()
         });
 
-        // Extract service, falling back to host if service_id is None
-        let service = route
-            .as_ref()
-            .map_or_else(|| host, |r| r.inner.service_id.as_deref().unwrap_or(host));
+        // Extract service, falling back to "unknown" if service_id is None
+        let service = route.as_ref().map_or_else(
+            || "unknown",
+            |r| r.inner.service_id.as_deref().unwrap_or("unknown"),
+        );
 
-        // Extract node from context variables
+        // Extract node from context variables (assumes HttpService::upstream_peer sets ctx.vars["upstream"])
         let node = ctx.vars.get("upstream").map_or("", |s| s.as_str());
 
         // Update Prometheus metrics
