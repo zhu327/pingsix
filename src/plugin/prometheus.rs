@@ -123,6 +123,7 @@ impl ProxyPlugin for PluginPrometheus {
         let node = ctx.vars.get("upstream").map_or("", |s| s.as_str());
 
         // Update Prometheus metrics
+        // ! The matched_uri tag still uses the original path, which can cause high cardinality issues.
         STATUS
             .with_label_values(&[code, route_id, uri, host, service, node])
             .inc();

@@ -26,6 +26,17 @@ use crate::{
 
 use super::{discovery::HybridDiscovery, MapOperations};
 
+/// Fetches an upstream by its ID.
+pub fn upstream_fetch(id: &str) -> Option<Arc<ProxyUpstream>> {
+    match UPSTREAM_MAP.get(id) {
+        Some(rule) => Some(rule.value().clone()),
+        None => {
+            log::warn!("Upstream with id '{}' not found", id);
+            None
+        }
+    }
+}
+
 /// Proxy load balancer.
 ///
 /// Manages the load balancing of requests to upstream servers.
@@ -60,6 +71,9 @@ impl Identifiable for ProxyUpstream {
     }
 }
 
+// ! Each ProxyUpstream with health check will still create its own pingora_runtime::Runtime.
+// ! This will result in a potentially large number of threads being created (number of threads = number of upstreams * number of threads per Runtime).
+// ! It is strongly recommended to use the Background Service mechanism provided by Pingora Server to run health checks instead.
 impl ProxyUpstream {
     pub fn new_with_health_check(upstream: config::Upstream, work_stealing: bool) -> Result<Self> {
         let mut proxy_upstream = Self::try_from(upstream)?;
@@ -391,15 +405,4 @@ pub fn load_static_upstreams(config: &config::Config) -> Result<()> {
     UPSTREAM_MAP.reload_resources(proxy_upstreams);
 
     Ok(())
-}
-
-/// Fetches an upstream by its ID.
-pub fn upstream_fetch(id: &str) -> Option<Arc<ProxyUpstream>> {
-    match UPSTREAM_MAP.get(id) {
-        Some(rule) => Some(rule.value().clone()),
-        None => {
-            log::warn!("Upstream with id '{}' not found", id);
-            None
-        }
-    }
 }
