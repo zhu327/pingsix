@@ -29,8 +29,8 @@ use crate::{config::Identifiable, plugin::ProxyPlugin};
 
 use route::ProxyRoute;
 
-/// Defalut empty plugin executor for new ProxyContext.
-static DEAULT_PLUGIN_EXECUTOR: Lazy<Arc<ProxyPluginExecutor>> =
+/// Default empty plugin executor for new ProxyContext.
+static DEFAULT_PLUGIN_EXECUTOR: Lazy<Arc<ProxyPluginExecutor>> =
     Lazy::new(|| Arc::new(ProxyPluginExecutor::default()));
 
 /// Holds the context for each proxy request.
@@ -58,8 +58,8 @@ impl Default for ProxyContext {
             route_params: None,
             tries: 0,
             request_start: Instant::now(),
-            plugin: DEAULT_PLUGIN_EXECUTOR.clone(),
-            global_plugin: DEAULT_PLUGIN_EXECUTOR.clone(),
+            plugin: DEFAULT_PLUGIN_EXECUTOR.clone(),
+            global_plugin: DEFAULT_PLUGIN_EXECUTOR.clone(),
             vars: HashMap::new(),
         }
     }
@@ -99,7 +99,7 @@ where
     fn reload_resources(&self, resources: Vec<Arc<T>>) {
         // Log incoming resources
         for resource in &resources {
-            log::info!("Upserting resource: {}", resource.id());
+            log::info!("Upstream resource: {}", resource.id());
         }
 
         // Build a set of IDs to keep
