@@ -190,6 +190,10 @@ Run PingSIX with the configuration file:
 cargo run -- -c config.yaml
 ```
 
+## Documentation
+
+For detailed documentation, including setup guides, configuration options, plugin development, and API references, visit the [PingSIX Documentation](https://deepwiki.com/zhu327/pingsix) hosted on DeepWiki. This resource provides in-depth information to help you get started and customize PingSIX for your use case.
+
 ## Installation Guide
 
 1. Clone the repository:
