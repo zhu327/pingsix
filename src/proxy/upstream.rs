@@ -29,7 +29,7 @@ use super::{discovery::HybridDiscovery, MapOperations};
 /// Fetches an upstream by its ID.
 pub fn upstream_fetch(id: &str) -> Option<Arc<ProxyUpstream>> {
     match UPSTREAM_MAP.get(id) {
-        Some(rule) => Some(rule.value().clone()),
+        Some(upstream) => Some(upstream.value().clone()),
         None => {
             log::warn!("Upstream with id '{}' not found", id);
             None
@@ -47,20 +47,6 @@ pub struct ProxyUpstream {
     watch: Option<watch::Sender<bool>>,
 }
 
-impl TryFrom<config::Upstream> for ProxyUpstream {
-    type Error = Box<Error>;
-
-    /// Creates a new `ProxyUpstream` instance from an `Upstream` configuration.
-    fn try_from(value: config::Upstream) -> Result<Self> {
-        Ok(Self {
-            inner: value.clone(),
-            lb: SelectionLB::try_from(value)?,
-            runtime: None,
-            watch: None,
-        })
-    }
-}
-
 impl Identifiable for ProxyUpstream {
     fn id(&self) -> &str {
         &self.inner.id
@@ -76,13 +62,18 @@ impl Identifiable for ProxyUpstream {
 // ! It is strongly recommended to use the Background Service mechanism provided by Pingora Server to run health checks instead.
 impl ProxyUpstream {
     pub fn new_with_health_check(upstream: config::Upstream, work_stealing: bool) -> Result<Self> {
-        let mut proxy_upstream = Self::try_from(upstream)?;
+        let mut proxy_upstream = ProxyUpstream {
+            inner: upstream.clone(),
+            lb: SelectionLB::try_from(upstream.clone())?,
+            runtime: None,
+            watch: None,
+        };
         proxy_upstream.start_health_check(work_stealing);
         Ok(proxy_upstream)
     }
 
     /// Starts the health check service, runs only once.
-    pub fn start_health_check(&mut self, work_stealing: bool) {
+    fn start_health_check(&mut self, work_stealing: bool) {
         if let Some(mut service) = self.take_background_service() {
             // Create a channel for watching the health check status
             let (watch_tx, watch_rx) = watch::channel(false);

@@ -331,11 +331,11 @@ impl EtcdEventHandler for ProxyEventHandler {
     }
 
     fn handle_list_response(&self, response: &GetResponse) {
+        self.handle_ssls(response);
         self.handle_upstreams(response);
         self.handle_services(response);
-        self.handle_routes(response);
         self.handle_global_rules(response);
-        self.handle_ssls(response);
+        self.handle_routes(response);
     }
 }
 

@@ -16,7 +16,13 @@ use super::{
 
 /// Fetches a service by its ID.
 pub fn service_fetch(id: &str) -> Option<Arc<ProxyService>> {
-    SERVICE_MAP.get(id).map(|s| s.value().clone())
+    match SERVICE_MAP.get(id) {
+        Some(service) => Some(service.value().clone()),
+        None => {
+            log::warn!("Service with id '{}' not found", id);
+            None
+        }
+    }
 }
 
 /// Represents a proxy service that manages upstreams.
@@ -24,16 +30,6 @@ pub struct ProxyService {
     pub inner: config::Service,
     pub upstream: Option<Arc<ProxyUpstream>>,
     pub plugins: Vec<Arc<dyn ProxyPlugin>>,
-}
-
-impl From<config::Service> for ProxyService {
-    fn from(value: config::Service) -> Self {
-        Self {
-            inner: value,
-            upstream: None,
-            plugins: Vec::new(),
-        }
-    }
 }
 
 impl Identifiable for ProxyService {
@@ -51,12 +47,16 @@ impl ProxyService {
         service: config::Service,
         work_stealing: bool,
     ) -> Result<Self> {
-        let mut proxy_service = Self::from(service.clone());
+        let mut proxy_service = ProxyService {
+            inner: service.clone(),
+            upstream: None,
+            plugins: Vec::with_capacity(service.plugins.len()),
+        };
 
         // 配置 upstream
         if let Some(ref upstream_config) = service.upstream {
-            let mut proxy_upstream = ProxyUpstream::try_from(upstream_config.clone())?;
-            proxy_upstream.start_health_check(work_stealing);
+            let proxy_upstream =
+                ProxyUpstream::new_with_health_check(upstream_config.clone(), work_stealing)?;
             proxy_service.upstream = Some(Arc::new(proxy_upstream));
         }
 

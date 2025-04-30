@@ -28,18 +28,12 @@ impl Identifiable for ProxyGlobalRule {
     }
 }
 
-impl From<config::GlobalRule> for ProxyGlobalRule {
-    fn from(value: config::GlobalRule) -> Self {
-        Self {
-            inner: value,
-            plugins: Vec::new(),
-        }
-    }
-}
-
 impl ProxyGlobalRule {
     pub fn new_with_plugins(rule: config::GlobalRule) -> Result<Self> {
-        let mut proxy_global_rule = Self::from(rule.clone());
+        let mut proxy_global_rule = ProxyGlobalRule {
+            inner: rule.clone(),
+            plugins: Vec::with_capacity(rule.plugins.len()),
+        };
 
         // Load plugins and log each one
         for (name, value) in rule.plugins {

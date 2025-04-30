@@ -29,7 +29,7 @@ fn get_global_resolver() -> Arc<TokioAsyncResolver> {
 /// Resolves DNS names to IP addresses and creates backends for each resolved IP.
 pub struct DnsDiscovery {
     resolver: Arc<TokioAsyncResolver>,
-    name: String,
+    domain: String,
     port: u32,
     scheme: UpstreamScheme,
     weight: u32,
@@ -38,7 +38,7 @@ pub struct DnsDiscovery {
 impl DnsDiscovery {
     /// Creates a new `DnsDiscovery` instance.
     pub fn new(
-        name: String,
+        domain: String,
         port: u32,
         scheme: UpstreamScheme,
         weight: u32,
@@ -46,7 +46,7 @@ impl DnsDiscovery {
     ) -> Self {
         Self {
             resolver,
-            name,
+            domain,
             port,
             scheme,
             weight,
@@ -58,18 +58,18 @@ impl DnsDiscovery {
 impl ServiceDiscovery for DnsDiscovery {
     /// Discovers backends by resolving DNS names to IP addresses.
     async fn discover(&self) -> Result<(BTreeSet<Backend>, HashMap<u64, bool>)> {
-        let name = self.name.as_str();
-        log::debug!("Resolving DNS for domain: {}", name);
+        let domain = self.domain.as_str();
+        log::debug!("Resolving DNS for domain: {}", domain);
 
         let backends: BTreeSet<Backend> = self
             .resolver
-            .lookup_ip(name)
+            .lookup_ip(domain)
             .await
             .map_err(|e| {
-                log::warn!("DNS discovery failed for domain: {}: {}", name, e);
+                log::warn!("DNS discovery failed for domain: {}: {}", domain, e);
                 Error::because(
                     InternalError,
-                    format!("DNS discovery failed for domain: {}: {}", name, e),
+                    format!("DNS discovery failed for domain: {}: {}", domain, e),
                     e,
                 )
             })?
@@ -84,7 +84,7 @@ impl ServiceDiscovery for DnsDiscovery {
                 let tls = matches!(self.scheme, UpstreamScheme::HTTPS | UpstreamScheme::GRPCS);
 
                 // Create HttpPeer
-                let mut peer = HttpPeer::new(&addr, tls, self.name.clone());
+                let mut peer = HttpPeer::new(&addr, tls, self.domain.clone());
                 if matches!(self.scheme, UpstreamScheme::GRPC | UpstreamScheme::GRPCS) {
                     peer.options.alpn = ALPN::H2;
                 }
@@ -146,7 +146,7 @@ impl TryFrom<Upstream> for HybridDiscovery {
         for (addr, weight) in upstream.nodes.iter() {
             let (host, port) = parse_host_and_port(addr)?;
             let port = port.unwrap_or(match upstream.scheme {
-                UpstreamScheme::HTTPS => 443,
+                UpstreamScheme::HTTPS | UpstreamScheme::GRPCS => 443,
                 _ => 80,
             });
 

@@ -32,17 +32,6 @@ pub struct ProxyRoute {
     pub plugins: Vec<Arc<dyn ProxyPlugin>>,
 }
 
-impl From<config::Route> for ProxyRoute {
-    /// Creates a new `ProxyRoute` instance from a `Route` configuration.
-    fn from(value: config::Route) -> Self {
-        Self {
-            inner: value,
-            upstream: None,
-            plugins: Vec::new(),
-        }
-    }
-}
-
 impl Identifiable for ProxyRoute {
     fn id(&self) -> &str {
         &self.inner.id
@@ -58,12 +47,16 @@ impl ProxyRoute {
         route: config::Route,
         work_stealing: bool,
     ) -> Result<Self> {
-        let mut proxy_route = Self::from(route.clone());
+        let mut proxy_route = ProxyRoute {
+            inner: route.clone(),
+            upstream: None,
+            plugins: Vec::with_capacity(route.plugins.len()),
+        };
 
         // Configure upstream
         if let Some(upstream_config) = route.upstream {
-            let mut proxy_upstream = ProxyUpstream::try_from(upstream_config)?;
-            proxy_upstream.start_health_check(work_stealing);
+            let proxy_upstream =
+                ProxyUpstream::new_with_health_check(upstream_config, work_stealing)?;
             proxy_route.upstream = Some(Arc::new(proxy_upstream));
         }
 

@@ -97,7 +97,7 @@ pub static SSL_MAP: Lazy<DashMap<String, Arc<ProxySSL>>> = Lazy::new(DashMap::ne
 static GLOBAL_SSL_MATCH: Lazy<ArcSwap<MatchEntry>> =
     Lazy::new(|| ArcSwap::new(Arc::new(MatchEntry::default())));
 
-pub fn global_ssl_match_fetch() -> Arc<MatchEntry> {
+fn global_ssl_match_fetch() -> Arc<MatchEntry> {
     GLOBAL_SSL_MATCH.load().clone()
 }
 
