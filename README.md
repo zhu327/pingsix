@@ -169,7 +169,7 @@ Example: Create a Route via Admin API
 
 **Create a Route**
 ```bash
-curl http://127.0.0.1:8082/apisix/admin/routes/1 \
+curl http://127.0.0.1:9181/apisix/admin/routes/1 \
      -H "X-API-KEY: pingsix" \
      -X PUT -d '{
        "uri": "/test",
@@ -212,7 +212,7 @@ For detailed documentation, including setup guides, configuration options, plugi
 
 ## Observability
 
-- **Prometheus Metrics**: Exposes API monitoring data at `0.0.0.0:8081` (configurable).
+- **Prometheus Metrics**: Exposes API monitoring data at `0.0.0.0:9091` (configurable).
 - **Sentry Tracking**: Integrates with Sentry for error analysis and performance monitoring.
 - **File Logging**: If enabled (pingsix.log), access logs will be written to the specified file path in the configured format.
 

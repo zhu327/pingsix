@@ -19,18 +19,18 @@ jsonwebtoken = "9.3.1"
 log = { version = "0.4.22", features = ["kv"] }
 matchit = "0.8.6"
 once_cell = "1.20.2"
-pingora = { version = "0.4", features = ["openssl", "sentry"] }
-pingora-core = "0.4.0"
-pingora-error = "0.4.0"
-pingora-http = "0.4.0"
-pingora-limits = "0.4.0"
-pingora-load-balancing = "0.4.0"
-pingora-proxy = "0.4.0"
-pingora-runtime = "0.4.0"
+pingora = { version = "0.5", features = ["openssl", "sentry"] }
+pingora-core = "0.5.0"
+pingora-error = "0.5.0"
+pingora-http = "0.5.0"
+pingora-limits = "0.5.0"
+pingora-load-balancing = "0.5.0"
+pingora-proxy = "0.5.0"
+pingora-runtime = "0.5.0"
 prometheus = "0.14.0"
 rand = "0.8"
 regex = "1.11.1"
-sentry = "0.26"
+sentry = "0.36"
 serde = { version = "1.0.197", features = ["derive"] }
 serde-transcode = "1.1.1"
 serde_json = "1.0.133"
@@ -39,7 +39,3 @@ serde_yaml = "0.9.34"
 tokio = { version = "1.41.1", features = ["fs"] }
 uuid = { version = "1.16.0", features = ["v4"] }
 validator = { version = "0.20.0", features = ["derive"] }
-
-# TODO: remove when pingora releases a fix https://github.com/cloudflare/pingora/issues/568
-[patch.crates-io]
-sfv = { git = "https://github.com/undef1nd/sfv.git", tag = "v0.9.4" }

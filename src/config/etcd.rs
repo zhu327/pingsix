@@ -187,7 +187,12 @@ impl EtcdConfigSync {
 
 #[async_trait]
 impl Service for EtcdConfigSync {
-    async fn start_service(&mut self, _fds: Option<ListenFds>, shutdown: ShutdownWatch) {
+    async fn start_service(
+        &mut self,
+        _fds: Option<ListenFds>,
+        shutdown: ShutdownWatch,
+        _listeners_per_fd: usize,
+    ) {
         self.run_sync_loop(shutdown).await
     }
 

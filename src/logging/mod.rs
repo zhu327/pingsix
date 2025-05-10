@@ -70,7 +70,12 @@ impl Logger {
 
 #[async_trait]
 impl Service for Logger {
-    async fn start_service(&mut self, _fds: Option<ListenFds>, mut shutdown: ShutdownWatch) {
+    async fn start_service(
+        &mut self,
+        _fds: Option<ListenFds>,
+        mut shutdown: ShutdownWatch,
+        _listeners_per_fd: usize,
+    ) {
         let log_file_path = &self.config.path;
 
         if let Some(parent) = std::path::Path::new(log_file_path).parent() {
