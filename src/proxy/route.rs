@@ -257,12 +257,7 @@ impl MatchEntry {
         let uri = session.req_header().uri.path();
         let method = session.req_header().method.as_str();
 
-        log::debug!(
-            "match request: host={:?}, uri={:?}, method={:?}",
-            host,
-            uri,
-            method
-        );
+        log::debug!("match request: host={host:?}, uri={uri:?}, method={method:?}");
 
         // Attempt to match using host_uris if a valid host is provided
         // Host is reversed to match the format used during insertion (e.g., "moc.elpmaxe.*")

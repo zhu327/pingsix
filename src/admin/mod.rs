@@ -37,14 +37,14 @@ enum ApiError {
 impl fmt::Display for ApiError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ApiError::EtcdGetError(msg) => write!(f, "Etcd get error: {}", msg),
-            ApiError::EtcdPutError(msg) => write!(f, "Etcd put error: {}", msg),
-            ApiError::EtcdDeleteError(msg) => write!(f, "Etcd delete error: {}", msg),
-            ApiError::ValidationError(msg) => write!(f, "Validation error: {}", msg),
-            ApiError::MissingParameter(msg) => write!(f, "Missing parameter: {}", msg),
-            ApiError::InvalidRequest(msg) => write!(f, "Invalid request: {}", msg),
-            ApiError::InternalError(msg) => write!(f, "Internal error: {}", msg),
-            ApiError::RequestBodyReadError(msg) => write!(f, "Request body read error: {}", msg),
+            ApiError::EtcdGetError(msg) => write!(f, "Etcd get error: {msg}"),
+            ApiError::EtcdPutError(msg) => write!(f, "Etcd put error: {msg}"),
+            ApiError::EtcdDeleteError(msg) => write!(f, "Etcd delete error: {msg}"),
+            ApiError::ValidationError(msg) => write!(f, "Validation error: {msg}"),
+            ApiError::MissingParameter(msg) => write!(f, "Missing parameter: {msg}"),
+            ApiError::InvalidRequest(msg) => write!(f, "Invalid request: {msg}"),
+            ApiError::InternalError(msg) => write!(f, "Internal error: {msg}"),
+            ApiError::RequestBodyReadError(msg) => write!(f, "Request body read error: {msg}"),
         }
     }
 }
@@ -87,13 +87,13 @@ impl ResponseHelper {
                     builder = builder.header(header::CONTENT_TYPE, header_value);
                 }
                 Err(e) => {
-                    log::error!("Invalid content type '{}': {}", ct, e);
+                    log::error!("Invalid content type '{ct}': {e}");
                 }
             }
         }
 
         builder.body(body).unwrap_or_else(|e| {
-            log::error!("Failed to build success response: {}", e);
+            log::error!("Failed to build success response: {e}");
             Response::builder()
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
                 .body(b"Internal Server Error".to_vec())
@@ -106,7 +106,7 @@ impl ResponseHelper {
             .status(status)
             .body(message.as_bytes().to_vec())
             .unwrap_or_else(|e| {
-                log::error!("Failed to build error response: {}", e);
+                log::error!("Failed to build error response: {e}");
                 Response::builder()
                     .status(StatusCode::INTERNAL_SERVER_ERROR)
                     .body(b"Internal Server Error".to_vec())
@@ -281,7 +281,7 @@ impl Handler for ResourceGetHandler {
             Err(e) => Err(ApiError::EtcdGetError(e.to_string())),
             Ok(Some(value)) => {
                 let json_value: serde_json::Value = serde_json::from_slice(&value)
-                    .map_err(|e| ApiError::InvalidRequest(format!("Invalid JSON data: {}", e)))?;
+                    .map_err(|e| ApiError::InvalidRequest(format!("Invalid JSON data: {e}")))?;
                 let wrapper = ValueWrapper { value: json_value };
                 let json_vec = serde_json::to_vec(&wrapper)
                     .map_err(|e| ApiError::InternalError(e.to_string()))?;
@@ -355,37 +355,36 @@ fn validate_resource(resource_type: &str, body_data: &[u8]) -> ApiResult<()> {
             let route = validate_with_plugins::<config::Route>(body_data)?;
             route
                 .validate()
-                .map_err(|e| ApiError::ValidationError(format!("Route validation failed: {}", e)))
+                .map_err(|e| ApiError::ValidationError(format!("Route validation failed: {e}")))
         }
         "upstreams" => {
             let upstream = json_to_resource::<config::Upstream>(body_data).map_err(|e| {
-                ApiError::InvalidRequest(format!("Invalid upstream JSON data: {}", e))
+                ApiError::InvalidRequest(format!("Invalid upstream JSON data: {e}"))
             })?;
-            upstream.validate().map_err(|e| {
-                ApiError::ValidationError(format!("Upstream validation failed: {}", e))
-            })
+            upstream
+                .validate()
+                .map_err(|e| ApiError::ValidationError(format!("Upstream validation failed: {e}")))
         }
         "services" => {
             let service = validate_with_plugins::<config::Service>(body_data)?;
             service
                 .validate()
-                .map_err(|e| ApiError::ValidationError(format!("Service validation failed: {}", e)))
+                .map_err(|e| ApiError::ValidationError(format!("Service validation failed: {e}")))
         }
         "global_rules" => {
             let rule = validate_with_plugins::<config::GlobalRule>(body_data)?;
             rule.validate().map_err(|e| {
-                ApiError::ValidationError(format!("GlobalRule validation failed: {}", e))
+                ApiError::ValidationError(format!("GlobalRule validation failed: {e}"))
             })
         }
         "ssls" => {
             let ssl = json_to_resource::<config::SSL>(body_data)
-                .map_err(|e| ApiError::InvalidRequest(format!("Invalid SSL JSON data: {}", e)))?;
+                .map_err(|e| ApiError::InvalidRequest(format!("Invalid SSL JSON data: {e}")))?;
             ssl.validate()
-                .map_err(|e| ApiError::ValidationError(format!("SSL validation failed: {}", e)))
+                .map_err(|e| ApiError::ValidationError(format!("SSL validation failed: {e}")))
         }
         _ => Err(ApiError::InvalidRequest(format!(
-            "Unsupported resource type: {}",
-            resource_type
+            "Unsupported resource type: {resource_type}"
         ))),
     }
 }
@@ -394,10 +393,10 @@ fn validate_with_plugins<T: PluginValidatable + DeserializeOwned>(
     body_data: &[u8],
 ) -> ApiResult<T> {
     let resource = json_to_resource::<T>(body_data)
-        .map_err(|e| ApiError::InvalidRequest(format!("Invalid JSON data for resource: {}", e)))?;
+        .map_err(|e| ApiError::InvalidRequest(format!("Invalid JSON data for resource: {e}")))?;
     resource
         .validate_plugins()
-        .map_err(|e| ApiError::ValidationError(format!("Plugin validation failed: {}", e)))?;
+        .map_err(|e| ApiError::ValidationError(format!("Plugin validation failed: {e}")))?;
     Ok(resource)
 }
 
@@ -409,7 +408,7 @@ impl PluginValidatable for config::Route {
     fn validate_plugins(&self) -> Result<(), Box<dyn Error>> {
         for (name, value) in &self.plugins {
             build_plugin(name, value.clone())
-                .map_err(|e| format!("Failed to build plugin '{}': {}", name, e))?;
+                .map_err(|e| format!("Failed to build plugin '{name}': {e}"))?;
         }
         Ok(())
     }
@@ -419,7 +418,7 @@ impl PluginValidatable for config::Service {
     fn validate_plugins(&self) -> Result<(), Box<dyn Error>> {
         for (name, value) in &self.plugins {
             build_plugin(name, value.clone())
-                .map_err(|e| format!("Failed to build plugin '{}': {}", name, e))?;
+                .map_err(|e| format!("Failed to build plugin '{name}': {e}"))?;
         }
         Ok(())
     }
@@ -429,7 +428,7 @@ impl PluginValidatable for config::GlobalRule {
     fn validate_plugins(&self) -> Result<(), Box<dyn Error>> {
         for (name, value) in &self.plugins {
             build_plugin(name, value.clone())
-                .map_err(|e| format!("Failed to build plugin '{}': {}", name, e))?;
+                .map_err(|e| format!("Failed to build plugin '{name}': {e}"))?;
         }
         Ok(())
     }

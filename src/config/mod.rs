@@ -128,7 +128,7 @@ impl Config {
     #[allow(dead_code)]
     pub fn to_yaml(&self) -> String {
         serde_yaml::to_string(self).unwrap_or_else(|e| {
-            log::error!("Failed to serialize config to YAML: {}", e);
+            log::error!("Failed to serialize config to YAML: {e}");
             String::new()
         })
     }

@@ -25,10 +25,10 @@ impl fmt::Display for EtcdError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             EtcdError::ClientNotInitialized => write!(f, "Etcd client is not initialized"),
-            EtcdError::ConnectionFailed(msg) => write!(f, "Connection failed: {}", msg),
-            EtcdError::ListOperationFailed(msg) => write!(f, "List operation failed: {}", msg),
-            EtcdError::WatchOperationFailed(msg) => write!(f, "Watch operation failed: {}", msg),
-            EtcdError::Other(msg) => write!(f, "Other error: {}", msg),
+            EtcdError::ConnectionFailed(msg) => write!(f, "Connection failed: {msg}"),
+            EtcdError::ListOperationFailed(msg) => write!(f, "List operation failed: {msg}"),
+            EtcdError::WatchOperationFailed(msg) => write!(f, "Watch operation failed: {msg}"),
+            EtcdError::Other(msg) => write!(f, "Other error: {msg}"),
         }
     }
 }
@@ -81,7 +81,7 @@ impl EtcdConfigSync {
             .get(prefix.as_str(), Some(options))
             .await
             .map_err(|e| {
-                EtcdError::ListOperationFailed(format!("Failed to list key '{}': {}", prefix, e))
+                EtcdError::ListOperationFailed(format!("Failed to list key '{prefix}': {e}"))
             })?;
 
         if let Some(header) = response.header() {
@@ -110,18 +110,18 @@ impl EtcdConfigSync {
             .watch(prefix.as_str(), Some(options))
             .await
             .map_err(|e| {
-                EtcdError::WatchOperationFailed(format!("Failed to watch key '{}': {}", prefix, e))
+                EtcdError::WatchOperationFailed(format!("Failed to watch key '{prefix}': {e}"))
             })?;
 
         watcher.request_progress().await.map_err(|e| {
-            EtcdError::WatchOperationFailed(format!("Failed to request progress: {}", e))
+            EtcdError::WatchOperationFailed(format!("Failed to request progress: {e}"))
         })?;
 
         while let Some(response) = stream.message().await.map_err(|e| {
-            EtcdError::WatchOperationFailed(format!("Failed to receive watch message: {}", e))
+            EtcdError::WatchOperationFailed(format!("Failed to receive watch message: {e}"))
         })? {
             if response.canceled() {
-                log::warn!("Watch stream for prefix '{}' was canceled", prefix);
+                log::warn!("Watch stream for prefix '{prefix}' was canceled");
                 break;
             }
 
@@ -295,10 +295,7 @@ impl EtcdClientWrapper {
             .get(prefixed_key.as_bytes(), None)
             .await
             .map_err(|e| {
-                EtcdError::ListOperationFailed(format!(
-                    "Failed to get key '{}': {}",
-                    prefixed_key, e
-                ))
+                EtcdError::ListOperationFailed(format!("Failed to get key '{prefixed_key}': {e}"))
             })
             .map(|resp| resp.kvs().first().map(|kv| kv.value().to_vec()))
     }
@@ -317,8 +314,7 @@ impl EtcdClientWrapper {
             .await
             .map_err(|e| {
                 EtcdError::Other(format!(
-                    "Put operation for key '{}' failed: {}",
-                    prefixed_key, e
+                    "Put operation for key '{prefixed_key}' failed: {e}"
                 ))
             })?;
         Ok(())
@@ -338,8 +334,7 @@ impl EtcdClientWrapper {
             .await
             .map_err(|e| {
                 EtcdError::Other(format!(
-                    "Delete operation for key '{}' failed: {}",
-                    prefixed_key, e
+                    "Delete operation for key '{prefixed_key}' failed: {e}"
                 ))
             })?;
         Ok(())

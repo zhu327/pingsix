@@ -272,10 +272,7 @@ impl PluginJWTAuth {
         header.insert_header(header::CONTENT_LENGTH, error_msg.len().to_string())?;
         header.insert_header(
             header::WWW_AUTHENTICATE,
-            format!(
-                "Bearer error=\"invalid_token\", error_description=\"{}\"",
-                error_msg
-            ),
+            format!("Bearer error=\"invalid_token\", error_description=\"{error_msg}\""),
         )?;
         session
             .write_response_header(Box::new(header), false)

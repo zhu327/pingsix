@@ -149,7 +149,7 @@ impl PluginProxyRewrite {
             return if query.is_empty() {
                 path.parse().ok()
             } else {
-                format!("{}?{}", path, query).parse().ok()
+                format!("{path}?{query}").parse().ok()
             };
         }
 
@@ -160,7 +160,7 @@ impl PluginProxyRewrite {
                 return if query.is_empty() {
                     new_path.parse().ok()
                 } else {
-                    format!("{}?{}", new_path, query).parse().ok()
+                    format!("{new_path}?{query}").parse().ok()
                 };
             }
         }

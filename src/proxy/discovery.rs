@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::future::join_all;
-use hickory_resolver::TokioAsyncResolver;
+use hickory_resolver::TokioResolver;
 use once_cell::sync::OnceCell;
 use pingora::{protocols::ALPN, upstreams::peer::HttpPeer};
 use pingora_error::{Error, ErrorType::InternalError, OrErr, Result};
@@ -16,11 +16,11 @@ use regex::Regex;
 
 use crate::config::{Upstream, UpstreamPassHost, UpstreamScheme};
 
-static GLOBAL_RESOLVER: OnceCell<Arc<TokioAsyncResolver>> = OnceCell::new();
+static GLOBAL_RESOLVER: OnceCell<Arc<TokioResolver>> = OnceCell::new();
 
-fn get_global_resolver() -> Arc<TokioAsyncResolver> {
+fn get_global_resolver() -> Arc<TokioResolver> {
     GLOBAL_RESOLVER
-        .get_or_init(|| Arc::new(TokioAsyncResolver::tokio_from_system_conf().unwrap()))
+        .get_or_init(|| Arc::new(TokioResolver::builder_tokio().unwrap().build()))
         .clone()
 }
 
@@ -28,7 +28,7 @@ fn get_global_resolver() -> Arc<TokioAsyncResolver> {
 ///
 /// Resolves DNS names to IP addresses and creates backends for each resolved IP.
 pub struct DnsDiscovery {
-    resolver: Arc<TokioAsyncResolver>,
+    resolver: Arc<TokioResolver>,
     domain: String,
     port: u32,
     scheme: UpstreamScheme,
@@ -42,7 +42,7 @@ impl DnsDiscovery {
         port: u32,
         scheme: UpstreamScheme,
         weight: u32,
-        resolver: Arc<TokioAsyncResolver>,
+        resolver: Arc<TokioResolver>,
     ) -> Self {
         Self {
             resolver,
@@ -59,17 +59,17 @@ impl ServiceDiscovery for DnsDiscovery {
     /// Discovers backends by resolving DNS names to IP addresses.
     async fn discover(&self) -> Result<(BTreeSet<Backend>, HashMap<u64, bool>)> {
         let domain = self.domain.as_str();
-        log::debug!("Resolving DNS for domain: {}", domain);
+        log::debug!("Resolving DNS for domain: {domain}");
 
         let backends: BTreeSet<Backend> = self
             .resolver
             .lookup_ip(domain)
             .await
             .map_err(|e| {
-                log::warn!("DNS discovery failed for domain: {}: {}", domain, e);
+                log::warn!("DNS discovery failed for domain: {domain}: {e}");
                 Error::because(
                     InternalError,
-                    format!("DNS discovery failed for domain: {}: {}", domain, e),
+                    format!("DNS discovery failed for domain: {domain}: {e}"),
                     e,
                 )
             })?
@@ -119,7 +119,7 @@ impl ServiceDiscovery for HybridDiscovery {
 
         let futures = self.discoveries.iter().map(|discovery| async move {
             discovery.discover().await.map_err(|e| {
-                log::warn!("Hybrid discovery failed: {}", e);
+                log::warn!("Hybrid discovery failed: {e}");
                 e
             })
         });
@@ -224,7 +224,7 @@ fn parse_host_and_port(addr: &str) -> Result<(String, Option<u32>)> {
 
     // Ensure IPv6 addresses are enclosed in square brackets
     let host = if host.contains(':') && !host.starts_with('[') {
-        format!("[{}]", host)
+        format!("[{host}]")
     } else {
         host.to_string()
     };

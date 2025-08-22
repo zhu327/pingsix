@@ -31,7 +31,7 @@ pub fn upstream_fetch(id: &str) -> Option<Arc<ProxyUpstream>> {
     match UPSTREAM_MAP.get(id) {
         Some(upstream) => Some(upstream.value().clone()),
         None => {
-            log::warn!("Upstream with id '{}' not found", id);
+            log::warn!("Upstream with id '{id}' not found");
             None
         }
     }

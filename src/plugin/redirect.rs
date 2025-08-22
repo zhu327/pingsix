@@ -165,7 +165,7 @@ impl PluginRedirect {
             } else if original_query.is_empty() {
                 target_query
             } else {
-                format!("{}&{}", target_query, original_query)
+                format!("{target_query}&{original_query}")
             }
         } else {
             target_query
@@ -174,7 +174,7 @@ impl PluginRedirect {
         let new_path_and_query = if new_query.is_empty() {
             new_path.to_string()
         } else {
-            format!("{}?{}", new_path, new_query)
+            format!("{new_path}?{new_query}")
         };
 
         parts.path_and_query = Some(new_path_and_query.parse().ok()?);
@@ -196,7 +196,7 @@ impl PluginRedirect {
                 } else if original_query.is_empty() {
                     target_query.to_string()
                 } else {
-                    format!("{}&{}", target_query, original_query)
+                    format!("{target_query}&{original_query}")
                 }
             } else {
                 target_query.to_string()
@@ -205,7 +205,7 @@ impl PluginRedirect {
             let new_uri = if new_query.is_empty() {
                 new_path
             } else {
-                format!("{}?{}", new_path, new_query)
+                format!("{new_path}?{new_query}")
             };
             parts.path_and_query = Some(new_uri.parse().ok()?);
             Uri::from_parts(parts).ok()

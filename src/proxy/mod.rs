@@ -91,7 +91,7 @@ where
         if let Some(entry) = self.get(id) {
             Some(entry.clone())
         } else {
-            log::warn!("Resource with id '{}' not found", id);
+            log::warn!("Resource with id '{id}' not found");
             None
         }
     }
@@ -111,14 +111,14 @@ where
         // Insert or update all resources
         for resource in resources {
             let key = resource.id().to_string();
-            log::info!("Inserting or updating resource '{}'", key);
+            log::info!("Inserting or updating resource '{key}'");
             self.insert(key, resource);
         }
     }
 
     fn insert_resource(&self, resource: Arc<T>) {
         let key = resource.id();
-        log::info!("Inserting resource '{}'", key);
+        log::info!("Inserting resource '{key}'");
         self.insert(key.to_string(), resource);
     }
 }

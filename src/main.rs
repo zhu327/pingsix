@@ -40,7 +40,7 @@ fn main() {
     let config = match Config::load_yaml_with_opt_override(&cli_options) {
         Ok(cfg) => cfg,
         Err(e) => {
-            eprintln!("Error loading configuration: {}", e);
+            eprintln!("Error loading configuration: {e}");
             std::process::exit(1);
         }
     };
@@ -66,23 +66,23 @@ fn main() {
     } else {
         log::info!("Loading static services, upstreams, and routes...");
         if let Err(e) = load_static_ssls(&config) {
-            eprintln!("Failed to load static SSLs: {}", e);
+            eprintln!("Failed to load static SSLs: {e}");
             std::process::exit(1);
         }
         if let Err(e) = load_static_upstreams(&config) {
-            eprintln!("Failed to load static upstreams: {}", e);
+            eprintln!("Failed to load static upstreams: {e}");
             std::process::exit(1);
         }
         if let Err(e) = load_static_services(&config) {
-            eprintln!("Failed to load static services: {}", e);
+            eprintln!("Failed to load static services: {e}");
             std::process::exit(1);
         }
         if let Err(e) = load_static_global_rules(&config) {
-            eprintln!("Failed to load static global rules: {}", e);
+            eprintln!("Failed to load static global rules: {e}");
             std::process::exit(1);
         }
         if let Err(e) = load_static_routes(&config) {
-            eprintln!("Failed to load static routes: {}", e);
+            eprintln!("Failed to load static routes: {e}");
             std::process::exit(1);
         }
         None
@@ -113,7 +113,7 @@ fn main() {
     // Add listeners
     log::info!("Adding listeners...");
     if let Err(e) = add_listeners(&mut http_service, &config.pingsix) {
-        eprintln!("Failed to add listeners: {}", e);
+        eprintln!("Failed to add listeners: {e}");
         std::process::exit(1);
     }
 
@@ -177,7 +177,7 @@ fn add_optional_services(server: &mut Server, cfg: &config::Pingsix) {
                 return;
             }
             Err(e) => {
-                log::error!("Error parsing Sentry DSN: {}", e);
+                log::error!("Error parsing Sentry DSN: {e}");
                 return; // Skip Sentry if DSN is invalid
             }
         };

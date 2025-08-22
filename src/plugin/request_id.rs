@@ -5,7 +5,7 @@ use pingora::ErrorType::InternalError;
 use pingora_error::{ErrorType::ReadError, OrErr, Result};
 use pingora_http::ResponseHeader;
 use pingora_proxy::Session;
-use rand::{distributions::Slice, Rng};
+use rand::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value as YamlValue;
 use uuid::Uuid;
@@ -113,10 +113,9 @@ impl PluginRequestID {
             &self.config.range_id.char_set
         };
         let chars: Vec<char> = char_set.chars().collect();
-        let dist = Slice::new(&chars).unwrap(); // Safe: chars is non-empty
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         (0..self.config.range_id.length)
-            .map(|_| rng.sample(dist))
+            .map(|_| *chars.choose(&mut rng).unwrap())
             .collect()
     }
 }
