@@ -43,10 +43,7 @@ impl Identifiable for ProxyService {
 }
 
 impl ProxyService {
-    pub fn new_with_upstream_and_plugins(
-        service: config::Service,
-        work_stealing: bool,
-    ) -> Result<Self> {
+    pub fn new_with_upstream_and_plugins(service: config::Service) -> Result<Self> {
         let mut proxy_service = ProxyService {
             inner: service.clone(),
             upstream: None,
@@ -56,7 +53,7 @@ impl ProxyService {
         // 配置 upstream
         if let Some(ref upstream_config) = service.upstream {
             let proxy_upstream =
-                ProxyUpstream::new_with_health_check(upstream_config.clone(), work_stealing)?;
+                ProxyUpstream::new_with_shared_health_check(upstream_config.clone())?;
             proxy_service.upstream = Some(Arc::new(proxy_upstream));
         }
 
@@ -87,10 +84,7 @@ pub fn load_static_services(config: &config::Config) -> Result<()> {
         .iter()
         .map(|service| {
             log::info!("Configuring Service: {}", service.id);
-            match ProxyService::new_with_upstream_and_plugins(
-                service.clone(),
-                config.pingora.work_stealing,
-            ) {
+            match ProxyService::new_with_upstream_and_plugins(service.clone()) {
                 Ok(proxy_service) => Ok(Arc::new(proxy_service)),
                 Err(e) => {
                     log::error!("Failed to configure Service {}: {}", service.id, e);

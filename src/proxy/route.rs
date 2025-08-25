@@ -43,10 +43,7 @@ impl Identifiable for ProxyRoute {
 }
 
 impl ProxyRoute {
-    pub fn new_with_upstream_and_plugins(
-        route: config::Route,
-        work_stealing: bool,
-    ) -> Result<Self> {
+    pub fn new_with_upstream_and_plugins(route: config::Route) -> Result<Self> {
         let mut proxy_route = ProxyRoute {
             inner: route.clone(),
             upstream: None,
@@ -55,8 +52,7 @@ impl ProxyRoute {
 
         // Configure upstream
         if let Some(upstream_config) = route.upstream {
-            let proxy_upstream =
-                ProxyUpstream::new_with_health_check(upstream_config, work_stealing)?;
+            let proxy_upstream = ProxyUpstream::new_with_shared_health_check(upstream_config)?;
             proxy_route.upstream = Some(Arc::new(proxy_upstream));
         }
 
@@ -334,10 +330,7 @@ pub fn load_static_routes(config: &config::Config) -> Result<()> {
         .iter()
         .map(|route| {
             log::info!("Configuring Route: {}", route.id);
-            match ProxyRoute::new_with_upstream_and_plugins(
-                route.clone(),
-                config.pingora.work_stealing,
-            ) {
+            match ProxyRoute::new_with_upstream_and_plugins(route.clone()) {
                 Ok(proxy_route) => Ok(Arc::new(proxy_route)),
                 Err(e) => {
                     log::error!("Failed to configure Route {}: {}", route.id, e);

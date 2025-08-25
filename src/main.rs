@@ -24,6 +24,7 @@ use logging::Logger;
 use proxy::{
     event::ProxyEventHandler,
     global_rule::load_static_global_rules,
+    health_check::SHARED_HEALTH_CHECK_SERVICE,
     route::load_static_routes,
     service::load_static_services,
     ssl::{load_static_ssls, DynamicCert},
@@ -58,7 +59,7 @@ fn main() {
     // If etcd is enabled, start config sync service; otherwise, load static configs
     let etcd_sync = if let Some(etcd_cfg) = &config.pingsix.etcd {
         log::info!("Adding etcd config sync...");
-        let event_handler = ProxyEventHandler::new(config.pingora.work_stealing);
+        let event_handler = ProxyEventHandler::new();
         Some(EtcdConfigSync::new(
             etcd_cfg.clone(),
             Box::new(event_handler),
@@ -116,6 +117,10 @@ fn main() {
         eprintln!("Failed to add listeners: {e}");
         std::process::exit(1);
     }
+
+    // Add shared health check service
+    log::info!("Adding shared health check service...");
+    pingsix_server.add_service(SHARED_HEALTH_CHECK_SERVICE.clone());
 
     // Add optional services (Sentry, Prometheus, Admin)
     add_optional_services(&mut pingsix_server, &config.pingsix);

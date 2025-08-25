@@ -70,13 +70,17 @@ impl InnerComparable<SSL> for ProxySSL {
     }
 }
 
-pub struct ProxyEventHandler {
-    work_stealing: bool,
+pub struct ProxyEventHandler;
+
+impl Default for ProxyEventHandler {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ProxyEventHandler {
-    pub fn new(work_stealing: bool) -> Self {
-        ProxyEventHandler { work_stealing }
+    pub fn new() -> Self {
+        ProxyEventHandler
     }
 
     /// Generic function to handle list responses for different resource types.
@@ -85,7 +89,7 @@ impl ProxyEventHandler {
         response: &GetResponse,
         key_type: &str,
         map: &impl MapOperations<P>,
-        create_proxy: fn(T, bool) -> pingora_error::Result<P>,
+        create_proxy: fn(T) -> pingora_error::Result<P>,
         reload_fn: Option<fn()>,
     ) where
         T: serde::de::DeserializeOwned + Clone + Identifiable,
@@ -121,7 +125,7 @@ impl ProxyEventHandler {
                 }
 
                 log::info!("Configuring {}: {}", key_type, resource.id());
-                match create_proxy(resource.clone(), self.work_stealing) {
+                match create_proxy(resource.clone()) {
                     Ok(proxy) => Some(Arc::new(proxy)),
                     Err(e) => {
                         log::error!(
@@ -157,7 +161,7 @@ impl ProxyEventHandler {
             response,
             "upstreams",
             &*UPSTREAM_MAP,
-            ProxyUpstream::new_with_health_check,
+            ProxyUpstream::new_with_shared_health_check,
             None,
         );
     }
@@ -177,7 +181,7 @@ impl ProxyEventHandler {
             response,
             "global_rules",
             &*GLOBAL_RULE_MAP,
-            |global_rule, _| ProxyGlobalRule::new_with_plugins(global_rule),
+            ProxyGlobalRule::new_with_plugins,
             Some(reload_global_plugin),
         );
     }
@@ -187,7 +191,7 @@ impl ProxyEventHandler {
             response,
             "ssls",
             &*SSL_MAP,
-            |ssl, _| Ok(ProxySSL::from(ssl)),
+            |ssl| Ok(ProxySSL::from(ssl)),
             Some(reload_global_ssl_match),
         );
     }
@@ -201,7 +205,7 @@ impl ProxyEventHandler {
     ) where
         T: serde::de::DeserializeOwned + Clone + Identifiable,
         P: Identifiable + InnerComparable<T>,
-        F: Fn(T, bool) -> pingora_error::Result<P>,
+        F: Fn(T) -> pingora_error::Result<P>,
     {
         let key = event.kv().unwrap().key();
         match parse_key(key) {
@@ -209,7 +213,7 @@ impl ProxyEventHandler {
                 match json_to_resource::<T>(event.kv().unwrap().value()) {
                     Ok(resource) => {
                         log::info!("Handling {key_type}: {id}");
-                        if let Ok(proxy) = create_proxy(resource, self.work_stealing) {
+                        if let Ok(proxy) = create_proxy(resource) {
                             map.insert_resource(Arc::new(proxy));
                         } else {
                             log::error!("Failed to create proxy for {key_type} {id}");
@@ -245,7 +249,7 @@ impl ProxyEventHandler {
             event,
             "upstreams",
             &*UPSTREAM_MAP,
-            ProxyUpstream::new_with_health_check,
+            ProxyUpstream::new_with_shared_health_check,
         );
     }
 
@@ -263,13 +267,13 @@ impl ProxyEventHandler {
             event,
             "global_rules",
             &*GLOBAL_RULE_MAP,
-            |global_rule, _| ProxyGlobalRule::new_with_plugins(global_rule),
+            ProxyGlobalRule::new_with_plugins,
         );
         reload_global_plugin();
     }
 
     fn handle_ssl_event(&self, event: &Event) {
-        self.handle_resource(event, "ssls", &*SSL_MAP, |ssl, _| Ok(ProxySSL::from(ssl)));
+        self.handle_resource(event, "ssls", &*SSL_MAP, |ssl| Ok(ProxySSL::from(ssl)));
         reload_global_ssl_match();
     }
 }

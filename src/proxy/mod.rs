@@ -6,6 +6,7 @@
 pub mod discovery;
 pub mod event;
 pub mod global_rule;
+pub mod health_check;
 pub mod route;
 pub mod service;
 pub mod ssl;

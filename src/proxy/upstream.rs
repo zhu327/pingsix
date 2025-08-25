@@ -5,7 +5,7 @@ use http::Uri;
 use log::info;
 use once_cell::sync::Lazy;
 use pingora::services::background::background_service;
-use pingora_core::{services::Service, upstreams::peer::HttpPeer};
+use pingora_core::upstreams::peer::HttpPeer;
 use pingora_error::{Error, Result};
 use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_load_balancing::{
@@ -16,15 +16,13 @@ use pingora_load_balancing::{
     Backend, Backends, LoadBalancer,
 };
 use pingora_proxy::Session;
-use pingora_runtime::Runtime;
-use tokio::sync::watch;
 
 use crate::{
     config::{self, Identifiable},
     utils::request::request_selector_key,
 };
 
-use super::{discovery::HybridDiscovery, MapOperations};
+use super::{discovery::HybridDiscovery, health_check::SHARED_HEALTH_CHECK_SERVICE, MapOperations};
 
 /// Fetches an upstream by its ID.
 pub fn upstream_fetch(id: &str) -> Option<Arc<ProxyUpstream>> {
@@ -43,8 +41,7 @@ pub fn upstream_fetch(id: &str) -> Option<Arc<ProxyUpstream>> {
 pub struct ProxyUpstream {
     pub inner: config::Upstream,
     lb: SelectionLB,
-    runtime: Option<Runtime>,
-    watch: Option<watch::Sender<bool>>,
+    health_check_id: Option<String>, // 注册到共享服务的ID
 }
 
 impl Identifiable for ProxyUpstream {
@@ -57,51 +54,58 @@ impl Identifiable for ProxyUpstream {
     }
 }
 
-// ! Each ProxyUpstream with health check will still create its own pingora_runtime::Runtime.
-// ! This will result in a potentially large number of threads being created (number of threads = number of upstreams * number of threads per Runtime).
-// ! It is strongly recommended to use the Background Service mechanism provided by Pingora Server to run health checks instead.
 impl ProxyUpstream {
-    pub fn new_with_health_check(upstream: config::Upstream, work_stealing: bool) -> Result<Self> {
+    /// 创建一个使用共享健康检查服务的ProxyUpstream
+    pub fn new_with_shared_health_check(upstream: config::Upstream) -> Result<Self> {
         let mut proxy_upstream = ProxyUpstream {
             inner: upstream.clone(),
             lb: SelectionLB::try_from(upstream.clone())?,
-            runtime: None,
-            watch: None,
+            health_check_id: None,
         };
-        proxy_upstream.start_health_check(work_stealing);
+
+        // 注册到共享健康检查服务
+        if let Err(e) = proxy_upstream.register_health_check() {
+            log::warn!(
+                "Failed to register health check for upstream '{}': {}",
+                upstream.id,
+                e
+            );
+        }
+
         Ok(proxy_upstream)
     }
 
-    /// Starts the health check service, runs only once.
-    fn start_health_check(&mut self, work_stealing: bool) {
-        if let Some(mut service) = self.take_background_service() {
-            // Create a channel for watching the health check status
-            let (watch_tx, watch_rx) = watch::channel(false);
-            self.watch = Some(watch_tx);
+    /// 注册健康检查到共享服务
+    fn register_health_check(&mut self) -> Result<()> {
+        // 直接获取 LoadBalancer 的 Arc 引用
+        let load_balancer: Arc<
+            dyn pingora_core::services::background::BackgroundService + Send + Sync,
+        > = match &self.lb {
+            SelectionLB::RoundRobin(lb) => lb.upstreams.clone(),
+            SelectionLB::Random(lb) => lb.upstreams.clone(),
+            SelectionLB::Fnv(lb) => lb.upstreams.clone(),
+            SelectionLB::Ketama(lb) => lb.upstreams.clone(),
+        };
 
-            // Determine the number of threads for the service
-            let threads = service.threads().unwrap_or(1);
+        let upstream_id = self.inner.id.clone();
 
-            // Create a runtime based on the work_stealing flag
-            let runtime = self.create_runtime(work_stealing, threads, service.name());
+        // 注册到共享服务
+        SHARED_HEALTH_CHECK_SERVICE
+            .register_upstream(upstream_id.clone(), load_balancer)
+            .map_err(|e| {
+                Error::explain(
+                    pingora_error::ErrorType::InternalError,
+                    format!("Failed to register health check: {e}"),
+                )
+            })?;
 
-            // Spawn the service on the runtime
-            runtime.get_handle().spawn(async move {
-                service.start_service(None, watch_rx, 1).await;
-                info!("Service exited.");
-            });
+        self.health_check_id = Some(upstream_id);
+        info!(
+            "Registered upstream '{}' to shared health check service",
+            self.inner.id
+        );
 
-            // Set the runtime lifecycle with ProxyUpstream
-            self.runtime = Some(runtime);
-        }
-    }
-
-    fn create_runtime(&self, work_stealing: bool, threads: usize, service_name: &str) -> Runtime {
-        if work_stealing {
-            Runtime::new_steal(threads, service_name)
-        } else {
-            Runtime::new_no_steal(threads, service_name)
-        }
+        Ok(())
     }
 
     /// Selects a backend server for a given session.
@@ -136,20 +140,11 @@ impl ProxyUpstream {
         }
     }
 
-    /// Stops the health check service.
+    /// 停止健康检查服务
     fn stop_health_check(&mut self) {
-        if let Some(tx) = self.watch.take() {
-            let _ = tx.send(true);
-        }
-    }
-
-    /// Takes the background service if it exists.
-    fn take_background_service(&mut self) -> Option<Box<dyn Service + 'static>> {
-        match self.lb {
-            SelectionLB::RoundRobin(ref mut lb) => lb.service.take(),
-            SelectionLB::Random(ref mut lb) => lb.service.take(),
-            SelectionLB::Fnv(ref mut lb) => lb.service.take(),
-            SelectionLB::Ketama(ref mut lb) => lb.service.take(),
+        if let Some(upstream_id) = self.health_check_id.take() {
+            SHARED_HEALTH_CHECK_SERVICE.unregister_upstream(&upstream_id);
+            info!("Unregistered upstream '{upstream_id}' from shared health check service");
         }
     }
 
@@ -179,22 +174,9 @@ impl ProxyUpstream {
 }
 
 impl Drop for ProxyUpstream {
-    /// Stops the health check service if it exists.
+    /// 停止健康检查服务
     fn drop(&mut self) {
         self.stop_health_check();
-
-        // Ensure other resources like runtime are released
-        if let Some(runtime) = self.runtime.take() {
-            // Get the runtime handle
-            let handler = runtime.get_handle().clone();
-
-            // Use handler to execute shutdown logic
-            handler.spawn_blocking(move || {
-                runtime.shutdown_timeout(Duration::from_secs(1));
-            });
-
-            info!("Runtime shutdown successfully.");
-        }
     }
 }
 
@@ -226,7 +208,6 @@ impl TryFrom<config::Upstream> for SelectionLB {
 
 struct LB<BS: BackendSelection> {
     upstreams: Arc<LoadBalancer<BS>>,
-    service: Option<Box<dyn Service + 'static>>,
 }
 
 impl<BS> TryFrom<config::Upstream> for LB<BS>
@@ -258,10 +239,7 @@ where
             background_service(&format!("health check for {}", upstream.id), upstreams);
         let upstreams = background.task();
 
-        let this = Self {
-            upstreams,
-            service: Some(Box::new(background)),
-        };
+        let this = Self { upstreams };
 
         Ok(this)
     }
@@ -379,10 +357,7 @@ pub fn load_static_upstreams(config: &config::Config) -> Result<()> {
         .iter()
         .map(|upstream| {
             info!("Configuring Upstream: {}", upstream.id);
-            match ProxyUpstream::new_with_health_check(
-                upstream.clone(),
-                config.pingora.work_stealing,
-            ) {
+            match ProxyUpstream::new_with_shared_health_check(upstream.clone()) {
                 Ok(proxy_upstream) => Ok(Arc::new(proxy_upstream)),
                 Err(e) => {
                     log::error!("Failed to configure Upstream {}: {}", upstream.id, e);
@@ -392,8 +367,11 @@ pub fn load_static_upstreams(config: &config::Config) -> Result<()> {
         })
         .collect::<Result<Vec<_>>>()?;
 
+    let upstream_count = proxy_upstreams.len();
+
     // Insert all ProxyUpstream instances into the global map.
     UPSTREAM_MAP.reload_resources(proxy_upstreams);
 
+    info!("Loaded {upstream_count} upstreams with shared health check service");
     Ok(())
 }
