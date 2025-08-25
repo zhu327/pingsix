@@ -17,6 +17,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use http::{header, StatusCode};
 use once_cell::sync::Lazy;
 use pingora::OkOrErr;
 use pingora_error::{Error, ErrorType::ReadError, Result};
@@ -29,6 +30,64 @@ use crate::proxy::ProxyContext;
 
 /// Type alias for plugin initialization functions
 pub type PluginCreateFn = fn(YamlValue) -> Result<Arc<dyn ProxyPlugin>>;
+
+/// Builds a standardized error response
+pub fn build_error_response(
+    status: StatusCode,
+    message: Option<&str>,
+    headers: Option<&[(&str, &str)]>,
+) -> Result<ResponseHeader> {
+    let mut resp = ResponseHeader::build(status, None)?;
+
+    if let Some(msg) = message {
+        resp.insert_header(header::CONTENT_LENGTH, msg.len().to_string())?;
+        resp.insert_header(header::CONTENT_TYPE, "text/plain")?;
+    }
+
+    if let Some(hdrs) = headers {
+        for (name, value) in hdrs {
+            resp.insert_header(name.to_string(), value.to_string())?;
+        }
+    }
+
+    Ok(resp)
+}
+
+/// Sends an error response to the client
+pub async fn send_error_response(
+    session: &mut Session,
+    status: StatusCode,
+    message: Option<&str>,
+    headers: Option<&[(&str, &str)]>,
+) -> Result<()> {
+    let resp = build_error_response(status, message, headers)?;
+    session
+        .write_response_header(Box::new(resp), message.is_none())
+        .await?;
+
+    if let Some(msg) = message {
+        session
+            .write_response_body(Some(Bytes::copy_from_slice(msg.as_bytes())), true)
+            .await?;
+    }
+
+    Ok(())
+}
+
+/// Utility function for constant-time string comparison
+pub fn constant_time_eq(a: &str, b: &str) -> bool {
+    // Simple constant-time comparison implementation
+    // For production use, consider adding the `subtle` crate dependency
+    if a.len() != b.len() {
+        return false;
+    }
+
+    let mut result = 0u8;
+    for (a_byte, b_byte) in a.bytes().zip(b.bytes()) {
+        result |= a_byte ^ b_byte;
+    }
+    result == 0
+}
 
 /// Registry of plugin builders
 static PLUGIN_BUILDER_REGISTRY: Lazy<HashMap<&'static str, PluginCreateFn>> = Lazy::new(|| {

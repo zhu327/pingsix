@@ -72,6 +72,7 @@ enum Segment {
 #[derive(Debug)]
 struct LogFormat {
     segments: Vec<Segment>,
+    estimated_capacity: usize, // Pre-calculated capacity estimation
 }
 
 impl LogFormat {
@@ -82,23 +83,56 @@ impl LogFormat {
             .or_err_with(ReadError, || "Failed to parse log format")?;
         let mut segments = Vec::new();
         let mut last_pos = 0;
+        let mut estimated_capacity = 0;
 
         for mat in re.find_iter(format) {
             // Add static part before the variable
             if last_pos < mat.start() {
-                segments.push(Segment::Static(format[last_pos..mat.start()].to_string()));
+                let static_part = format[last_pos..mat.start()].to_string();
+                estimated_capacity += static_part.len();
+                segments.push(Segment::Static(static_part));
             }
             // Add variable (remove $ prefix)
-            segments.push(Segment::Variable(mat.as_str()[1..].to_string()));
+            let var_name = mat.as_str()[1..].to_string();
+            estimated_capacity += Self::estimate_variable_size(&var_name);
+            segments.push(Segment::Variable(var_name));
             last_pos = mat.end();
         }
 
         // Add remaining static part
         if last_pos < format.len() {
-            segments.push(Segment::Static(format[last_pos..].to_string()));
+            let static_part = format[last_pos..].to_string();
+            estimated_capacity += static_part.len();
+            segments.push(Segment::Static(static_part));
         }
 
-        Ok(LogFormat { segments })
+        Ok(LogFormat {
+            segments,
+            estimated_capacity,
+        })
+    }
+
+    /// Estimate the size of a variable for capacity pre-allocation
+    fn estimate_variable_size(var_name: &str) -> usize {
+        match var_name {
+            "status" => 4,                           // 3-4 bytes (e.g., "200")
+            "request_method" => 8,                   // 3-7 bytes (e.g., "GET")
+            "request_id" => 36,                      // UUID length
+            "http_user_agent" => 128,                // Browser UA can be long
+            "uri" => 64,                             // Average URI length
+            "query_string" => 32,                    // Average query string length
+            "http_host" => 32,                       // Average host length
+            "request_time" => 8,                     // Milliseconds as string
+            "http_referer" => 64,                    // Average referer length
+            "remote_addr" => 16,                     // IPv4/IPv6 address
+            "remote_port" => 6,                      // Port number
+            "server_addr" => 16,                     // Server address
+            "server_protocol" => 8,                  // "http/1.1" or "http/2"
+            "body_bytes_sent" => 12,                 // Large numbers
+            "error" => 128,                          // Error messages can be long
+            _ if var_name.starts_with("var_") => 32, // Custom variables
+            _ => 16,                                 // Default for unknown variables
+        }
     }
 
     /// Renders the log format into a string, replacing variables with their values.
@@ -107,78 +141,129 @@ impl LogFormat {
     /// The `error` variable is populated from the `e` parameter, which is guaranteed by
     /// `Pingora::ProxyHttp::logging` to be passed correctly.
     fn render(&self, session: &mut Session, e: Option<&Error>, ctx: &mut ProxyContext) -> String {
-        // Pre-estimate capacity: template length + average variable value lengths
-        let estimated_len = self.segments.iter().fold(0, |acc, seg| {
-            acc + match seg {
-                Segment::Static(s) => s.len(),
-                Segment::Variable(var) => match var.as_str() {
-                    "status" => 4,            // 3-4 bytes (e.g., "200")
-                    "request_method" => 8,    // 3-7 bytes (e.g., "GET")
-                    "request_id" => 36,       // UUID length
-                    "http_user_agent" => 128, // Browser UA can be long
-                    _ => 32,                  // Default for other variables
-                },
-            }
-        });
-
         // Create output string with pre-allocated capacity
-        let mut output = String::with_capacity(estimated_len);
-
-        // Cache request header reference
-        let req_header = session.req_header();
+        let mut output = String::with_capacity(self.estimated_capacity);
 
         for segment in &self.segments {
             match segment {
                 Segment::Static(text) => output.push_str(text),
                 Segment::Variable(var) => {
-                    let value = if let Some(custom_var_name) = var.strip_prefix("var_") {
-                        ctx.vars.get(custom_var_name).map_or("", |s| s.as_str())
-                    } else {
-                        match var.as_str() {
-                            "request_method" => req_header.method.as_str(),
-                            "uri" => req_header.uri.path(),
-                            "query_string" => req_header.uri.query().unwrap_or_default(),
-                            "http_host" => req_header.uri.host().unwrap_or_default(),
-                            "request_time" => &ctx.request_start.elapsed().as_millis().to_string(),
-                            "http_user_agent" => {
-                                request::get_req_header_value(req_header, "user-agent")
-                                    .unwrap_or_default()
-                            }
-                            "http_referer" => request::get_req_header_value(req_header, "referer")
-                                .unwrap_or_default(),
-                            "remote_addr" => &session
-                                .client_addr()
-                                .map(ToString::to_string)
-                                .unwrap_or_default(),
-                            "remote_port" => &session
-                                .client_addr()
-                                .and_then(|s| s.as_inet())
-                                .map_or_else(|| "".to_string(), |i| i.port().to_string()),
-                            "server_addr" => &session
-                                .server_addr()
-                                .map_or_else(|| "".to_string(), |addr| addr.to_string()),
-                            "status" => &session
-                                .response_written()
-                                .map(|v| v.status.as_u16().to_string())
-                                .unwrap_or_default(),
-                            "server_protocol" => {
-                                if session.is_http2() {
-                                    "http/2"
-                                } else {
-                                    "http/1.1"
-                                }
-                            }
-                            "request_id" => ctx.vars.get("request-id").map_or("", |s| s.as_str()),
-                            "body_bytes_sent" => &session.body_bytes_sent().to_string(),
-                            "error" => &e.map(|e| e.to_string()).unwrap_or_default(),
-                            _ => "",
-                        }
-                    };
+                    let value = self.get_variable_value(var, session, e, ctx);
                     output.push_str(value);
                 }
             }
         }
 
         output
+    }
+
+    /// Extract variable value - separated for better readability and potential caching
+    fn get_variable_value<'a>(
+        &self,
+        var: &str,
+        session: &'a mut Session,
+        e: Option<&'a Error>,
+        ctx: &'a mut ProxyContext,
+    ) -> &'a str {
+        // Handle custom variables first
+        if let Some(custom_var_name) = var.strip_prefix("var_") {
+            return ctx.vars.get(custom_var_name).map_or("", |s| s.as_str());
+        }
+
+        // Handle built-in variables
+        match var {
+            "request_method" => session.req_header().method.as_str(),
+            "uri" => session.req_header().uri.path(),
+            "query_string" => session.req_header().uri.query().unwrap_or_default(),
+            "http_host" => session.req_header().uri.host().unwrap_or_default(),
+            "request_time" => {
+                // Store in context to avoid recalculation
+                let key = "_log_request_time";
+                if !ctx.vars.contains_key(key) {
+                    let time_str = ctx.request_start.elapsed().as_millis().to_string();
+                    ctx.vars.insert(key.to_string(), time_str);
+                }
+                ctx.vars.get(key).map_or("", |s| s.as_str())
+            }
+            "http_user_agent" => request::get_req_header_value(session.req_header(), "user-agent")
+                .unwrap_or_default(),
+            "http_referer" => {
+                request::get_req_header_value(session.req_header(), "referer").unwrap_or_default()
+            }
+            "remote_addr" => {
+                // Cache remote address to avoid repeated computation
+                let key = "_log_remote_addr";
+                if !ctx.vars.contains_key(key) {
+                    let addr_str = session
+                        .client_addr()
+                        .map(|addr| addr.to_string())
+                        .unwrap_or_default();
+                    ctx.vars.insert(key.to_string(), addr_str);
+                }
+                ctx.vars.get(key).map_or("", |s| s.as_str())
+            }
+            "remote_port" => {
+                // Cache remote port
+                let key = "_log_remote_port";
+                if !ctx.vars.contains_key(key) {
+                    let port_str = session
+                        .client_addr()
+                        .and_then(|s| s.as_inet())
+                        .map_or_else(|| "".to_string(), |i| i.port().to_string());
+                    ctx.vars.insert(key.to_string(), port_str);
+                }
+                ctx.vars.get(key).map_or("", |s| s.as_str())
+            }
+            "server_addr" => {
+                // Cache server address
+                let key = "_log_server_addr";
+                if !ctx.vars.contains_key(key) {
+                    let addr_str = session
+                        .server_addr()
+                        .map_or_else(|| "".to_string(), |addr| addr.to_string());
+                    ctx.vars.insert(key.to_string(), addr_str);
+                }
+                ctx.vars.get(key).map_or("", |s| s.as_str())
+            }
+            "status" => {
+                // Cache status
+                let key = "_log_status";
+                if !ctx.vars.contains_key(key) {
+                    let status_str = session
+                        .response_written()
+                        .map(|v| v.status.as_u16().to_string())
+                        .unwrap_or_default();
+                    ctx.vars.insert(key.to_string(), status_str);
+                }
+                ctx.vars.get(key).map_or("", |s| s.as_str())
+            }
+            "server_protocol" => {
+                if session.is_http2() {
+                    "http/2"
+                } else {
+                    "http/1.1"
+                }
+            }
+            "request_id" => ctx.vars.get("request-id").map_or("", |s| s.as_str()),
+            "body_bytes_sent" => {
+                // Cache body bytes sent
+                let key = "_log_body_bytes_sent";
+                if !ctx.vars.contains_key(key) {
+                    let bytes_str = session.body_bytes_sent().to_string();
+                    ctx.vars.insert(key.to_string(), bytes_str);
+                }
+                ctx.vars.get(key).map_or("", |s| s.as_str())
+            }
+            "error" => {
+                // Cache error message
+                let key = "_log_error";
+                if !ctx.vars.contains_key(key) {
+                    let error_str = e.map(|e| e.to_string()).unwrap_or_default();
+                    ctx.vars.insert(key.to_string(), error_str);
+                }
+                ctx.vars.get(key).map_or("", |s| s.as_str())
+            }
+            _ => "",
+        }
     }
 }

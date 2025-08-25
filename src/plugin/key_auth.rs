@@ -1,9 +1,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use http::{header, StatusCode};
+use http::StatusCode;
 use pingora_error::{ErrorType::ReadError, OrErr, Result};
-use pingora_http::ResponseHeader;
 use pingora_proxy::Session;
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value as YamlValue;
@@ -11,7 +10,7 @@ use validator::Validate;
 
 use crate::{proxy::ProxyContext, utils::request};
 
-use super::ProxyPlugin;
+use super::{constant_time_eq, send_error_response, ProxyPlugin};
 
 pub const PLUGIN_NAME: &str = "key-auth";
 const PRIORITY: i32 = 2500;
@@ -20,7 +19,7 @@ const DEFAULT_QUERY: &str = "apikey";
 
 /// Creates a Key Auth plugin instance with the given configuration.
 /// This plugin authenticates requests by matching an API key in the HTTP header or query parameter
-/// against a configured key. If the key is invalid or missing, it returns a `401 Unauthorized` response.
+/// against configured keys. If the key is invalid or missing, it returns a `401 Unauthorized` response.
 pub fn create_key_auth_plugin(cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> {
     let config: PluginConfig =
         serde_yaml::from_value(cfg).or_err_with(ReadError, || "Invalid key auth plugin config")?;
@@ -44,8 +43,16 @@ struct PluginConfig {
     query: String,
 
     /// The API key to match against. Must be non-empty.
+    /// For backward compatibility, single key as string.
     #[validate(length(min = 1))]
-    key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    key: Option<String>,
+
+    /// Multiple API keys to match against. Supports key rotation.
+    /// Takes precedence over single `key` if both are provided.
+    #[validate(length(min = 1))]
+    #[serde(default)]
+    keys: Vec<String>,
 
     /// Whether to remove the API key from headers or query parameters after validation (default: false).
     #[serde(default = "PluginConfig::default_hide_credentials")]
@@ -64,6 +71,17 @@ impl PluginConfig {
     fn default_hide_credentials() -> bool {
         false
     }
+
+    /// Get all valid keys (combines single key and multiple keys)
+    fn get_valid_keys(&self) -> Vec<&String> {
+        if !self.keys.is_empty() {
+            self.keys.iter().collect()
+        } else if let Some(ref key) = self.key {
+            vec![key]
+        } else {
+            vec![]
+        }
+    }
 }
 
 /// Source of the API key (header, query, or none).
@@ -75,7 +93,8 @@ enum KeySource {
 }
 
 /// Key Auth plugin implementation.
-/// Validates API keys from HTTP headers or query parameters.
+/// Validates API keys from HTTP headers or query parameters using constant-time comparison.
+/// Supports multiple keys for key rotation scenarios.
 /// Note: For production environments, consider using more secure mechanisms like HMAC signatures
 /// or integration with a consumer management system instead of fixed key matching.
 pub struct PluginKeyAuth {
@@ -103,16 +122,15 @@ impl ProxyPlugin for PluginKeyAuth {
                 })
                 .unwrap_or(("", KeySource::None));
 
-        // Match key
-        if value.is_empty() || value != self.config.key {
-            let msg = "Invalid user authorization";
-            let mut header = ResponseHeader::build(StatusCode::UNAUTHORIZED, None)?;
-            header.insert_header(header::CONTENT_LENGTH, msg.len().to_string())?;
-            header.insert_header(header::WWW_AUTHENTICATE, "ApiKey error=\"invalid_key\"")?;
-            session
-                .write_response_header(Box::new(header), false)
-                .await?;
-            session.write_response_body(Some(msg.into()), true).await?;
+        // Validate key using constant-time comparison
+        if value.is_empty() || !self.is_valid_key(value) {
+            send_error_response(
+                session,
+                StatusCode::UNAUTHORIZED,
+                Some("Invalid user authorization"),
+                Some(&[("WWW-Authenticate", "ApiKey error=\"invalid_key\"")]),
+            )
+            .await?;
             return Ok(true);
         }
 
@@ -133,5 +151,25 @@ impl ProxyPlugin for PluginKeyAuth {
         }
 
         Ok(false)
+    }
+}
+
+impl PluginKeyAuth {
+    /// Validate the provided key against configured keys using constant-time comparison
+    fn is_valid_key(&self, provided_key: &str) -> bool {
+        let valid_keys = self.config.get_valid_keys();
+
+        if valid_keys.is_empty() {
+            return false;
+        }
+
+        // Use constant-time comparison to prevent timing attacks
+        for valid_key in valid_keys {
+            if constant_time_eq(provided_key, valid_key) {
+                return true;
+            }
+        }
+
+        false
     }
 }

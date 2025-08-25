@@ -8,9 +8,13 @@ use prometheus::{
     register_histogram_vec, register_int_counter, register_int_counter_vec, HistogramOpts,
     HistogramVec, IntCounter, IntCounterVec,
 };
+use regex::Regex;
 use serde_yaml::Value as YamlValue;
 
-use crate::{proxy::ProxyContext, utils::request::get_request_host};
+use crate::{
+    proxy::{route::ProxyRoute, ProxyContext},
+    utils::request::get_request_host,
+};
 
 use super::ProxyPlugin;
 
@@ -28,18 +32,18 @@ static REQUESTS: Lazy<IntCounter> = Lazy::new(|| {
     .unwrap()
 });
 
-// Counter for HTTP status codes
+// Counter for HTTP status codes with normalized URI paths
 static STATUS: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         "http_status",
         "HTTP status codes per service in pingsix",
         &[
-            "code",         // HTTP status code
-            "route",        // Route ID
-            "matched_uri",  // Matched URI
-            "matched_host", // Matched Host
-            "service",      // Service ID
-            "node",         // Node ID
+            "code",          // HTTP status code
+            "route",         // Route ID
+            "path_template", // Normalized path template to avoid high cardinality
+            "matched_host",  // Matched Host
+            "service",       // Service ID
+            "node",          // Node ID
         ]
     )
     .unwrap()
@@ -61,13 +65,31 @@ static BANDWIDTH: Lazy<IntCounterVec> = Lazy::new(|| {
         "bandwidth",
         "Total bandwidth in bytes consumed per service in pingsix",
         &[
-            "type",    // HTTP status code
+            "type",    // ingress/egress
             "route",   // Route ID
             "service", // Service ID
             "node",    // Node ID
         ]
     )
     .unwrap()
+});
+
+// Request size histogram
+static REQUEST_SIZE: Lazy<HistogramVec> = Lazy::new(|| {
+    let opts =
+        HistogramOpts::new("http_request_size_bytes", "HTTP request size in bytes").buckets(vec![
+            100.0, 1000.0, 10000.0, 100000.0, 1000000.0, 10000000.0,
+        ]);
+    register_histogram_vec!(opts, &["route", "service"]).unwrap()
+});
+
+// Response size histogram
+static RESPONSE_SIZE: Lazy<HistogramVec> = Lazy::new(|| {
+    let opts = HistogramOpts::new("http_response_size_bytes", "HTTP response size in bytes")
+        .buckets(vec![
+            100.0, 1000.0, 10000.0, 100000.0, 1000000.0, 10000000.0,
+        ]);
+    register_histogram_vec!(opts, &["route", "service"]).unwrap()
 });
 
 pub const PLUGIN_NAME: &str = "prometheus";
@@ -103,10 +125,8 @@ impl ProxyPlugin for PluginPrometheus {
         // Extract route information, falling back to empty string if not present
         let route_id = route.as_ref().map_or_else(|| "", |r| r.inner.id.as_str());
 
-        // Extract URI template (or fallback to empty string) to avoid high cardinality from raw URIs
-        let uri = route
-            .as_ref()
-            .map_or("", |_| session.req_header().uri.path());
+        // Use path template to avoid high cardinality issues
+        let path_template = self.normalize_path_template(&route, session);
 
         // Extract host, falling back to empty string
         let host = route.as_ref().map_or("", |_| {
@@ -122,16 +142,17 @@ impl ProxyPlugin for PluginPrometheus {
         // Extract node from context variables (assumes HttpService::upstream_peer sets ctx.vars["upstream"])
         let node = ctx.vars.get("upstream").map_or("", |s| s.as_str());
 
-        // Update Prometheus metrics
-        // ! The matched_uri tag still uses the original path, which can cause high cardinality issues.
+        // Update Prometheus metrics with normalized path template
         STATUS
-            .with_label_values(&[code, route_id, uri, host, service, node])
+            .with_label_values(&[code, route_id, &path_template, host, service, node])
             .inc();
 
+        // Record request latency
         LATENCY
             .with_label_values(&["request", route_id, service, node])
             .observe(ctx.request_start.elapsed().as_millis() as f64);
 
+        // Record bandwidth metrics
         BANDWIDTH
             .with_label_values(&["ingress", route_id, service, node])
             .inc_by(session.body_bytes_read() as _);
@@ -139,5 +160,65 @@ impl ProxyPlugin for PluginPrometheus {
         BANDWIDTH
             .with_label_values(&["egress", route_id, service, node])
             .inc_by(session.body_bytes_sent() as _);
+
+        // Record request and response sizes
+        REQUEST_SIZE
+            .with_label_values(&[route_id, service])
+            .observe(session.body_bytes_read() as f64);
+
+        RESPONSE_SIZE
+            .with_label_values(&[route_id, service])
+            .observe(session.body_bytes_sent() as f64);
+    }
+}
+
+impl PluginPrometheus {
+    /// Normalize URI path to avoid high cardinality issues
+    /// Uses route path template if available, otherwise applies basic normalization
+    fn normalize_path_template(
+        &self,
+        route: &Option<Arc<ProxyRoute>>,
+        session: &Session,
+    ) -> String {
+        // If route has a path template, use it
+        if let Some(route) = route {
+            // Try to use the first URI as a template
+            if let Some(ref uri_template) = route.inner.uri {
+                return uri_template.clone();
+            }
+            // Fallback to first URI in uris list
+            if !route.inner.uris.is_empty() {
+                return route.inner.uris[0].clone();
+            }
+        }
+
+        // Fallback: apply basic path normalization to reduce cardinality
+        let original_path = session.req_header().uri.path();
+        self.normalize_path(original_path)
+    }
+
+    /// Apply basic path normalization to reduce metric cardinality
+    fn normalize_path(&self, path: &str) -> String {
+        // Replace numeric IDs with placeholders
+        let path = Regex::new(r"/\d+").unwrap().replace_all(path, "/{id}");
+
+        // Replace UUIDs with placeholders
+        let path = Regex::new(
+            r"/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+        )
+        .unwrap()
+        .replace_all(&path, "/{uuid}");
+
+        // Replace other common patterns
+        let path = Regex::new(r"/[0-9a-fA-F]{32,}")
+            .unwrap()
+            .replace_all(&path, "/{hash}");
+
+        // Limit path length to prevent extremely long paths
+        if path.len() > 100 {
+            format!("{}...", &path[..97])
+        } else {
+            path.to_string()
+        }
     }
 }

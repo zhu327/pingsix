@@ -26,8 +26,8 @@ pub fn create_cors_plugin(cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> {
         .validate()
         .or_err_with(ReadError, || "Invalid cors plugin config")?;
 
-    // Pre-compile regex patterns
-    let compiled_config = config.compile_regexes()?;
+    // Pre-compile regex patterns and create optimized config
+    let compiled_config = config.compile_and_optimize()?;
 
     Ok(Arc::new(PluginCors {
         config: compiled_config,
@@ -118,7 +118,8 @@ impl PluginConfig {
         Ok(())
     }
 
-    fn compile_regexes(self) -> Result<CompiledPluginConfig> {
+    fn compile_and_optimize(self) -> Result<OptimizedPluginConfig> {
+        // Pre-compile regex patterns
         let compiled_regexes = if let Some(regex_list) = &self.allow_origins_by_regex {
             let compiled: Vec<Arc<Regex>> = regex_list
                 .iter()
@@ -133,7 +134,21 @@ impl PluginConfig {
             None
         };
 
-        Ok(CompiledPluginConfig {
+        // Pre-compile allowed origins set for faster lookup
+        let allow_origins_set = if self.allow_origins != "*" && self.allow_origins != "**" {
+            Some(
+                self.allow_origins
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .collect::<HashSet<String>>(),
+            )
+        } else {
+            None
+        };
+
+        Ok(OptimizedPluginConfig {
             allow_origins: self.allow_origins,
             allow_methods: self.allow_methods,
             allow_headers: self.allow_headers,
@@ -141,12 +156,13 @@ impl PluginConfig {
             max_age: self.max_age,
             allow_credential: self.allow_credential,
             allow_origins_by_regex: compiled_regexes,
+            allow_origins_set,
         })
     }
 }
 
 #[derive(Debug)]
-pub struct CompiledPluginConfig {
+pub struct OptimizedPluginConfig {
     pub allow_origins: String,
     pub allow_methods: String,
     pub allow_headers: String,
@@ -154,26 +170,28 @@ pub struct CompiledPluginConfig {
     pub max_age: i32,
     pub allow_credential: bool,
     pub allow_origins_by_regex: Option<Vec<Arc<Regex>>>,
+    pub allow_origins_set: Option<HashSet<String>>, // Pre-compiled for faster lookup
 }
 
-impl CompiledPluginConfig {
+impl OptimizedPluginConfig {
     fn is_origin_allowed(&self, origin: &str) -> bool {
         if self.allow_origins.is_empty() {
             return false;
         }
+
+        // Handle wildcard cases
         if self.allow_origins == "*" || self.allow_origins == "**" {
             return true;
         }
-        let allowed_set: HashSet<_> = self
-            .allow_origins
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .collect();
-        if allowed_set.contains(origin) {
-            return true;
+
+        // Use pre-compiled HashSet for fast lookup
+        if let Some(ref origins_set) = self.allow_origins_set {
+            if origins_set.contains(origin) {
+                return true;
+            }
         }
 
+        // Check regex patterns if available
         if let Some(regex_list) = &self.allow_origins_by_regex {
             for re in regex_list {
                 if re.is_match(origin) {
@@ -187,7 +205,7 @@ impl CompiledPluginConfig {
 }
 
 pub struct PluginCors {
-    config: CompiledPluginConfig,
+    config: OptimizedPluginConfig,
 }
 
 impl PluginCors {
