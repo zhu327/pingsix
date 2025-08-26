@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     error::Error,
     fmt,
+    marker::PhantomData,
 };
 
 use async_trait::async_trait;
@@ -17,7 +18,7 @@ use crate::{
     config::{
         self,
         etcd::{json_to_resource, EtcdClientWrapper},
-        Admin, Pingsix,
+        Admin, Identifiable, Pingsix,
     },
     plugin::build_plugin,
 };
@@ -72,7 +73,6 @@ impl ApiError {
 
 type ApiResult<T> = Result<T, ApiError>;
 type RequestParams = BTreeMap<String, String>;
-type HttpHandler = Box<dyn Handler + Send + Sync>;
 
 // Unified response handler
 struct ResponseHelper;
@@ -115,6 +115,111 @@ impl ResponseHelper {
     }
 }
 
+// 新的资源处理trait，简化资源验证逻辑
+trait AdminResource: DeserializeOwned + Validate + Identifiable + Send + Sync + 'static {
+    const RESOURCE_TYPE: &'static str;
+
+    fn validate_resource(data: &[u8]) -> ApiResult<Self> {
+        let resource = json_to_resource::<Self>(data)
+            .map_err(|e| ApiError::InvalidRequest(format!("Invalid JSON data: {e}")))?;
+
+        // 基础验证
+        resource.validate().map_err(|e| {
+            ApiError::ValidationError(format!("{} validation failed: {e}", Self::RESOURCE_TYPE))
+        })?;
+
+        // 插件验证（如果适用）
+        Self::validate_plugins_if_supported(&resource)?;
+
+        Ok(resource)
+    }
+
+    fn validate_plugins_if_supported(_resource: &Self) -> ApiResult<()> {
+        // 默认实现：无插件验证
+        Ok(())
+    }
+}
+
+// 为所有支持的资源类型实现AdminResource
+impl AdminResource for config::Route {
+    const RESOURCE_TYPE: &'static str = "routes";
+
+    fn validate_plugins_if_supported(resource: &Self) -> ApiResult<()> {
+        for (name, value) in &resource.plugins {
+            build_plugin(name, value.clone()).map_err(|e| {
+                ApiError::ValidationError(format!("Failed to build plugin '{name}': {e}"))
+            })?;
+        }
+        Ok(())
+    }
+}
+
+impl AdminResource for config::Upstream {
+    const RESOURCE_TYPE: &'static str = "upstreams";
+}
+
+impl AdminResource for config::Service {
+    const RESOURCE_TYPE: &'static str = "services";
+
+    fn validate_plugins_if_supported(resource: &Self) -> ApiResult<()> {
+        for (name, value) in &resource.plugins {
+            build_plugin(name, value.clone()).map_err(|e| {
+                ApiError::ValidationError(format!("Failed to build plugin '{name}': {e}"))
+            })?;
+        }
+        Ok(())
+    }
+}
+
+impl AdminResource for config::GlobalRule {
+    const RESOURCE_TYPE: &'static str = "global_rules";
+
+    fn validate_plugins_if_supported(resource: &Self) -> ApiResult<()> {
+        for (name, value) in &resource.plugins {
+            build_plugin(name, value.clone()).map_err(|e| {
+                ApiError::ValidationError(format!("Failed to build plugin '{name}': {e}"))
+            })?;
+        }
+        Ok(())
+    }
+}
+
+impl AdminResource for config::SSL {
+    const RESOURCE_TYPE: &'static str = "ssls";
+}
+
+// 泛型handler，大大简化了代码
+struct ResourceHandler<T: AdminResource> {
+    _phantom: PhantomData<T>,
+}
+
+impl<T: AdminResource> ResourceHandler<T> {
+    fn new() -> Self {
+        Self {
+            _phantom: PhantomData,
+        }
+    }
+
+    fn extract_key(params: &RequestParams) -> ApiResult<String> {
+        let resource_type = params
+            .get("resource")
+            .ok_or_else(|| ApiError::MissingParameter("resource".into()))?;
+        let id = params
+            .get("id")
+            .ok_or_else(|| ApiError::MissingParameter("id".into()))?;
+
+        // 验证资源类型匹配
+        if resource_type != T::RESOURCE_TYPE {
+            return Err(ApiError::InvalidRequest(format!(
+                "Resource type mismatch: expected {}, got {resource_type}",
+                T::RESOURCE_TYPE
+            )));
+        }
+
+        Ok(format!("{resource_type}/{id}"))
+    }
+}
+
 #[async_trait]
 trait Handler {
     async fn handle(
@@ -124,6 +229,110 @@ trait Handler {
         params: RequestParams,
     ) -> ApiResult<Response<Vec<u8>>>;
 }
+
+// PUT handler
+#[async_trait]
+impl<T: AdminResource> Handler for ResourceHandler<T> {
+    async fn handle(
+        &self,
+        etcd: &EtcdClientWrapper,
+        http_session: &mut ServerSession,
+        params: RequestParams,
+    ) -> ApiResult<Response<Vec<u8>>> {
+        validate_content_type(http_session)?;
+
+        let body_data = read_request_body(http_session)
+            .await
+            .map_err(|e| ApiError::RequestBodyReadError(e.to_string()))?;
+
+        let key = Self::extract_key(&params)?;
+
+        // 使用泛型资源验证
+        T::validate_resource(&body_data)?;
+
+        etcd.put(&key, body_data)
+            .await
+            .map_err(|e| ApiError::EtcdPutError(e.to_string()))?;
+
+        Ok(ResponseHelper::success(Vec::new(), None))
+    }
+}
+
+// GET handler - 为了区分操作类型，我们需要单独的类型
+struct GetHandler<T: AdminResource> {
+    _phantom: PhantomData<T>,
+}
+
+impl<T: AdminResource> GetHandler<T> {
+    fn new() -> Self {
+        Self {
+            _phantom: PhantomData,
+        }
+    }
+}
+
+#[async_trait]
+impl<T: AdminResource> Handler for GetHandler<T> {
+    async fn handle(
+        &self,
+        etcd: &EtcdClientWrapper,
+        _http_session: &mut ServerSession,
+        params: RequestParams,
+    ) -> ApiResult<Response<Vec<u8>>> {
+        let key = ResourceHandler::<T>::extract_key(&params)?;
+
+        match etcd.get(&key).await {
+            Err(e) => Err(ApiError::EtcdGetError(e.to_string())),
+            Ok(Some(value)) => {
+                let json_value: serde_json::Value = serde_json::from_slice(&value)
+                    .map_err(|e| ApiError::InvalidRequest(format!("Invalid JSON data: {e}")))?;
+                let wrapper = ValueWrapper { value: json_value };
+                let json_vec = serde_json::to_vec(&wrapper)
+                    .map_err(|e| ApiError::InternalError(e.to_string()))?;
+                Ok(ResponseHelper::success(json_vec, Some("application/json")))
+            }
+            Ok(None) => Err(ApiError::InvalidRequest("Resource not found".into())),
+        }
+    }
+}
+
+// DELETE handler
+struct DeleteHandler<T: AdminResource> {
+    _phantom: PhantomData<T>,
+}
+
+impl<T: AdminResource> DeleteHandler<T> {
+    fn new() -> Self {
+        Self {
+            _phantom: PhantomData,
+        }
+    }
+}
+
+#[async_trait]
+impl<T: AdminResource> Handler for DeleteHandler<T> {
+    async fn handle(
+        &self,
+        etcd: &EtcdClientWrapper,
+        _http_session: &mut ServerSession,
+        params: RequestParams,
+    ) -> ApiResult<Response<Vec<u8>>> {
+        let key = ResourceHandler::<T>::extract_key(&params)?;
+
+        etcd.delete(&key)
+            .await
+            .map_err(|e| ApiError::EtcdDeleteError(e.to_string()))?;
+
+        Ok(ResponseHelper::success(Vec::new(), None))
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct ValueWrapper<T> {
+    value: T,
+}
+
+type HttpHandler = Box<dyn Handler + Send + Sync>;
 
 pub struct AdminHttpApp {
     config: Admin,
@@ -139,23 +348,24 @@ impl AdminHttpApp {
             router: Router::new(),
         };
 
-        this.route(
-            "/apisix/admin/{resource}/{id}",
-            Method::PUT,
-            Box::new(ResourcePutHandler {}),
-        )
-        .route(
-            "/apisix/admin/{resource}/{id}",
-            Method::GET,
-            Box::new(ResourceGetHandler {}),
-        )
-        .route(
-            "/apisix/admin/{resource}/{id}",
-            Method::DELETE,
-            Box::new(ResourceDeleteHandler {}),
-        );
+        // 注册路由变得更简洁，类型安全
+        this.register_resource_routes::<config::Route>()
+            .register_resource_routes::<config::Upstream>()
+            .register_resource_routes::<config::Service>()
+            .register_resource_routes::<config::GlobalRule>()
+            .register_resource_routes::<config::SSL>();
 
         this
+    }
+
+    fn register_resource_routes<T: AdminResource>(&mut self) -> &mut Self {
+        let path = "/apisix/admin/{resource}/{id}";
+
+        self.route(path, Method::PUT, Box::new(ResourceHandler::<T>::new()))
+            .route(path, Method::GET, Box::new(GetHandler::<T>::new()))
+            .route(path, Method::DELETE, Box::new(DeleteHandler::<T>::new()));
+
+        self
     }
 
     fn route(&mut self, path: &str, method: Method, handler: HttpHandler) -> &mut Self {
@@ -217,108 +427,6 @@ impl ServeHttp for AdminHttpApp {
     }
 }
 
-struct ResourcePutHandler;
-
-#[async_trait]
-impl Handler for ResourcePutHandler {
-    async fn handle(
-        &self,
-        etcd: &EtcdClientWrapper,
-        http_session: &mut ServerSession,
-        params: RequestParams,
-    ) -> ApiResult<Response<Vec<u8>>> {
-        validate_content_type(http_session)?;
-
-        let body_data = read_request_body(http_session)
-            .await
-            .map_err(|e| ApiError::RequestBodyReadError(e.to_string()))?;
-        let resource_type = params
-            .get("resource")
-            .ok_or_else(|| ApiError::MissingParameter("resource".into()))?;
-        let key = format!(
-            "{}/{}",
-            resource_type,
-            params
-                .get("id")
-                .ok_or_else(|| ApiError::MissingParameter("id".into()))?
-        );
-
-        validate_resource(resource_type, &body_data)?;
-        etcd.put(&key, body_data)
-            .await
-            .map_err(|e| ApiError::EtcdPutError(e.to_string()))?;
-        Ok(ResponseHelper::success(Vec::new(), None))
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-struct ValueWrapper<T> {
-    value: T,
-}
-
-struct ResourceGetHandler;
-
-#[async_trait]
-impl Handler for ResourceGetHandler {
-    async fn handle(
-        &self,
-        etcd: &EtcdClientWrapper,
-        _http_session: &mut ServerSession,
-        params: RequestParams,
-    ) -> ApiResult<Response<Vec<u8>>> {
-        let resource_type = params
-            .get("resource")
-            .ok_or_else(|| ApiError::MissingParameter("resource".into()))?;
-        let key = format!(
-            "{}/{}",
-            resource_type,
-            params
-                .get("id")
-                .ok_or_else(|| ApiError::MissingParameter("id".into()))?
-        );
-
-        match etcd.get(&key).await {
-            Err(e) => Err(ApiError::EtcdGetError(e.to_string())),
-            Ok(Some(value)) => {
-                let json_value: serde_json::Value = serde_json::from_slice(&value)
-                    .map_err(|e| ApiError::InvalidRequest(format!("Invalid JSON data: {e}")))?;
-                let wrapper = ValueWrapper { value: json_value };
-                let json_vec = serde_json::to_vec(&wrapper)
-                    .map_err(|e| ApiError::InternalError(e.to_string()))?;
-                Ok(ResponseHelper::success(json_vec, Some("application/json")))
-            }
-            Ok(None) => Err(ApiError::InvalidRequest("Resource not found".into())),
-        }
-    }
-}
-
-struct ResourceDeleteHandler;
-
-#[async_trait]
-impl Handler for ResourceDeleteHandler {
-    async fn handle(
-        &self,
-        etcd: &EtcdClientWrapper,
-        _http_session: &mut ServerSession,
-        params: RequestParams,
-    ) -> ApiResult<Response<Vec<u8>>> {
-        let key = format!(
-            "{}/{}",
-            params
-                .get("resource")
-                .ok_or_else(|| ApiError::MissingParameter("resource".into()))?,
-            params
-                .get("id")
-                .ok_or_else(|| ApiError::MissingParameter("id".into()))?
-        );
-
-        etcd.delete(&key)
-            .await
-            .map_err(|e| ApiError::EtcdDeleteError(e.to_string()))?;
-        Ok(ResponseHelper::success(Vec::new(), None))
-    }
-}
-
 fn validate_api_key(http_session: &ServerSession, api_key: &str) -> ApiResult<()> {
     match http_session.get_header("x-api-key") {
         Some(key) if key.as_bytes() == api_key.as_bytes() => Ok(()),
@@ -347,89 +455,4 @@ async fn read_request_body(http_session: &mut ServerSession) -> Result<Vec<u8>, 
         body_data.extend_from_slice(&bytes);
     }
     Ok(body_data)
-}
-
-fn validate_resource(resource_type: &str, body_data: &[u8]) -> ApiResult<()> {
-    match resource_type {
-        "routes" => {
-            let route = validate_with_plugins::<config::Route>(body_data)?;
-            route
-                .validate()
-                .map_err(|e| ApiError::ValidationError(format!("Route validation failed: {e}")))
-        }
-        "upstreams" => {
-            let upstream = json_to_resource::<config::Upstream>(body_data).map_err(|e| {
-                ApiError::InvalidRequest(format!("Invalid upstream JSON data: {e}"))
-            })?;
-            upstream
-                .validate()
-                .map_err(|e| ApiError::ValidationError(format!("Upstream validation failed: {e}")))
-        }
-        "services" => {
-            let service = validate_with_plugins::<config::Service>(body_data)?;
-            service
-                .validate()
-                .map_err(|e| ApiError::ValidationError(format!("Service validation failed: {e}")))
-        }
-        "global_rules" => {
-            let rule = validate_with_plugins::<config::GlobalRule>(body_data)?;
-            rule.validate().map_err(|e| {
-                ApiError::ValidationError(format!("GlobalRule validation failed: {e}"))
-            })
-        }
-        "ssls" => {
-            let ssl = json_to_resource::<config::SSL>(body_data)
-                .map_err(|e| ApiError::InvalidRequest(format!("Invalid SSL JSON data: {e}")))?;
-            ssl.validate()
-                .map_err(|e| ApiError::ValidationError(format!("SSL validation failed: {e}")))
-        }
-        _ => Err(ApiError::InvalidRequest(format!(
-            "Unsupported resource type: {resource_type}"
-        ))),
-    }
-}
-
-fn validate_with_plugins<T: PluginValidatable + DeserializeOwned>(
-    body_data: &[u8],
-) -> ApiResult<T> {
-    let resource = json_to_resource::<T>(body_data)
-        .map_err(|e| ApiError::InvalidRequest(format!("Invalid JSON data for resource: {e}")))?;
-    resource
-        .validate_plugins()
-        .map_err(|e| ApiError::ValidationError(format!("Plugin validation failed: {e}")))?;
-    Ok(resource)
-}
-
-trait PluginValidatable {
-    fn validate_plugins(&self) -> Result<(), Box<dyn Error>>;
-}
-
-impl PluginValidatable for config::Route {
-    fn validate_plugins(&self) -> Result<(), Box<dyn Error>> {
-        for (name, value) in &self.plugins {
-            build_plugin(name, value.clone())
-                .map_err(|e| format!("Failed to build plugin '{name}': {e}"))?;
-        }
-        Ok(())
-    }
-}
-
-impl PluginValidatable for config::Service {
-    fn validate_plugins(&self) -> Result<(), Box<dyn Error>> {
-        for (name, value) in &self.plugins {
-            build_plugin(name, value.clone())
-                .map_err(|e| format!("Failed to build plugin '{name}': {e}"))?;
-        }
-        Ok(())
-    }
-}
-
-impl PluginValidatable for config::GlobalRule {
-    fn validate_plugins(&self) -> Result<(), Box<dyn Error>> {
-        for (name, value) in &self.plugins {
-            build_plugin(name, value.clone())
-                .map_err(|e| format!("Failed to build plugin '{name}': {e}"))?;
-        }
-        Ok(())
-    }
 }
