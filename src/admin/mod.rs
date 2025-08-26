@@ -201,22 +201,11 @@ impl<T: AdminResource> ResourceHandler<T> {
     }
 
     fn extract_key(params: &RequestParams) -> ApiResult<String> {
-        let resource_type = params
-            .get("resource")
-            .ok_or_else(|| ApiError::MissingParameter("resource".into()))?;
         let id = params
             .get("id")
             .ok_or_else(|| ApiError::MissingParameter("id".into()))?;
 
-        // 验证资源类型匹配
-        if resource_type != T::RESOURCE_TYPE {
-            return Err(ApiError::InvalidRequest(format!(
-                "Resource type mismatch: expected {}, got {resource_type}",
-                T::RESOURCE_TYPE
-            )));
-        }
-
-        Ok(format!("{resource_type}/{id}"))
+        Ok(format!("{}/{}", T::RESOURCE_TYPE, id))
     }
 }
 
@@ -359,11 +348,11 @@ impl AdminHttpApp {
     }
 
     fn register_resource_routes<T: AdminResource>(&mut self) -> &mut Self {
-        let path = "/apisix/admin/{resource}/{id}";
+        let path = format!("/apisix/admin/{}/{{id}}", T::RESOURCE_TYPE);
 
-        self.route(path, Method::PUT, Box::new(ResourceHandler::<T>::new()))
-            .route(path, Method::GET, Box::new(GetHandler::<T>::new()))
-            .route(path, Method::DELETE, Box::new(DeleteHandler::<T>::new()));
+        self.route(&path, Method::PUT, Box::new(ResourceHandler::<T>::new()))
+            .route(&path, Method::GET, Box::new(GetHandler::<T>::new()))
+            .route(&path, Method::DELETE, Box::new(DeleteHandler::<T>::new()));
 
         self
     }
