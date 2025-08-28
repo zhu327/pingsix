@@ -43,8 +43,6 @@ pub struct ProxyContext {
     pub route_params: Option<BTreeMap<String, String>>,
     /// Number of retry attempts so far.
     pub tries: usize,
-    /// Timestamp when the request started.
-    pub request_start: Instant,
     /// Executor for route-specific plugins.
     pub plugin: Arc<ProxyPluginExecutor>,
     /// Executor for global plugins.
@@ -55,14 +53,17 @@ pub struct ProxyContext {
 
 impl Default for ProxyContext {
     fn default() -> Self {
+        // Initialize vars and insert request_start timestamp
+        let mut vars: HashMap<String, Box<dyn Any + Send + Sync>> = HashMap::new();
+        vars.insert("request_start".to_string(), Box::new(Instant::now()));
+
         Self {
             route: None,
             route_params: None,
             tries: 0,
-            request_start: Instant::now(),
             plugin: DEFAULT_PLUGIN_EXECUTOR.clone(),
             global_plugin: DEFAULT_PLUGIN_EXECUTOR.clone(),
-            vars: HashMap::new(),
+            vars,
         }
     }
 }

@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
@@ -148,9 +149,13 @@ impl ProxyPlugin for PluginPrometheus {
             .inc();
 
         // Record request latency
+        let elapsed_ms = ctx
+            .get::<Instant>("request_start")
+            .map(|t| t.elapsed().as_millis() as f64)
+            .unwrap_or(0.0);
         LATENCY
             .with_label_values(&["request", route_id, service, node])
-            .observe(ctx.request_start.elapsed().as_millis() as f64);
+            .observe(elapsed_ms);
 
         // Record bandwidth metrics
         BANDWIDTH

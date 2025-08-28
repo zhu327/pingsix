@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -185,7 +185,11 @@ impl ProxyHttp for HttpService {
                 if let Some(retries) = upstream.get_retries() {
                     if retries > 0 && ctx.tries < retries {
                         if let Some(timeout) = upstream.get_retry_timeout() {
-                            if ctx.request_start.elapsed().as_millis() <= (timeout * 1000) as _ {
+                            let elapsed_ms = ctx
+                                .get::<Instant>("request_start")
+                                .map(|t| t.elapsed().as_millis())
+                                .unwrap_or(u128::MAX);
+                            if elapsed_ms <= (timeout * 1000) as u128 {
                                 ctx.tries += 1;
                                 e.set_retry(true);
                             }

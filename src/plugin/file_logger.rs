@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use log::info;
@@ -180,7 +181,10 @@ impl LogFormat {
                 // Store in context to avoid recalculation
                 let key = "_log_request_time";
                 if !ctx.contains(key) {
-                    let time_str = ctx.request_start.elapsed().as_millis().to_string();
+                    let time_str = ctx
+                        .get::<Instant>("request_start")
+                        .map(|t| t.elapsed().as_millis().to_string())
+                        .unwrap_or_default();
                     ctx.set(key, time_str);
                 }
                 ctx.get_str(key).unwrap_or("")
