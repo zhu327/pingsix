@@ -203,10 +203,8 @@ impl ProxyPlugin for PluginJWTAuth {
         };
 
         if self.config.store_in_ctx {
-            let payload_value = serde_json::to_value(&token_data.claims.extra)
-                .or_err_with(ReadError, || "Invalid jwt auth payload")?;
-            ctx.vars
-                .insert("jwt-auth-payload".to_string(), payload_value.to_string());
+            // Store structured payload directly for downstream plugins to use without re-parsing
+            ctx.set("jwt-auth-payload", token_data.claims.extra.clone());
         }
 
         Ok(false)

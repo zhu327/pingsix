@@ -139,8 +139,8 @@ impl ProxyPlugin for PluginPrometheus {
             |r| r.inner.service_id.as_deref().unwrap_or("unknown"),
         );
 
-        // Extract node from context variables (assumes HttpService::upstream_peer sets ctx.vars["upstream"])
-        let node = ctx.vars.get("upstream").map_or("", |s| s.as_str());
+        // Extract node from context variables (assumes HttpService::upstream_peer sets ctx["upstream"]) as String
+        let node = ctx.get_str("upstream").unwrap_or("");
 
         // Update Prometheus metrics with normalized path template
         STATUS

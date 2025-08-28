@@ -95,8 +95,7 @@ impl ProxyHttp for HttpService {
     ) -> Result<Box<HttpPeer>> {
         let peer = ctx.route.as_ref().unwrap().select_http_peer(session);
         if let Ok(ref peer) = peer {
-            ctx.vars
-                .insert("upstream".to_string(), peer._address.to_string());
+            ctx.set("upstream", peer._address.to_string());
         }
         peer
     }

@@ -13,6 +13,7 @@ pub mod ssl;
 pub mod upstream;
 
 use std::{
+    any::Any,
     collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
     time::Instant,
@@ -48,8 +49,8 @@ pub struct ProxyContext {
     pub plugin: Arc<ProxyPluginExecutor>,
     /// Executor for global plugins.
     pub global_plugin: Arc<ProxyPluginExecutor>,
-    /// Custom variables available to plugins.
-    pub vars: HashMap<String, String>,
+    /// Custom variables available to plugins (type-erased, thread-safe).
+    pub vars: HashMap<String, Box<dyn Any + Send + Sync>>,
 }
 
 impl Default for ProxyContext {
@@ -63,6 +64,28 @@ impl Default for ProxyContext {
             global_plugin: DEFAULT_PLUGIN_EXECUTOR.clone(),
             vars: HashMap::new(),
         }
+    }
+}
+
+impl ProxyContext {
+    /// Store a typed value into the context.
+    pub fn set<T: Any + Send + Sync>(&mut self, key: impl Into<String>, value: T) {
+        self.vars.insert(key.into(), Box::new(value));
+    }
+
+    /// Get a typed reference from the context.
+    pub fn get<T: Any>(&self, key: &str) -> Option<&T> {
+        self.vars.get(key).and_then(|v| v.downcast_ref::<T>())
+    }
+
+    /// Get a string slice if the stored value is a `String`.
+    pub fn get_str(&self, key: &str) -> Option<&str> {
+        self.get::<String>(key).map(|s| s.as_str())
+    }
+
+    /// Check if a key exists in the context.
+    pub fn contains(&self, key: &str) -> bool {
+        self.vars.contains_key(key)
     }
 }
 

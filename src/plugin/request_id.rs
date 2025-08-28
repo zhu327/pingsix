@@ -145,7 +145,7 @@ impl ProxyPlugin for PluginRequestID {
                 }
             };
 
-        ctx.vars.insert(REQUEST_ID_KEY.to_string(), value);
+        ctx.set(REQUEST_ID_KEY, value);
 
         Ok(false)
     }
@@ -157,7 +157,7 @@ impl ProxyPlugin for PluginRequestID {
         ctx: &mut ProxyContext,
     ) -> Result<()> {
         if self.config.include_in_response {
-            let value = ctx.vars.get(REQUEST_ID_KEY).unwrap(); // Safe: inserted in request_filter
+            let value = ctx.get_str(REQUEST_ID_KEY).unwrap(); // Safe: inserted in request_filter
 
             upstream_response
                 .insert_header(self.config.header_name.clone(), value)

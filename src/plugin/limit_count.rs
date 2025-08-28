@@ -148,16 +148,9 @@ impl ProxyPlugin for PluginRateLimit {
 
         // Store rate limit info in context for potential use by other plugins
         if self.config.show_limit_quota_header {
-            ctx.vars.insert(
-                "rate_limit_limit".to_string(),
-                self.config.count.to_string(),
-            );
-            ctx.vars
-                .insert("rate_limit_remaining".to_string(), remaining.to_string());
-            ctx.vars.insert(
-                "rate_limit_reset".to_string(),
-                self.config.time_window.to_string(),
-            );
+            ctx.set("rate_limit_limit", self.config.count.to_string());
+            ctx.set("rate_limit_remaining", remaining.to_string());
+            ctx.set("rate_limit_reset", self.config.time_window.to_string());
         }
 
         Ok(false)
