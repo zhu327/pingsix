@@ -105,8 +105,16 @@ pub fn reload_global_ssl_match() {
     let mut matcher = MatchEntry::default();
 
     for ssl in SSL_MAP.iter() {
-        debug!("Inserting route: {}", ssl.value().inner.id);
-        matcher.insert_ssl(ssl.value().clone()).unwrap();
+        debug!("Inserting SSL config: {}", ssl.value().inner.id);
+        // Handle insertion errors gracefully instead of using unwrap()
+        if let Err(e) = matcher.insert_ssl(ssl.value().clone()) {
+            error!(
+                "Failed to insert SSL config '{}' into matcher, SNIs might be invalid: {}",
+                ssl.value().inner.id,
+                e
+            );
+            // Continue with other SSL configs to avoid partial failures stopping the process
+        }
     }
 
     GLOBAL_SSL_MATCH.store(Arc::new(matcher));

@@ -6,7 +6,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use http::{header, HeaderValue, Method, Response, StatusCode};
+use http::{header, Method, Response, StatusCode};
 use matchit::{Match, Router};
 use pingora::{
     apps::http_app::ServeHttp, protocols::http::ServerSession, services::listening::Service,
@@ -21,6 +21,7 @@ use crate::{
         Admin, Identifiable, Pingsix,
     },
     plugin::{build_plugin, constant_time_eq},
+    utils::response::{CommonErrors, ResponseBuilder},
 };
 
 #[derive(Debug)]
@@ -31,7 +32,6 @@ enum ApiError {
     ValidationError(String),
     MissingParameter(String),
     InvalidRequest(String),
-    InternalError(String),
     RequestBodyReadError(String),
 }
 
@@ -44,7 +44,6 @@ impl fmt::Display for ApiError {
             ApiError::ValidationError(msg) => write!(f, "Validation error: {msg}"),
             ApiError::MissingParameter(msg) => write!(f, "Missing parameter: {msg}"),
             ApiError::InvalidRequest(msg) => write!(f, "Invalid request: {msg}"),
-            ApiError::InternalError(msg) => write!(f, "Internal error: {msg}"),
             ApiError::RequestBodyReadError(msg) => write!(f, "Request body read error: {msg}"),
         }
     }
@@ -58,15 +57,12 @@ impl ApiError {
             ApiError::EtcdGetError(_)
             | ApiError::EtcdPutError(_)
             | ApiError::EtcdDeleteError(_)
-            | ApiError::InternalError(_)
             | ApiError::RequestBodyReadError(_) => {
-                ResponseHelper::error(StatusCode::INTERNAL_SERVER_ERROR, &self.to_string())
+                CommonErrors::internal_server_error(&self.to_string())
             }
             ApiError::ValidationError(_)
             | ApiError::MissingParameter(_)
-            | ApiError::InvalidRequest(_) => {
-                ResponseHelper::error(StatusCode::BAD_REQUEST, &self.to_string())
-            }
+            | ApiError::InvalidRequest(_) => CommonErrors::bad_request(&self.to_string()),
         }
     }
 }
@@ -76,47 +72,6 @@ type RequestParams = BTreeMap<String, String>;
 
 // Maximum request body size for admin API (1 MB)
 const MAX_BODY_SIZE: usize = 1_048_576;
-
-// Unified response handler
-struct ResponseHelper;
-
-impl ResponseHelper {
-    pub fn success(body: Vec<u8>, content_type: Option<&str>) -> Response<Vec<u8>> {
-        let mut builder = Response::builder().status(StatusCode::OK);
-
-        if let Some(ct) = content_type {
-            match HeaderValue::from_str(ct) {
-                Ok(header_value) => {
-                    builder = builder.header(header::CONTENT_TYPE, header_value);
-                }
-                Err(e) => {
-                    log::error!("Invalid content type '{ct}': {e}");
-                }
-            }
-        }
-
-        builder.body(body).unwrap_or_else(|e| {
-            log::error!("Failed to build success response: {e}");
-            Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(b"Internal Server Error".to_vec())
-                .unwrap()
-        })
-    }
-
-    pub fn error(status: StatusCode, message: &str) -> Response<Vec<u8>> {
-        Response::builder()
-            .status(status)
-            .body(message.as_bytes().to_vec())
-            .unwrap_or_else(|e| {
-                log::error!("Failed to build error response: {e}");
-                Response::builder()
-                    .status(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(b"Internal Server Error".to_vec())
-                    .unwrap()
-            })
-    }
-}
 
 // 新的资源处理trait，简化资源验证逻辑
 trait AdminResource: DeserializeOwned + Validate + Identifiable + Send + Sync + 'static {
@@ -246,7 +201,7 @@ impl<T: AdminResource> Handler for ResourceHandler<T> {
             .await
             .map_err(|e| ApiError::EtcdPutError(e.to_string()))?;
 
-        Ok(ResponseHelper::success(Vec::new(), None))
+        Ok(ResponseBuilder::success_http(Vec::new(), None))
     }
 }
 
@@ -279,9 +234,7 @@ impl<T: AdminResource> Handler for GetHandler<T> {
                 let json_value: serde_json::Value = serde_json::from_slice(&value)
                     .map_err(|e| ApiError::InvalidRequest(format!("Invalid JSON data: {e}")))?;
                 let wrapper = ValueWrapper { value: json_value };
-                let json_vec = serde_json::to_vec(&wrapper)
-                    .map_err(|e| ApiError::InternalError(e.to_string()))?;
-                Ok(ResponseHelper::success(json_vec, Some("application/json")))
+                Ok(ResponseBuilder::success_json(&wrapper))
             }
             Ok(None) => Err(ApiError::InvalidRequest("Resource not found".into())),
         }
@@ -315,7 +268,7 @@ impl<T: AdminResource> Handler for DeleteHandler<T> {
             .await
             .map_err(|e| ApiError::EtcdDeleteError(e.to_string()))?;
 
-        Ok(ResponseHelper::success(Vec::new(), None))
+        Ok(ResponseBuilder::success_http(Vec::new(), None))
     }
 }
 
@@ -392,7 +345,7 @@ impl ServeHttp for AdminHttpApp {
         http_session.set_keepalive(None);
 
         if validate_api_key(http_session, &self.config.api_key).is_err() {
-            return ResponseHelper::error(StatusCode::FORBIDDEN, "Invalid API key");
+            return CommonErrors::forbidden("Invalid API key");
         }
 
         let (path, method) = {
@@ -412,9 +365,12 @@ impl ServeHttp for AdminHttpApp {
                         Err(e) => e.into_response(),
                     }
                 }
-                None => ResponseHelper::error(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed"),
+                None => ResponseBuilder::error_http(
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    "Method not allowed",
+                ),
             },
-            Err(_) => ResponseHelper::error(StatusCode::NOT_FOUND, "Not Found"),
+            Err(_) => ResponseBuilder::error_http(StatusCode::NOT_FOUND, "Not Found"),
         }
     }
 }

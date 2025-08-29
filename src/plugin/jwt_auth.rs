@@ -11,7 +11,8 @@ use serde_json::Value as JsonValue;
 
 use crate::{proxy::ProxyContext, utils::request};
 
-use super::{send_error_response, ProxyPlugin};
+use super::ProxyPlugin;
+use crate::utils::response::ResponseBuilder;
 
 pub const PLUGIN_NAME: &str = "jwt-auth";
 const PRIORITY: i32 = 2510;
@@ -165,7 +166,7 @@ impl ProxyPlugin for PluginJWTAuth {
         let token = match token {
             Some(t) => t,
             None => {
-                send_error_response(
+                ResponseBuilder::send_proxy_error(
                     session,
                     StatusCode::UNAUTHORIZED,
                     Some("Token not found"),
@@ -193,7 +194,7 @@ impl ProxyPlugin for PluginJWTAuth {
                     jsonwebtoken::errors::ErrorKind::ImmatureSignature => "Token not yet valid",
                     _ => "Invalid token",
                 };
-                send_error_response(
+                ResponseBuilder::send_proxy_error(
                     session,
                     StatusCode::UNAUTHORIZED,
                     Some(error_msg),

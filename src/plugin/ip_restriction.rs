@@ -11,7 +11,8 @@ use serde_json::Value as JsonValue;
 use crate::proxy::ProxyContext;
 use crate::utils::request::{get_client_ip, get_req_header_value};
 
-use super::{send_error_response, ProxyPlugin};
+use super::ProxyPlugin;
+use crate::utils::response::ResponseBuilder;
 
 pub const PLUGIN_NAME: &str = "ip-restriction";
 const PRIORITY: i32 = 3000;
@@ -232,7 +233,7 @@ impl PluginIPRestriction {
 
     /// Rejects the request with a `403 Forbidden` response.
     async fn reject_request(&self, session: &mut Session) -> Result<bool> {
-        send_error_response(
+        ResponseBuilder::send_proxy_error(
             session,
             StatusCode::FORBIDDEN,
             self.config.message.as_deref(),

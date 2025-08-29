@@ -10,7 +10,8 @@ use validator::Validate;
 
 use crate::{proxy::ProxyContext, utils::request};
 
-use super::{constant_time_eq, send_error_response, ProxyPlugin};
+use super::{constant_time_eq, ProxyPlugin};
+use crate::utils::response::ResponseBuilder;
 
 pub const PLUGIN_NAME: &str = "key-auth";
 const PRIORITY: i32 = 2500;
@@ -124,7 +125,7 @@ impl ProxyPlugin for PluginKeyAuth {
 
         // Validate key using constant-time comparison
         if value.is_empty() || !self.is_valid_key(value) {
-            send_error_response(
+            ResponseBuilder::send_proxy_error(
                 session,
                 StatusCode::UNAUTHORIZED,
                 Some("Invalid user authorization"),

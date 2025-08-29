@@ -11,7 +11,8 @@ use validator::{Validate, ValidationError};
 
 use crate::{config::UpstreamHashOn, proxy::ProxyContext, utils::request::request_selector_key};
 
-use super::{send_error_response, ProxyPlugin};
+use super::ProxyPlugin;
+use crate::utils::response::ResponseBuilder;
 
 pub const PLUGIN_NAME: &str = "limit-count";
 const PRIORITY: i32 = 1002;
@@ -167,7 +168,7 @@ impl PluginRateLimit {
         match self.config.key_missing_policy {
             KeyMissingPolicy::Allow => Ok(false),
             KeyMissingPolicy::Deny => {
-                send_error_response(
+                ResponseBuilder::send_proxy_error(
                     session,
                     StatusCode::BAD_REQUEST,
                     Some("Missing required key for rate limiting"),
@@ -223,7 +224,7 @@ impl PluginRateLimit {
 
         session.set_keepalive(None);
 
-        send_error_response(
+        ResponseBuilder::send_proxy_error(
             session,
             StatusCode::from_u16(self.config.rejected_code)
                 .unwrap_or(StatusCode::SERVICE_UNAVAILABLE),
