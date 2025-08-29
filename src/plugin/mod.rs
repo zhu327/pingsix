@@ -1,4 +1,5 @@
 pub mod brotli;
+pub mod cache;
 pub mod cors;
 pub mod echo;
 pub mod file_logger;
@@ -98,40 +99,32 @@ static PLUGIN_BUILDER_REGISTRY: Lazy<HashMap<&'static str, PluginCreateFn>> = La
         ), // 399
         (echo::PLUGIN_NAME, echo::create_echo_plugin), // 412
         (
-            prometheus::PLUGIN_NAME, // 500
+            prometheus::PLUGIN_NAME,
             prometheus::create_prometheus_plugin,
-        ),
+        ), // 500
         (
-            limit_count::PLUGIN_NAME, // 503
+            limit_count::PLUGIN_NAME,
             limit_count::create_limit_count_plugin,
-        ),
-        (
-            grpc_web::PLUGIN_NAME, // 505
-            grpc_web::create_grpc_web_plugin,
-        ),
+        ), // 503
+        (grpc_web::PLUGIN_NAME, grpc_web::create_grpc_web_plugin), // 505
         (redirect::PLUGIN_NAME, redirect::create_redirect_plugin), // 900
-        (gzip::PLUGIN_NAME, gzip::create_gzip_plugin),             // 995
-        (brotli::PLUGIN_NAME, brotli::create_brotli_plugin),       // 996
+        (gzip::PLUGIN_NAME, gzip::create_gzip_plugin), // 995
+        (brotli::PLUGIN_NAME, brotli::create_brotli_plugin), // 996
         (
-            proxy_rewrite::PLUGIN_NAME, // 1008
+            proxy_rewrite::PLUGIN_NAME,
             proxy_rewrite::create_proxy_rewrite_plugin,
-        ),
+        ), // 1008
+        (cache::PLUGIN_NAME, cache::create_cache_plugin), // 1085
         (
             request_id::PLUGIN_NAME,
             request_id::create_request_id_plugin,
         ), // 12015
+        (key_auth::PLUGIN_NAME, key_auth::create_key_auth_plugin), // 2500
+        (jwt_auth::PLUGIN_NAME, jwt_auth::create_jwt_auth_plugin), // 2510
         (
-            key_auth::PLUGIN_NAME, // 2500
-            key_auth::create_key_auth_plugin,
-        ),
-        (
-            jwt_auth::PLUGIN_NAME, // 2510
-            jwt_auth::create_jwt_auth_plugin,
-        ),
-        (
-            ip_restriction::PLUGIN_NAME, // 3000
+            ip_restriction::PLUGIN_NAME,
             ip_restriction::create_ip_restriction_plugin,
-        ),
+        ), // 3000
         (cors::PLUGIN_NAME, cors::create_cors_plugin), // 4000
     ];
     arr.into_iter().collect()

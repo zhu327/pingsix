@@ -20,6 +20,7 @@ log = { version = "0.4.22", features = ["kv"] }
 matchit = "0.8.4"
 once_cell = "1.20.2"
 pingora = { version = "0.6.0", features = ["openssl", "sentry"] }
+pingora-cache = "0.6.0"
 pingora-core = "0.6.0"
 pingora-error = "0.6.0"
 pingora-http = "0.6.0"
