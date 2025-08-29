@@ -7,7 +7,7 @@ use pingora_http::ResponseHeader;
 use pingora_proxy::Session;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use serde_yaml::Value as YamlValue;
+use serde_json::Value as JsonValue;
 use validator::{Validate, ValidationError};
 
 use crate::{proxy::ProxyContext, utils::request};
@@ -18,13 +18,13 @@ pub const PLUGIN_NAME: &str = "cors";
 const PRIORITY: i32 = 4000;
 
 /// Creates an CORS plugin instance with the given configuration.
-pub fn create_cors_plugin(cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> {
-    let config: PluginConfig =
-        serde_yaml::from_value(cfg).or_err_with(ReadError, || "Invalid cors plugin config")?;
+pub fn create_cors_plugin(cfg: JsonValue) -> Result<Arc<dyn ProxyPlugin>> {
+    let config: PluginConfig = serde_json::from_value(cfg)
+        .or_err_with(ReadError, || "Failed to parse CORS plugin config")?;
 
     config
         .validate()
-        .or_err_with(ReadError, || "Invalid cors plugin config")?;
+        .or_err_with(ReadError, || "CORS plugin config validation failed")?;
 
     // Pre-compile regex patterns and create optimized config
     let compiled_config = config.compile_and_optimize()?;
@@ -126,7 +126,7 @@ impl PluginConfig {
                 .map(|re| {
                     Regex::new(re)
                         .map(Arc::new)
-                        .or_err_with(ReadError, || format!("Invalid regex: {re}"))
+                        .or_err_with(ReadError, || format!("Invalid regex pattern: {}", re))
                 })
                 .collect::<Result<Vec<_>>>()?;
             Some(compiled)

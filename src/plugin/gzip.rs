@@ -7,7 +7,7 @@ use pingora::{
 use pingora_error::{ErrorType::ReadError, OrErr, Result};
 use pingora_proxy::Session;
 use serde::{Deserialize, Serialize};
-use serde_yaml::Value as YamlValue;
+use serde_json::Value as JsonValue;
 use validator::Validate;
 
 use crate::proxy::ProxyContext;
@@ -18,9 +18,9 @@ pub const PLUGIN_NAME: &str = "gzip";
 const PRIORITY: i32 = 995;
 
 /// Creates a Gzip plugin instance with the given configuration.
-pub fn create_gzip_plugin(cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> {
+pub fn create_gzip_plugin(cfg: JsonValue) -> Result<Arc<dyn ProxyPlugin>> {
     let config: PluginConfig =
-        serde_yaml::from_value(cfg).or_err_with(ReadError, || "Invalid gzip plugin config")?;
+        serde_json::from_value(cfg).or_err_with(ReadError, || "Invalid gzip plugin config")?;
     config
         .validate()
         .or_err_with(ReadError, || "Gzip plugin config validation failed")?;

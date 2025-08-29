@@ -7,7 +7,7 @@ use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use pingora_error::{ErrorType::ReadError, OrErr, Result};
 use pingora_proxy::Session;
 use serde::{Deserialize, Serialize};
-use serde_yaml::Value as YamlValue;
+use serde_json::Value as JsonValue;
 
 use crate::{proxy::ProxyContext, utils::request};
 
@@ -22,12 +22,12 @@ const DEFAULT_COOKIE: &str = "jwt";
 /// Creates a JWT Auth plugin instance with the given configuration.
 /// This plugin validates JWTs from HTTP headers, query parameters, or cookies, and optionally
 /// stores the JWT payload in the request context or hides credentials after validation.
-pub fn create_jwt_auth_plugin(cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> {
-    let config: PluginConfig =
-        serde_yaml::from_value(cfg).or_err_with(ReadError, || "Invalid jwt auth plugin config")?;
+pub fn create_jwt_auth_plugin(cfg: JsonValue) -> Result<Arc<dyn ProxyPlugin>> {
+    let config: PluginConfig = serde_json::from_value(cfg)
+        .or_err_with(ReadError, || "Failed to parse JWT auth plugin config")?;
     let decoding_key = config
         .get_decoding_key()
-        .or_err_with(ReadError, || "Invalid decoding key")?;
+        .or_err_with(ReadError, || "Failed to create JWT decoding key")?;
 
     // Pre-create validation object for better performance
     let mut validation = Validation::new(config.algorithm);
@@ -102,24 +102,31 @@ impl PluginConfig {
         Algorithm::HS256
     }
 
-    fn get_decoding_key(&self) -> Result<DecodingKey, &'static str> {
+    fn get_decoding_key(&self) -> Result<DecodingKey, String> {
         match self.algorithm {
             Algorithm::HS256 | Algorithm::HS512 => {
-                let secret = self.secret.as_ref().ok_or("missing secret")?;
+                let secret = self
+                    .secret
+                    .as_ref()
+                    .ok_or("Secret is required for HMAC algorithms (HS256, HS512)")?;
                 let key: Vec<u8> = if self.base64_secret {
                     general_purpose::STANDARD
                         .decode(secret)
-                        .map_err(|_| "invalid base64")?
+                        .map_err(|e| format!("Failed to decode base64 secret: {}", e))?
                 } else {
                     secret.as_bytes().to_vec()
                 };
                 Ok(DecodingKey::from_secret(&key))
             }
             Algorithm::RS256 | Algorithm::ES256 => {
-                let public_key = self.public_key.as_ref().ok_or("missing public_key")?;
-                Ok(DecodingKey::from_rsa_pem(public_key.as_bytes()).map_err(|_| "bad pem")?)
+                let public_key = self
+                    .public_key
+                    .as_ref()
+                    .ok_or("Public key is required for RSA/ECDSA algorithms (RS256, ES256)")?;
+                DecodingKey::from_rsa_pem(public_key.as_bytes())
+                    .map_err(|e| format!("Failed to parse RSA/ECDSA public key: {}", e))
             }
-            _ => Err("unsupported algorithm"),
+            _ => Err(format!("Unsupported algorithm: {:?}", self.algorithm)),
         }
     }
 }

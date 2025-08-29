@@ -10,7 +10,7 @@ use prometheus::{
     HistogramVec, IntCounter, IntCounterVec,
 };
 use regex::Regex;
-use serde_yaml::Value as YamlValue;
+use serde_json::Value as JsonValue;
 
 use crate::{
     proxy::{route::ProxyRoute, ProxyContext},
@@ -23,6 +23,19 @@ const DEFAULT_BUCKETS: &[f64] = &[
     1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0, 30000.0,
     60000.0,
 ];
+
+// Compiled regex patterns for path normalization
+static NUMERIC_ID_REGEX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"/\d+").expect("Invalid regex pattern for numeric ID replacement"));
+
+static UUID_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+        .expect("Invalid regex pattern for UUID replacement")
+});
+
+static HASH_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"/[0-9a-fA-F]{32,}").expect("Invalid regex pattern for hash replacement")
+});
 
 // Total number of requests
 static REQUESTS: Lazy<IntCounter> = Lazy::new(|| {
@@ -96,7 +109,7 @@ static RESPONSE_SIZE: Lazy<HistogramVec> = Lazy::new(|| {
 pub const PLUGIN_NAME: &str = "prometheus";
 const PRIORITY: i32 = 500;
 
-pub fn create_prometheus_plugin(_cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> {
+pub fn create_prometheus_plugin(_cfg: JsonValue) -> Result<Arc<dyn ProxyPlugin>> {
     Ok(Arc::new(PluginPrometheus {}))
 }
 
@@ -204,20 +217,14 @@ impl PluginPrometheus {
 
     /// Apply basic path normalization to reduce metric cardinality
     fn normalize_path(&self, path: &str) -> String {
-        // Replace numeric IDs with placeholders
-        let path = Regex::new(r"/\d+").unwrap().replace_all(path, "/{id}");
+        // Replace numeric IDs with placeholders using pre-compiled regex
+        let path = NUMERIC_ID_REGEX.replace_all(path, "/{id}");
 
-        // Replace UUIDs with placeholders
-        let path = Regex::new(
-            r"/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
-        )
-        .unwrap()
-        .replace_all(&path, "/{uuid}");
+        // Replace UUIDs with placeholders using pre-compiled regex
+        let path = UUID_REGEX.replace_all(&path, "/{uuid}");
 
-        // Replace other common patterns
-        let path = Regex::new(r"/[0-9a-fA-F]{32,}")
-            .unwrap()
-            .replace_all(&path, "/{hash}");
+        // Replace other common patterns using pre-compiled regex
+        let path = HASH_REGEX.replace_all(&path, "/{hash}");
 
         // Limit path length to prevent extremely long paths
         if path.len() > 100 {

@@ -8,7 +8,7 @@ use pingora_error::{ErrorType::ReadError, OrErr};
 use pingora_proxy::Session;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use serde_yaml::Value as YamlValue;
+use serde_json::Value as JsonValue;
 
 use crate::{proxy::ProxyContext, utils::request};
 
@@ -18,8 +18,8 @@ pub const PLUGIN_NAME: &str = "file-logger";
 const PRIORITY: i32 = 399;
 
 /// Creates a file logger plugin instance with the given configuration.
-pub fn create_file_logger_plugin(cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> {
-    let config: PluginConfig = serde_yaml::from_value(cfg)
+pub fn create_file_logger_plugin(cfg: JsonValue) -> Result<Arc<dyn ProxyPlugin>> {
+    let config: PluginConfig = serde_json::from_value(cfg)
         .or_err_with(ReadError, || "Invalid file logger plugin config")?;
 
     let log_format = LogFormat::parse(&config.log_format)?;

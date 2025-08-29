@@ -6,7 +6,7 @@ use ipnetwork::IpNetwork;
 use pingora_error::{ErrorType::ReadError, OrErr, Result};
 use pingora_proxy::Session;
 use serde::{Deserialize, Serialize};
-use serde_yaml::Value as YamlValue;
+use serde_json::Value as JsonValue;
 
 use crate::proxy::ProxyContext;
 use crate::utils::request::{get_client_ip, get_req_header_value};
@@ -20,7 +20,7 @@ const PRIORITY: i32 = 3000;
 /// This plugin restricts access based on client IP addresses, allowing or denying requests
 /// based on configured whitelist and blacklist of IP networks (in CIDR notation, e.g., `192.168.1.0/24`).
 /// Supports proxy chain detection through X-Forwarded-For and X-Real-IP headers.
-pub fn create_ip_restriction_plugin(cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> {
+pub fn create_ip_restriction_plugin(cfg: JsonValue) -> Result<Arc<dyn ProxyPlugin>> {
     #[derive(Deserialize)]
     struct RawConfig {
         #[serde(default)]
@@ -40,16 +40,15 @@ pub fn create_ip_restriction_plugin(cfg: YamlValue) -> Result<Arc<dyn ProxyPlugi
         }
     }
 
-    let raw_config: RawConfig = serde_yaml::from_value(cfg).or_err_with(ReadError, || {
-        "Invalid IP restriction plugin config (structure)"
-    })?;
+    let raw_config: RawConfig = serde_json::from_value(cfg)
+        .or_err_with(ReadError, || "Failed to parse IP restriction plugin config")?;
 
     let whitelist = raw_config
         .whitelist
         .into_iter()
         .map(|s| {
             s.parse::<IpNetwork>()
-                .or_err_with(ReadError, || "Invalid whitelist IP network")
+                .or_err_with(ReadError, || format!("Invalid whitelist IP network: {}", s))
         })
         .collect::<Result<Vec<_>>>()?;
 
@@ -58,7 +57,7 @@ pub fn create_ip_restriction_plugin(cfg: YamlValue) -> Result<Arc<dyn ProxyPlugi
         .into_iter()
         .map(|s| {
             s.parse::<IpNetwork>()
-                .or_err_with(ReadError, || "Invalid blacklist IP network")
+                .or_err_with(ReadError, || format!("Invalid blacklist IP network: {}", s))
         })
         .collect::<Result<Vec<_>>>()?;
 
@@ -66,8 +65,9 @@ pub fn create_ip_restriction_plugin(cfg: YamlValue) -> Result<Arc<dyn ProxyPlugi
         .trusted_proxies
         .into_iter()
         .map(|s| {
-            s.parse::<IpNetwork>()
-                .or_err_with(ReadError, || "Invalid trusted proxy IP network")
+            s.parse::<IpNetwork>().or_err_with(ReadError, || {
+                format!("Invalid trusted proxy IP network: {}", s)
+            })
         })
         .collect::<Result<Vec<_>>>()?;
 

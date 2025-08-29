@@ -7,7 +7,7 @@ use pingora_http::ResponseHeader;
 use pingora_proxy::Session;
 use rand::prelude::*;
 use serde::{Deserialize, Serialize};
-use serde_yaml::Value as YamlValue;
+use serde_json::Value as JsonValue;
 use uuid::Uuid;
 use validator::{Validate, ValidationError};
 
@@ -26,9 +26,9 @@ const REQUEST_ID_KEY: &str = "request-id";
 const DEFAULT_CHAR_SET: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIGKLMNOPQRSTUVWXYZ0123456789";
 
 /// Creates a Request ID plugin instance with the given configuration.
-pub fn create_request_id_plugin(cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> {
+pub fn create_request_id_plugin(cfg: JsonValue) -> Result<Arc<dyn ProxyPlugin>> {
     let config: PluginConfig =
-        serde_yaml::from_value(cfg).or_err(ReadError, "Invalid request id plugin config")?;
+        serde_json::from_value(cfg).or_err(ReadError, "Invalid request id plugin config")?;
 
     config
         .validate()

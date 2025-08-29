@@ -33,7 +33,6 @@ rand = "0.9.2"
 regex = "1.11.1"
 sentry = "0.36"
 serde = { version = "1.0.197", features = ["derive"] }
-serde-transcode = "1.1.1"
 serde_json = "1.0.133"
 serde_with = "3.12.0"
 serde_yaml = "0.9.34"

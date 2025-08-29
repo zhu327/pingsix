@@ -5,7 +5,7 @@ use http::StatusCode;
 use pingora_error::{ErrorType::ReadError, OrErr, Result};
 use pingora_proxy::Session;
 use serde::{Deserialize, Serialize};
-use serde_yaml::Value as YamlValue;
+use serde_json::Value as JsonValue;
 use validator::Validate;
 
 use crate::{proxy::ProxyContext, utils::request};
@@ -20,13 +20,13 @@ const DEFAULT_QUERY: &str = "apikey";
 /// Creates a Key Auth plugin instance with the given configuration.
 /// This plugin authenticates requests by matching an API key in the HTTP header or query parameter
 /// against configured keys. If the key is invalid or missing, it returns a `401 Unauthorized` response.
-pub fn create_key_auth_plugin(cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> {
-    let config: PluginConfig =
-        serde_yaml::from_value(cfg).or_err_with(ReadError, || "Invalid key auth plugin config")?;
+pub fn create_key_auth_plugin(cfg: JsonValue) -> Result<Arc<dyn ProxyPlugin>> {
+    let config: PluginConfig = serde_json::from_value(cfg)
+        .or_err_with(ReadError, || "Failed to parse key auth plugin config")?;
 
     config
         .validate()
-        .or_err_with(ReadError, || "Invalid key auth plugin config")?;
+        .or_err_with(ReadError, || "Key auth plugin config validation failed")?;
 
     Ok(Arc::new(PluginKeyAuth { config }))
 }

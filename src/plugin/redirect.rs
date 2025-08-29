@@ -7,7 +7,7 @@ use pingora_http::ResponseHeader;
 use pingora_proxy::Session;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use serde_yaml::Value as YamlValue;
+use serde_json::Value as JsonValue;
 use validator::{Validate, ValidationError};
 
 use crate::{proxy::ProxyContext, utils::request::get_request_host};
@@ -17,9 +17,9 @@ use super::{apply_regex_uri_template, ProxyPlugin};
 pub const PLUGIN_NAME: &str = "redirect";
 const PRIORITY: i32 = 900;
 
-pub fn create_redirect_plugin(cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> {
+pub fn create_redirect_plugin(cfg: JsonValue) -> Result<Arc<dyn ProxyPlugin>> {
     let config: PluginConfig =
-        serde_yaml::from_value(cfg).or_err(ReadError, "Invalid redirect plugin config")?;
+        serde_json::from_value(cfg).or_err(ReadError, "Invalid redirect plugin config")?;
 
     config
         .validate()

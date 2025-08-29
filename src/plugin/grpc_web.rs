@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use pingora::modules::http::grpc_web::GrpcWebBridge;
 use pingora_error::Result;
 use pingora_proxy::Session;
-use serde_yaml::Value as YamlValue;
+use serde_json::Value as JsonValue;
 
 use crate::proxy::ProxyContext;
 
@@ -17,7 +17,7 @@ const PRIORITY: i32 = 505;
 /// This plugin enables support for the gRPC-Web protocol by initializing the `GrpcWebBridge` module
 /// for each request. The configuration is currently unused, but the `cfg` parameter is provided for
 /// future extensibility.
-pub fn create_grpc_web_plugin(_cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> {
+pub fn create_grpc_web_plugin(_cfg: JsonValue) -> Result<Arc<dyn ProxyPlugin>> {
     Ok(Arc::new(PluginGrpcWeb {}))
 }
 

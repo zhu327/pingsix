@@ -25,12 +25,12 @@ use pingora_error::{Error, ErrorType::ReadError, Result};
 use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_proxy::Session;
 use regex::Regex;
-use serde_yaml::Value as YamlValue;
+use serde_json::Value as JsonValue;
 
 use crate::proxy::ProxyContext;
 
 /// Type alias for plugin initialization functions
-pub type PluginCreateFn = fn(YamlValue) -> Result<Arc<dyn ProxyPlugin>>;
+pub type PluginCreateFn = fn(JsonValue) -> Result<Arc<dyn ProxyPlugin>>;
 
 /// Builds a standardized error response
 pub fn build_error_response(
@@ -145,7 +145,7 @@ static PLUGIN_BUILDER_REGISTRY: Lazy<HashMap<&'static str, PluginCreateFn>> = La
 ///
 /// # Notes
 /// - This function retrieves the appropriate plugin builder from a global registry and invokes it with the provided configuration.
-pub fn build_plugin(name: &str, cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> {
+pub fn build_plugin(name: &str, cfg: JsonValue) -> Result<Arc<dyn ProxyPlugin>> {
     let builder = PLUGIN_BUILDER_REGISTRY
         .get(name)
         .or_err(ReadError, "Unknown plugin type")?;

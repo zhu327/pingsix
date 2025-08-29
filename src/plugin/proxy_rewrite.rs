@@ -8,7 +8,7 @@ use pingora_http::RequestHeader;
 use pingora_proxy::Session;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use serde_yaml::Value as YamlValue;
+use serde_json::Value as JsonValue;
 use std::sync::Arc;
 use validator::{Validate, ValidationError};
 
@@ -18,9 +18,9 @@ use crate::proxy::ProxyContext;
 pub const PLUGIN_NAME: &str = "proxy-rewrite";
 const PRIORITY: i32 = 1008;
 
-pub fn create_proxy_rewrite_plugin(cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> {
+pub fn create_proxy_rewrite_plugin(cfg: JsonValue) -> Result<Arc<dyn ProxyPlugin>> {
     let config: PluginConfig =
-        serde_yaml::from_value(cfg).or_err(ReadError, "Invalid proxy rewrite plugin config")?;
+        serde_json::from_value(cfg).or_err(ReadError, "Invalid proxy rewrite plugin config")?;
 
     config
         .validate()

@@ -8,7 +8,7 @@ use pingora_error::{ErrorType::ReadError, OrErr, Result};
 use pingora_proxy::Session;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use serde_yaml::Value as YamlValue;
+use serde_json::Value as JsonValue;
 use validator::{Validate, ValidationError};
 
 use super::ProxyPlugin;
@@ -102,9 +102,9 @@ pub struct PluginCache {
     cache_settings: Arc<CacheSettings>,
 }
 
-pub fn create_cache_plugin(cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> {
-    let config: PluginConfig =
-        serde_yaml::from_value(cfg).or_err_with(ReadError, || "Invalid cache plugin config")?;
+pub fn create_cache_plugin(cfg: JsonValue) -> Result<Arc<dyn ProxyPlugin>> {
+    let config: PluginConfig = serde_json::from_value(cfg)
+        .or_err_with(ReadError, || "Failed to parse cache plugin config")?;
     config
         .validate()
         .or_err_with(ReadError, || "Cache plugin config validation failed")?;
@@ -118,7 +118,11 @@ pub fn create_cache_plugin(cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> {
     let no_cache_regex = config
         .no_cache_str
         .iter()
-        .map(|s| Regex::new(s).or_err(ReadError, "Invalid regex in no_cache_str"))
+        .map(|s| {
+            Regex::new(s).or_err_with(ReadError, || {
+                format!("Invalid regex in no_cache_str: {}", s)
+            })
+        })
         .collect::<Result<Vec<_>>>()?;
 
     // 在插件创建时就构建好 CacheSettings

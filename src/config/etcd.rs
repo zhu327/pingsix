@@ -236,17 +236,8 @@ pub fn json_to_resource<T>(value: &[u8]) -> Result<T, Box<dyn Error>>
 where
     T: serde::de::DeserializeOwned,
 {
-    // Deserialize the input value from JSON
-    let json_value: serde_json::Value = serde_json::from_slice(value)?;
-
-    // Serialize the JSON value to YAML directly into a Vec<u8>
-    let mut yaml_output = Vec::new();
-    let mut serializer = serde_yaml::Serializer::new(&mut yaml_output);
-    serde_transcode::transcode(json_value, &mut serializer)?;
-
-    // Deserialize directly from the YAML bytes
-    let resource: T = serde_yaml::from_slice(&yaml_output)?;
-
+    // 直接、高效地从JSON字节反序列化
+    let resource: T = serde_json::from_slice(value)?;
     Ok(resource)
 }
 

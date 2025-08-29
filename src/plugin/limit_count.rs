@@ -6,7 +6,7 @@ use pingora_error::{ErrorType::ReadError, OrErr, Result};
 use pingora_limits::rate::Rate;
 use pingora_proxy::Session;
 use serde::{Deserialize, Serialize};
-use serde_yaml::Value as YamlValue;
+use serde_json::Value as JsonValue;
 use validator::{Validate, ValidationError};
 
 use crate::{config::UpstreamHashOn, proxy::ProxyContext, utils::request::request_selector_key};
@@ -20,8 +20,8 @@ const PRIORITY: i32 = 1002;
 /// This plugin enforces rate limiting on requests based on a key derived from the request
 /// (e.g., client IP, header, or custom variable). Exceeding the limit results in a configurable
 /// response (default: `503 Service Unavailable`).
-pub fn create_limit_count_plugin(cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> {
-    let config: PluginConfig = serde_yaml::from_value(cfg)
+pub fn create_limit_count_plugin(cfg: JsonValue) -> Result<Arc<dyn ProxyPlugin>> {
+    let config: PluginConfig = serde_json::from_value(cfg)
         .or_err_with(ReadError, || "Invalid limit count plugin config")?;
 
     config

@@ -6,7 +6,7 @@ use pingora_error::{ErrorType::ReadError, OrErr, Result};
 use pingora_http::ResponseHeader;
 use pingora_proxy::Session;
 use serde::{Deserialize, Serialize};
-use serde_yaml::Value as YamlValue;
+use serde_json::Value as JsonValue;
 
 use crate::proxy::ProxyContext;
 
@@ -16,9 +16,9 @@ pub const PLUGIN_NAME: &str = "echo";
 const PRIORITY: i32 = 412;
 
 /// Creates an Echo plugin instance with the given configuration.
-pub fn create_echo_plugin(cfg: YamlValue) -> Result<Arc<dyn ProxyPlugin>> {
+pub fn create_echo_plugin(cfg: JsonValue) -> Result<Arc<dyn ProxyPlugin>> {
     let config: PluginConfig =
-        serde_yaml::from_value(cfg).or_err_with(ReadError, || "Invalid echo plugin config")?;
+        serde_json::from_value(cfg).or_err_with(ReadError, || "Invalid echo plugin config")?;
     Ok(Arc::new(PluginEcho { config }))
 }
 

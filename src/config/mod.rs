@@ -8,13 +8,21 @@ use std::{
 
 use http::Method;
 use log::{debug, trace};
+use once_cell::sync::Lazy;
 use pingora::server::configuration::{Opt, ServerConf};
 use pingora_error::{Error, ErrorType::*, OrErr, Result};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use serde_with::{serde_as, DisplayFromStr};
-use serde_yaml::Value as YamlValue;
 use validator::{Validate, ValidationError};
+
+// Compiled regex for validating upstream node keys (IPv4, IPv6, or domain names)
+static NODE_KEY_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"(?i)^(?:(?:\d{1,3}\.){3}\d{1,3}|\[[0-9a-f:]+\]|[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*)(?::\d+)?$"
+    ).expect("Invalid regex pattern for node key validation")
+});
 
 /// Trait for types with an ID field, used for unique ID validation.
 pub trait Identifiable {
@@ -295,7 +303,7 @@ pub struct Route {
     pub priority: u32,
 
     #[serde(default)]
-    pub plugins: HashMap<String, serde_yaml::Value>,
+    pub plugins: HashMap<String, JsonValue>,
     #[validate(nested)]
     pub upstream: Option<Upstream>,
     pub upstream_id: Option<String>,
@@ -378,14 +386,8 @@ impl Upstream {
 
     // Custom validation function for `nodes` keys
     fn validate_nodes_keys(nodes: &HashMap<String, u32>) -> Result<(), ValidationError> {
-        // Stricter regex: IPv4, IPv6, or domain (must start with alphanumeric, allow hyphens, end with alphanumeric)
-        let re = Regex::new(
-            r"(?i)^(?:(?:\d{1,3}\.){3}\d{1,3}|\[[0-9a-f:]+\]|[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*)(?::\d+)?$"
-        )
-        .unwrap();
-
         for key in nodes.keys() {
-            if !re.is_match(key) {
+            if !NODE_KEY_REGEX.is_match(key) {
                 let mut err = ValidationError::new("invalid_node_key");
                 err.add_param("key".into(), key);
                 return Err(err);
@@ -530,7 +532,7 @@ pub struct Service {
     #[serde(default)]
     pub id: String,
     #[serde(default)]
-    pub plugins: HashMap<String, serde_yaml::Value>,
+    pub plugins: HashMap<String, JsonValue>,
     pub upstream: Option<Upstream>,
     pub upstream_id: Option<String>,
     #[serde(default)]
@@ -552,7 +554,7 @@ pub struct GlobalRule {
     #[serde(default)]
     pub id: String,
     #[serde(default)]
-    pub plugins: HashMap<String, YamlValue>,
+    pub plugins: HashMap<String, JsonValue>,
 }
 
 #[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
