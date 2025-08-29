@@ -36,17 +36,17 @@ pub struct HealthCheckRegistry {
 
 impl Default for HealthCheckRegistry {
     fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl HealthCheckRegistry {
-    pub fn new() -> Self {
         let (tx, _rx) = broadcast::channel(100);
         Self {
             upstreams: HashMap::new(),
             update_notifier: tx,
         }
+    }
+}
+
+impl HealthCheckRegistry {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// 注册一个upstream的健康检查

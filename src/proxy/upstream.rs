@@ -41,7 +41,6 @@ pub fn upstream_fetch(id: &str) -> Option<Arc<ProxyUpstream>> {
 pub struct ProxyUpstream {
     pub inner: config::Upstream,
     lb: SelectionLB,
-    health_check_id: Option<String>, // 注册到共享服务的ID
 }
 
 impl Identifiable for ProxyUpstream {
@@ -60,7 +59,6 @@ impl ProxyUpstream {
         let mut proxy_upstream = ProxyUpstream {
             inner: upstream.clone(),
             lb: SelectionLB::try_from(upstream.clone())?,
-            health_check_id: None,
         };
 
         // 注册到共享健康检查服务
@@ -99,7 +97,6 @@ impl ProxyUpstream {
                 )
             })?;
 
-        self.health_check_id = Some(upstream_id);
         info!(
             "Registered upstream '{}' to shared health check service",
             self.inner.id
@@ -142,10 +139,9 @@ impl ProxyUpstream {
 
     /// 停止健康检查服务
     fn stop_health_check(&mut self) {
-        if let Some(upstream_id) = self.health_check_id.take() {
-            SHARED_HEALTH_CHECK_SERVICE.unregister_upstream(&upstream_id);
-            info!("Unregistered upstream '{upstream_id}' from shared health check service");
-        }
+        let upstream_id = self.id();
+        SHARED_HEALTH_CHECK_SERVICE.unregister_upstream(upstream_id);
+        info!("Unregistered upstream '{upstream_id}' from shared health check service");
     }
 
     /// Gets the number of retries from the upstream configuration.
