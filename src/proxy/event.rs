@@ -16,6 +16,23 @@ use super::{
     MapOperations,
 };
 
+// Adapter functions to convert ProxyResult to pingora Result
+fn create_proxy_route(route: Route) -> pingora_error::Result<ProxyRoute> {
+    ProxyRoute::new_with_upstream_and_plugins(route).map_err(|e| e.into())
+}
+
+fn create_proxy_upstream(upstream: Upstream) -> pingora_error::Result<ProxyUpstream> {
+    ProxyUpstream::new_with_shared_health_check(upstream).map_err(|e| e.into())
+}
+
+fn create_proxy_service(service: Service) -> pingora_error::Result<ProxyService> {
+    ProxyService::new_with_upstream_and_plugins(service).map_err(|e| e.into())
+}
+
+fn create_proxy_global_rule(rule: GlobalRule) -> pingora_error::Result<ProxyGlobalRule> {
+    ProxyGlobalRule::new_with_plugins(rule).map_err(|e| e.into())
+}
+
 // Note: The following types must implement `Identifiable` in `crate::config`:
 // - Route
 // - Upstream
@@ -151,7 +168,7 @@ impl ProxyEventHandler {
             response,
             "routes",
             &*ROUTE_MAP,
-            ProxyRoute::new_with_upstream_and_plugins,
+            create_proxy_route,
             Some(reload_global_route_match),
         );
     }
@@ -161,7 +178,7 @@ impl ProxyEventHandler {
             response,
             "upstreams",
             &*UPSTREAM_MAP,
-            ProxyUpstream::new_with_shared_health_check,
+            create_proxy_upstream,
             None,
         );
     }
@@ -171,7 +188,7 @@ impl ProxyEventHandler {
             response,
             "services",
             &*SERVICE_MAP,
-            ProxyService::new_with_upstream_and_plugins,
+            create_proxy_service,
             None,
         );
     }
@@ -181,7 +198,7 @@ impl ProxyEventHandler {
             response,
             "global_rules",
             &*GLOBAL_RULE_MAP,
-            ProxyGlobalRule::new_with_plugins,
+            create_proxy_global_rule,
             Some(reload_global_plugin),
         );
     }
@@ -235,31 +252,16 @@ impl ProxyEventHandler {
     }
 
     fn handle_route_event(&self, event: &Event) {
-        self.handle_resource(
-            event,
-            "routes",
-            &*ROUTE_MAP,
-            ProxyRoute::new_with_upstream_and_plugins,
-        );
+        self.handle_resource(event, "routes", &*ROUTE_MAP, create_proxy_route);
         reload_global_route_match();
     }
 
     fn handle_upstream_event(&self, event: &Event) {
-        self.handle_resource(
-            event,
-            "upstreams",
-            &*UPSTREAM_MAP,
-            ProxyUpstream::new_with_shared_health_check,
-        );
+        self.handle_resource(event, "upstreams", &*UPSTREAM_MAP, create_proxy_upstream);
     }
 
     fn handle_service_event(&self, event: &Event) {
-        self.handle_resource(
-            event,
-            "services",
-            &*SERVICE_MAP,
-            ProxyService::new_with_upstream_and_plugins,
-        );
+        self.handle_resource(event, "services", &*SERVICE_MAP, create_proxy_service);
     }
 
     fn handle_global_rule_event(&self, event: &Event) {
@@ -267,7 +269,7 @@ impl ProxyEventHandler {
             event,
             "global_rules",
             &*GLOBAL_RULE_MAP,
-            ProxyGlobalRule::new_with_plugins,
+            create_proxy_global_rule,
         );
         reload_global_plugin();
     }

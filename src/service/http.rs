@@ -93,11 +93,14 @@ impl ProxyHttp for HttpService {
         session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
-        let peer = ctx.route.as_ref().unwrap().select_http_peer(session);
-        if let Ok(ref peer) = peer {
-            ctx.set("upstream", peer._address.to_string());
-        }
-        peer
+        let peer = ctx
+            .route
+            .as_ref()
+            .unwrap()
+            .select_http_peer(session)
+            .map_err(|e| -> Box<pingora_error::Error> { e.into() })?;
+        ctx.set("upstream", peer._address.to_string());
+        Ok(peer)
     }
 
     /// Modify the request before it is sent to the upstream

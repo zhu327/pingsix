@@ -8,7 +8,7 @@ use log::debug;
 use matchit::{InsertError, Router as MatchRouter};
 use once_cell::sync::Lazy;
 use pingora_core::upstreams::peer::HttpPeer;
-use pingora_error::{Error, Result};
+use pingora_error::Result;
 use pingora_proxy::Session;
 
 use crate::{
@@ -20,7 +20,7 @@ use crate::{
 use super::{
     service::service_fetch,
     upstream::{upstream_fetch, ProxyUpstream},
-    MapOperations, ProxyPluginExecutor,
+    ErrorContext, MapOperations, ProxyError, ProxyPluginExecutor, ProxyResult,
 };
 
 /// Proxy route.
@@ -30,6 +30,8 @@ pub struct ProxyRoute {
     pub inner: config::Route,
     pub upstream: Option<Arc<ProxyUpstream>>,
     pub plugins: Vec<Arc<dyn ProxyPlugin>>,
+    /// Cached plugin executor to avoid rebuilding on each request
+    cached_plugin_executor: once_cell::sync::OnceCell<Arc<ProxyPluginExecutor>>,
 }
 
 impl Identifiable for ProxyRoute {
@@ -43,22 +45,27 @@ impl Identifiable for ProxyRoute {
 }
 
 impl ProxyRoute {
-    pub fn new_with_upstream_and_plugins(route: config::Route) -> Result<Self> {
+    pub fn new_with_upstream_and_plugins(route: config::Route) -> ProxyResult<Self> {
         let mut proxy_route = ProxyRoute {
             inner: route.clone(),
             upstream: None,
             plugins: Vec::with_capacity(route.plugins.len()),
+            cached_plugin_executor: once_cell::sync::OnceCell::new(),
         };
 
         // Configure upstream
         if let Some(upstream_config) = route.upstream {
-            let proxy_upstream = ProxyUpstream::new_with_shared_health_check(upstream_config)?;
+            let proxy_upstream =
+                ProxyUpstream::new_with_shared_health_check(upstream_config).with_context(
+                    &format!("Failed to create upstream for route '{}'", route.id),
+                )?;
             proxy_route.upstream = Some(Arc::new(proxy_upstream));
         }
 
         // Load plugins
         for (name, value) in route.plugins {
-            let plugin = build_plugin(&name, value)?;
+            let plugin = build_plugin(&name, value)
+                .map_err(|e| ProxyError::Plugin(format!("Failed to build plugin '{name}': {e}")))?;
             proxy_route.plugins.push(plugin);
         }
 
@@ -100,24 +107,25 @@ impl ProxyRoute {
         }
     }
 
-    pub fn select_http_peer<'a>(&'a self, session: &'a mut Session) -> Result<Box<HttpPeer>> {
-        self.resolve_upstream()
-            .ok_or_else(|| Error::new_str("Failed to retrieve upstream configuration for route"))
-            .and_then(|upstream| {
-                upstream
-                    .select_backend(session)
-                    .ok_or_else(|| Error::new_str("Unable to determine backend for the request"))
-            })
-            .and_then(|mut backend| {
-                backend
-                    .ext
-                    .get_mut::<HttpPeer>()
-                    .map(|peer| {
-                        self.set_timeout(peer);
-                        Box::new(peer.clone())
-                    })
-                    .ok_or_else(|| Error::new_str("Missing selected backend metadata for HttpPeer"))
-            })
+    pub fn select_http_peer<'a>(&'a self, session: &'a mut Session) -> ProxyResult<Box<HttpPeer>> {
+        let upstream = self.resolve_upstream().ok_or_else(|| {
+            ProxyError::UpstreamSelection(
+                "Failed to retrieve upstream configuration for route".to_string(),
+            )
+        })?;
+
+        let mut backend = upstream.select_backend(session).ok_or_else(|| {
+            ProxyError::UpstreamSelection("Unable to determine backend for the request".to_string())
+        })?;
+
+        let peer = backend.ext.get_mut::<HttpPeer>().ok_or_else(|| {
+            ProxyError::UpstreamSelection(
+                "Missing selected backend metadata for HttpPeer".to_string(),
+            )
+        })?;
+
+        self.set_timeout(peer);
+        Ok(Box::new(peer.clone()))
     }
 
     /// Sets the timeout for an `HttpPeer` based on the route configuration.
@@ -135,47 +143,42 @@ impl ProxyRoute {
     }
 
     /// Builds a `ProxyPluginExecutor` by combining plugins from both a route and its associated service.
-    ///
-    /// # Arguments
-    /// - `self`: A reference-counted pointer to a `ProxyRoute` instance containing route-specific plugins.
+    /// Uses caching to avoid rebuilding the executor on each request.
     ///
     /// # Returns
-    /// - `Arc<ProxyPluginExecutor>`: A reference-counted pointer to a `ProxyPluginExecutor` that manages the merged plugin list.
+    /// - `Arc<ProxyPluginExecutor>`: A cached reference-counted pointer to a `ProxyPluginExecutor`.
     ///
-    /// # Process
-    /// - Retrieves route-specific plugins from the `route`.
-    /// - If the route is associated with a service (via `service_id`), retrieves service-specific plugins.
-    /// - Combines the route and service plugins, ensuring unique entries by their name.
-    /// - Sorts the merged plugin list by priority in descending order.
-    /// - Constructs and returns the `ProxyPluginExecutor` instance.
-    ///
-    /// # Notes
-    /// - Plugins from the route take precedence over those from the service in case of naming conflicts.
-    ///   If a plugin with the same name exists in both route and service, only the route's plugin is retained.
+    /// # Performance Notes
+    /// - The executor is built once and cached for subsequent requests
+    /// - Plugins from the route take precedence over those from the service in case of naming conflicts
     pub fn build_plugin_executor(&self) -> Arc<ProxyPluginExecutor> {
-        let mut plugin_map: HashMap<String, Arc<dyn ProxyPlugin>> = HashMap::new();
+        self.cached_plugin_executor
+            .get_or_init(|| {
+                let mut plugin_map: HashMap<String, Arc<dyn ProxyPlugin>> = HashMap::new();
 
-        // Merge route and service plugins
-        let service_plugins = self
-            .inner
-            .service_id
-            .as_deref()
-            .and_then(service_fetch)
-            .map_or_else(Vec::new, |service| service.plugins.clone());
+                // Merge route and service plugins
+                let service_plugins = self
+                    .inner
+                    .service_id
+                    .as_deref()
+                    .and_then(service_fetch)
+                    .map_or_else(Vec::new, |service| service.plugins.clone());
 
-        for plugin in self.plugins.iter().chain(service_plugins.iter()) {
-            plugin_map
-                .entry(plugin.name().to_string())
-                .or_insert_with(|| plugin.clone());
-        }
+                for plugin in self.plugins.iter().chain(service_plugins.iter()) {
+                    plugin_map
+                        .entry(plugin.name().to_string())
+                        .or_insert_with(|| plugin.clone());
+                }
 
-        // Sort by priority in descending order
-        let mut merged_plugins: Vec<_> = plugin_map.into_values().collect();
-        merged_plugins.sort_by_key(|b| std::cmp::Reverse(b.priority()));
+                // Sort by priority in descending order
+                let mut merged_plugins: Vec<_> = plugin_map.into_values().collect();
+                merged_plugins.sort_by_key(|b| std::cmp::Reverse(b.priority()));
 
-        Arc::new(ProxyPluginExecutor {
-            plugins: merged_plugins,
-        })
+                Arc::new(ProxyPluginExecutor {
+                    plugins: merged_plugins,
+                })
+            })
+            .clone()
     }
 }
 
@@ -185,9 +188,19 @@ pub struct MatchEntry {
     non_host_uri: MatchRouter<Vec<Arc<ProxyRoute>>>,
     /// Router for host URI matching
     host_uris: MatchRouter<MatchRouter<Vec<Arc<ProxyRoute>>>>,
+    /// Cache for reversed host strings to avoid repeated computation
+    reversed_host_cache: DashMap<String, String>,
 }
 
 impl MatchEntry {
+    /// Helper method to get or compute reversed host string with caching
+    fn get_reversed_host(&self, host: &str) -> String {
+        self.reversed_host_cache
+            .entry(host.to_string())
+            .or_insert_with(|| host.chars().rev().collect())
+            .clone()
+    }
+
     fn insert_into_router(
         router: &mut MatchRouter<Vec<Arc<ProxyRoute>>>,
         uri: &str,
@@ -223,7 +236,7 @@ impl MatchEntry {
             // Host strings are reversed to enable suffix/wildcard matching with matchit's prefix-based router
             // (e.g., "*.example.com" becomes "moc.elpmaxe.*" for efficient matching)
             for host in hosts.iter() {
-                let reversed_host = host.chars().rev().collect::<String>();
+                let reversed_host = self.get_reversed_host(host);
                 let inner_router = self.host_uris.at_mut(reversed_host.as_str());
 
                 let inner_router = match inner_router {
@@ -257,10 +270,8 @@ impl MatchEntry {
 
         // Attempt to match using host_uris if a valid host is provided
         // Host is reversed to match the format used during insertion (e.g., "moc.elpmaxe.*")
-        if let Some(reversed_host) = host
-            .filter(|h| !h.is_empty())
-            .map(|h| h.chars().rev().collect::<String>())
-        {
+        if let Some(host_str) = host.filter(|h| !h.is_empty()) {
+            let reversed_host = self.get_reversed_host(host_str);
             if let Ok(v) = self.host_uris.at(&reversed_host) {
                 if let Some(result) = Self::match_uri_method(v.value, uri, method) {
                     return Some(result);
@@ -324,7 +335,7 @@ pub fn reload_global_route_match() {
 }
 
 /// Loads routes from the given configuration.
-pub fn load_static_routes(config: &config::Config) -> Result<()> {
+pub fn load_static_routes(config: &config::Config) -> ProxyResult<()> {
     let proxy_routes: Vec<Arc<ProxyRoute>> = config
         .routes
         .iter()
@@ -338,7 +349,7 @@ pub fn load_static_routes(config: &config::Config) -> Result<()> {
                 }
             }
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<ProxyResult<Vec<_>>>()?;
 
     ROUTE_MAP.reload_resources(proxy_routes);
 

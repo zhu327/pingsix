@@ -7,13 +7,14 @@ use futures::future::join_all;
 use hickory_resolver::TokioResolver;
 use once_cell::sync::OnceCell;
 use pingora::{protocols::ALPN, upstreams::peer::HttpPeer};
-use pingora_error::{Error, ErrorType::InternalError, OrErr, Result};
+use pingora_error::{Error, ErrorType::InternalError, Result};
 use pingora_load_balancing::{
     discovery::{ServiceDiscovery, Static},
     Backend,
 };
 use regex::Regex;
 
+use super::{ProxyError, ProxyResult};
 use crate::config::{Upstream, UpstreamPassHost, UpstreamScheme};
 
 static GLOBAL_RESOLVER: OnceCell<Arc<TokioResolver>> = OnceCell::new();
@@ -136,9 +137,9 @@ impl ServiceDiscovery for HybridDiscovery {
 }
 
 impl TryFrom<Upstream> for HybridDiscovery {
-    type Error = Box<Error>;
+    type Error = ProxyError;
 
-    fn try_from(upstream: Upstream) -> Result<Self> {
+    fn try_from(upstream: Upstream) -> ProxyResult<Self> {
         let mut this = Self::default();
         let mut backends = BTreeSet::new();
 
@@ -204,11 +205,10 @@ static HOST_PORT_REGEX: once_cell::sync::Lazy<Regex> =
 ///
 /// Supports IPv4, IPv6, and domain names, with optional port.
 /// Returns IPv6 addresses enclosed in square brackets for consistency.
-fn parse_host_and_port(addr: &str) -> Result<(String, Option<u32>)> {
-    let caps = match HOST_PORT_REGEX.captures(addr) {
-        Some(caps) => caps,
-        None => return Err(Error::explain(InternalError, "Invalid address format")),
-    };
+fn parse_host_and_port(addr: &str) -> ProxyResult<(String, Option<u32>)> {
+    let caps = HOST_PORT_REGEX
+        .captures(addr)
+        .ok_or_else(|| ProxyError::Configuration("Invalid address format".to_string()))?;
 
     let host = caps.get(1).or(caps.get(2)).unwrap().as_str();
 
@@ -216,7 +216,7 @@ fn parse_host_and_port(addr: &str) -> Result<(String, Option<u32>)> {
         Some(
             port_str
                 .parse::<u32>()
-                .or_err(InternalError, "Invalid port")?,
+                .map_err(|_| ProxyError::Configuration("Invalid port number".to_string()))?,
         )
     } else {
         None

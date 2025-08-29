@@ -6,7 +6,7 @@ use log::info;
 use once_cell::sync::Lazy;
 use pingora::services::background::background_service;
 use pingora_core::upstreams::peer::HttpPeer;
-use pingora_error::{Error, Result};
+use pingora_error::Error;
 use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_load_balancing::{
     health_check::{HealthCheck as HealthCheckTrait, HttpHealthCheck, TcpHealthCheck},
@@ -22,7 +22,10 @@ use crate::{
     utils::request::request_selector_key,
 };
 
-use super::{discovery::HybridDiscovery, health_check::SHARED_HEALTH_CHECK_SERVICE, MapOperations};
+use super::{
+    discovery::HybridDiscovery, health_check::SHARED_HEALTH_CHECK_SERVICE, ErrorContext,
+    MapOperations, ProxyError, ProxyResult,
+};
 
 /// Fetches an upstream by its ID.
 pub fn upstream_fetch(id: &str) -> Option<Arc<ProxyUpstream>> {
@@ -55,26 +58,27 @@ impl Identifiable for ProxyUpstream {
 
 impl ProxyUpstream {
     /// 创建一个使用共享健康检查服务的ProxyUpstream
-    pub fn new_with_shared_health_check(upstream: config::Upstream) -> Result<Self> {
+    pub fn new_with_shared_health_check(upstream: config::Upstream) -> ProxyResult<Self> {
         let mut proxy_upstream = ProxyUpstream {
             inner: upstream.clone(),
-            lb: SelectionLB::try_from(upstream.clone())?,
+            lb: SelectionLB::try_from(upstream.clone()).map_err(|e| {
+                ProxyError::Configuration(format!("Failed to create load balancer: {e}"))
+            })?,
         };
 
         // 注册到共享健康检查服务
-        if let Err(e) = proxy_upstream.register_health_check() {
-            log::warn!(
-                "Failed to register health check for upstream '{}': {}",
-                upstream.id,
-                e
-            );
-        }
+        proxy_upstream
+            .register_health_check()
+            .with_context(&format!(
+                "Failed to register health check for upstream '{}'",
+                upstream.id
+            ))?;
 
         Ok(proxy_upstream)
     }
 
     /// 注册健康检查到共享服务
-    fn register_health_check(&mut self) -> Result<()> {
+    fn register_health_check(&mut self) -> ProxyResult<()> {
         // 直接获取 LoadBalancer 的 Arc 引用
         let load_balancer: Arc<
             dyn pingora_core::services::background::BackgroundService + Send + Sync,
@@ -91,10 +95,7 @@ impl ProxyUpstream {
         SHARED_HEALTH_CHECK_SERVICE
             .register_upstream(upstream_id.clone(), load_balancer)
             .map_err(|e| {
-                Error::explain(
-                    pingora_error::ErrorType::InternalError,
-                    format!("Failed to register health check: {e}"),
-                )
+                ProxyError::HealthCheck(format!("Failed to register health check: {e}"))
             })?;
 
         info!(
@@ -184,9 +185,9 @@ enum SelectionLB {
 }
 
 impl TryFrom<config::Upstream> for SelectionLB {
-    type Error = Box<Error>;
+    type Error = ProxyError;
 
-    fn try_from(value: config::Upstream) -> Result<Self> {
+    fn try_from(value: config::Upstream) -> ProxyResult<Self> {
         match value.r#type {
             config::SelectionType::RoundRobin => {
                 Ok(SelectionLB::RoundRobin(LB::<RoundRobin>::try_from(value)?))
@@ -211,9 +212,9 @@ where
     BS: BackendSelection + Send + Sync + 'static,
     BS::Iter: BackendIter,
 {
-    type Error = Box<Error>;
+    type Error = ProxyError;
 
-    fn try_from(upstream: config::Upstream) -> Result<Self> {
+    fn try_from(upstream: config::Upstream) -> ProxyResult<Self> {
         let discovery: HybridDiscovery = upstream.clone().try_into()?;
         let mut upstreams = LoadBalancer::<BS>::from_backends(Backends::new(Box::new(discovery)));
 
@@ -346,7 +347,7 @@ impl From<config::HealthCheck> for Box<HttpHealthCheck> {
 pub static UPSTREAM_MAP: Lazy<DashMap<String, Arc<ProxyUpstream>>> = Lazy::new(DashMap::new);
 
 /// Loads upstreams from the given configuration.
-pub fn load_static_upstreams(config: &config::Config) -> Result<()> {
+pub fn load_static_upstreams(config: &config::Config) -> ProxyResult<()> {
     // Collect all ProxyUpstream instances into a vector.
     let proxy_upstreams: Vec<Arc<ProxyUpstream>> = config
         .upstreams
@@ -361,7 +362,7 @@ pub fn load_static_upstreams(config: &config::Config) -> Result<()> {
                 }
             }
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<ProxyResult<Vec<_>>>()?;
 
     let upstream_count = proxy_upstreams.len();
 

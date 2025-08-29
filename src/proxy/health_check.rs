@@ -1,17 +1,13 @@
-use std::{
-    collections::HashMap,
-    sync::{Arc, RwLock},
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use dashmap::DashMap;
 use log::{debug, info, warn};
 use once_cell::sync::Lazy;
 use pingora_core::{
     server::ShutdownWatch,
     services::{background::BackgroundService, Service},
 };
-// LoadBalancer相关的导入在这里不需要，因为我们直接使用Service
 use tokio::sync::{broadcast, watch};
 
 /// 注册表更新事件
@@ -28,9 +24,9 @@ struct RegisteredUpstream {
     shutdown_rx: watch::Receiver<bool>,
 }
 
-/// 健康检查注册表
+/// 健康检查注册表 - 使用DashMap提供更好的并发性能
 pub struct HealthCheckRegistry {
-    upstreams: HashMap<String, RegisteredUpstream>,
+    upstreams: DashMap<String, RegisteredUpstream>,
     update_notifier: broadcast::Sender<RegistryUpdate>,
 }
 
@@ -38,7 +34,7 @@ impl Default for HealthCheckRegistry {
     fn default() -> Self {
         let (tx, _rx) = broadcast::channel(100);
         Self {
-            upstreams: HashMap::new(),
+            upstreams: DashMap::new(),
             update_notifier: tx,
         }
     }
@@ -49,9 +45,9 @@ impl HealthCheckRegistry {
         Self::default()
     }
 
-    /// 注册一个upstream的健康检查
+    /// 注册一个upstream的健康检查 - 无需可变引用，DashMap支持并发插入
     pub fn register_upstream(
-        &mut self,
+        &self,
         upstream_id: String,
         load_balancer: Arc<dyn BackgroundService + Send + Sync>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -77,9 +73,9 @@ impl HealthCheckRegistry {
         Ok(())
     }
 
-    /// 注销一个upstream的健康检查
-    pub fn unregister_upstream(&mut self, upstream_id: &str) -> bool {
-        if let Some(registered) = self.upstreams.remove(upstream_id) {
+    /// 注销一个upstream的健康检查 - 无需可变引用，DashMap支持并发删除
+    pub fn unregister_upstream(&self, upstream_id: &str) -> bool {
+        if let Some((_, registered)) = self.upstreams.remove(upstream_id) {
             // 发送关闭信号
             if let Err(e) = registered.shutdown_tx.send(true) {
                 warn!("Failed to send shutdown signal to upstream '{upstream_id}': {e}");
@@ -119,9 +115,12 @@ impl HealthCheckRegistry {
         })
     }
 
-    /// 获取所有upstream的ID列表
+    /// 获取所有upstream的ID列表 - 使用DashMap的迭代器
     pub fn get_all_upstream_ids(&self) -> Vec<String> {
-        self.upstreams.keys().cloned().collect()
+        self.upstreams
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect()
     }
 
     /// 获取更新通知接收器
@@ -145,40 +144,34 @@ impl HealthCheckExecutor {
         Self
     }
 
-    /// 运行健康检查执行器
-    pub async fn run(&self, registry: Arc<RwLock<HealthCheckRegistry>>, shutdown: ShutdownWatch) {
+    /// 运行健康检查执行器 - 优化并发性能，移除RwLock
+    pub async fn run(&self, registry: Arc<HealthCheckRegistry>, shutdown: ShutdownWatch) {
         info!("Starting health check executor");
 
-        // 移除 Semaphore，因为 LoadBalancer::start() 内部已经处理并发控制
-        let mut update_receiver = {
-            let registry_guard = registry.read().unwrap();
-            registry_guard.subscribe_updates()
-        };
+        // 直接从registry获取更新接收器，无需锁
+        let mut update_receiver = registry.subscribe_updates();
 
         // 存储已启动的健康检查任务
         let mut running_tasks: std::collections::HashMap<String, tokio::task::JoinHandle<()>> =
             std::collections::HashMap::new();
 
         // 启动已存在的upstream的健康检查
-        {
-            let registry_guard = registry.read().unwrap();
-            for upstream_id in registry_guard.get_all_upstream_ids() {
-                if let Some((task_upstream_id, load_balancer, shutdown_rx)) =
-                    registry_guard.get_upstream_for_start(&upstream_id)
-                {
-                    let task_id = upstream_id.clone();
+        for upstream_id in registry.get_all_upstream_ids() {
+            if let Some((task_upstream_id, load_balancer, shutdown_rx)) =
+                registry.get_upstream_for_start(&upstream_id)
+            {
+                let task_id = upstream_id.clone();
 
-                    let handle = tokio::spawn(async move {
-                        info!("Starting health check service for upstream '{task_upstream_id}'");
+                let handle = tokio::spawn(async move {
+                    info!("Starting health check service for upstream '{task_upstream_id}'");
 
-                        // 直接调用 LoadBalancer 的 start 方法
-                        load_balancer.start(shutdown_rx).await;
+                    // 直接调用 LoadBalancer 的 start 方法
+                    load_balancer.start(shutdown_rx).await;
 
-                        info!("Health check service stopped for upstream '{task_upstream_id}'");
-                    });
+                    info!("Health check service stopped for upstream '{task_upstream_id}'");
+                });
 
-                    running_tasks.insert(task_id, handle);
-                }
+                running_tasks.insert(task_id, handle);
             }
         }
 
@@ -199,11 +192,10 @@ impl HealthCheckExecutor {
                 match update {
                     RegistryUpdate::Added(id) => {
                         debug!("Health check executor: upstream '{id}' added");
-                        // 启动新的健康检查任务
-                        if let Some((upstream_id, load_balancer, shutdown_rx)) = {
-                            let registry_guard = registry.read().unwrap();
-                            registry_guard.get_upstream_for_start(&id)
-                        } {
+                        // 启动新的健康检查任务 - 直接访问registry，无需锁
+                        if let Some((upstream_id, load_balancer, shutdown_rx)) =
+                            registry.get_upstream_for_start(&id)
+                        {
                             let task_id = upstream_id.clone();
 
                             let handle = tokio::spawn(async move {
@@ -248,17 +240,17 @@ impl HealthCheckExecutor {
     }
 }
 
-/// 共享健康检查服务
+/// 共享健康检查服务 - 移除RwLock，使用DashMap提供更好的并发性能
 #[derive(Clone)]
 pub struct SharedHealthCheckService {
-    registry: Arc<RwLock<HealthCheckRegistry>>,
+    registry: Arc<HealthCheckRegistry>,
     executor: HealthCheckExecutor,
 }
 
 impl Default for SharedHealthCheckService {
     fn default() -> Self {
         Self {
-            registry: Arc::new(RwLock::new(HealthCheckRegistry::new())),
+            registry: Arc::new(HealthCheckRegistry::new()),
             executor: HealthCheckExecutor::new(),
         }
     }
@@ -269,20 +261,18 @@ impl SharedHealthCheckService {
         Self::default()
     }
 
-    /// 注册一个upstream的健康检查
+    /// 注册一个upstream的健康检查 - 无需锁，直接调用registry方法
     pub fn register_upstream(
         &self,
         upstream_id: String,
         load_balancer: Arc<dyn BackgroundService + Send + Sync>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let mut registry = self.registry.write().unwrap();
-        registry.register_upstream(upstream_id, load_balancer)
+        self.registry.register_upstream(upstream_id, load_balancer)
     }
 
-    /// 注销一个upstream的健康检查
+    /// 注销一个upstream的健康检查 - 无需锁，直接调用registry方法
     pub fn unregister_upstream(&self, upstream_id: &str) -> bool {
-        let mut registry = self.registry.write().unwrap();
-        registry.unregister_upstream(upstream_id)
+        self.registry.unregister_upstream(upstream_id)
     }
 }
 

@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
-use pingora_error::Result;
 
 use crate::{
     config::{self, Identifiable},
@@ -11,7 +10,7 @@ use crate::{
 
 use super::{
     upstream::{upstream_fetch, ProxyUpstream},
-    MapOperations,
+    ErrorContext, MapOperations, ProxyError, ProxyResult,
 };
 
 /// Fetches a service by its ID.
@@ -43,7 +42,7 @@ impl Identifiable for ProxyService {
 }
 
 impl ProxyService {
-    pub fn new_with_upstream_and_plugins(service: config::Service) -> Result<Self> {
+    pub fn new_with_upstream_and_plugins(service: config::Service) -> ProxyResult<Self> {
         let mut proxy_service = ProxyService {
             inner: service.clone(),
             upstream: None,
@@ -53,13 +52,20 @@ impl ProxyService {
         // 配置 upstream
         if let Some(ref upstream_config) = service.upstream {
             let proxy_upstream =
-                ProxyUpstream::new_with_shared_health_check(upstream_config.clone())?;
+                ProxyUpstream::new_with_shared_health_check(upstream_config.clone()).with_context(
+                    &format!("Failed to create upstream for service '{}'", service.id),
+                )?;
             proxy_service.upstream = Some(Arc::new(proxy_upstream));
         }
 
         // 加载插件
         for (name, value) in service.plugins {
-            let plugin = build_plugin(&name, value)?;
+            let plugin = build_plugin(&name, value).map_err(|e| {
+                ProxyError::Plugin(format!(
+                    "Failed to build plugin '{}' for service '{}': {}",
+                    name, service.id, e
+                ))
+            })?;
             proxy_service.plugins.push(plugin);
         }
 
@@ -78,7 +84,7 @@ impl ProxyService {
 pub static SERVICE_MAP: Lazy<DashMap<String, Arc<ProxyService>>> = Lazy::new(DashMap::new);
 
 /// Loads services from the given configuration.
-pub fn load_static_services(config: &config::Config) -> Result<()> {
+pub fn load_static_services(config: &config::Config) -> ProxyResult<()> {
     let proxy_services: Vec<Arc<ProxyService>> = config
         .services
         .iter()
@@ -92,7 +98,7 @@ pub fn load_static_services(config: &config::Config) -> Result<()> {
                 }
             }
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<ProxyResult<Vec<_>>>()?;
 
     SERVICE_MAP.reload_resources(proxy_services);
 

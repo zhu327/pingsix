@@ -3,14 +3,13 @@ use std::{collections::HashMap, sync::Arc};
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
-use pingora_error::Result;
 
 use crate::{
     config::{self, Identifiable},
     plugin::{build_plugin, ProxyPlugin},
 };
 
-use super::{MapOperations, ProxyPluginExecutor};
+use super::{MapOperations, ProxyError, ProxyPluginExecutor, ProxyResult};
 
 /// Represents a proxy service that manages upstreams.
 pub struct ProxyGlobalRule {
@@ -29,7 +28,7 @@ impl Identifiable for ProxyGlobalRule {
 }
 
 impl ProxyGlobalRule {
-    pub fn new_with_plugins(rule: config::GlobalRule) -> Result<Self> {
+    pub fn new_with_plugins(rule: config::GlobalRule) -> ProxyResult<Self> {
         let mut proxy_global_rule = ProxyGlobalRule {
             inner: rule.clone(),
             plugins: Vec::with_capacity(rule.plugins.len()),
@@ -38,7 +37,12 @@ impl ProxyGlobalRule {
         // Load plugins and log each one
         for (name, value) in rule.plugins {
             log::info!("Loading plugin: {name}");
-            let plugin = build_plugin(&name, value)?;
+            let plugin = build_plugin(&name, value).map_err(|e| {
+                ProxyError::Plugin(format!(
+                    "Failed to build plugin '{}' for global rule '{}': {}",
+                    name, rule.id, e
+                ))
+            })?;
             proxy_global_rule.plugins.push(plugin);
         }
 
@@ -81,7 +85,7 @@ pub fn reload_global_plugin() {
 }
 
 /// Loads services from the given configuration.
-pub fn load_static_global_rules(config: &config::Config) -> Result<()> {
+pub fn load_static_global_rules(config: &config::Config) -> ProxyResult<()> {
     let proxy_global_rules: Vec<Arc<ProxyGlobalRule>> = config
         .global_rules
         .iter()
@@ -97,7 +101,7 @@ pub fn load_static_global_rules(config: &config::Config) -> Result<()> {
                 }
             }
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<ProxyResult<Vec<_>>>()?;
 
     // Reload global rules into the map
     GLOBAL_RULE_MAP.reload_resources(proxy_global_rules);

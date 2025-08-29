@@ -31,6 +31,96 @@ use crate::{config::Identifiable, plugin::ProxyPlugin};
 
 use route::ProxyRoute;
 
+/// Unified error types for the proxy module
+#[derive(Debug)]
+pub enum ProxyError {
+    Configuration(String),
+    Network(std::io::Error),
+    DnsResolution(String),
+    HealthCheck(String),
+    RouteMatching(String),
+    UpstreamSelection(String),
+    Ssl(String),
+    Plugin(String),
+    Internal(String),
+    Pingora(pingora_error::Error),
+}
+
+impl std::fmt::Display for ProxyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProxyError::Configuration(msg) => write!(f, "Configuration error: {msg}"),
+            ProxyError::Network(err) => write!(f, "Network error: {err}"),
+            ProxyError::DnsResolution(msg) => write!(f, "DNS resolution failed: {msg}"),
+            ProxyError::HealthCheck(msg) => write!(f, "Health check failed: {msg}"),
+            ProxyError::RouteMatching(msg) => write!(f, "Route matching failed: {msg}"),
+            ProxyError::UpstreamSelection(msg) => write!(f, "Upstream selection failed: {msg}"),
+            ProxyError::Ssl(msg) => write!(f, "SSL/TLS error: {msg}"),
+            ProxyError::Plugin(msg) => write!(f, "Plugin execution error: {msg}"),
+            ProxyError::Internal(msg) => write!(f, "Internal error: {msg}"),
+            ProxyError::Pingora(err) => write!(f, "Pingora error: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for ProxyError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ProxyError::Network(err) => Some(err),
+            ProxyError::Pingora(err) => Some(err),
+            _ => None,
+        }
+    }
+}
+
+impl From<std::io::Error> for ProxyError {
+    fn from(err: std::io::Error) -> Self {
+        ProxyError::Network(err)
+    }
+}
+
+impl From<pingora_error::Error> for ProxyError {
+    fn from(err: pingora_error::Error) -> Self {
+        ProxyError::Pingora(err)
+    }
+}
+
+impl From<ProxyError> for Box<pingora_error::Error> {
+    fn from(err: ProxyError) -> Self {
+        match err {
+            ProxyError::Pingora(pingora_err) => Box::new(pingora_err),
+            ProxyError::Configuration(_) => pingora_error::Error::new_str("Configuration error"),
+            ProxyError::Network(_) => pingora_error::Error::new_str("Network error"),
+            ProxyError::DnsResolution(_) => pingora_error::Error::new_str("DNS resolution failed"),
+            ProxyError::HealthCheck(_) => pingora_error::Error::new_str("Health check failed"),
+            ProxyError::RouteMatching(_) => pingora_error::Error::new_str("Route matching failed"),
+            ProxyError::UpstreamSelection(_) => {
+                pingora_error::Error::new_str("Upstream selection failed")
+            }
+            ProxyError::Ssl(_) => pingora_error::Error::new_str("SSL/TLS error"),
+            ProxyError::Plugin(_) => pingora_error::Error::new_str("Plugin execution error"),
+            ProxyError::Internal(_) => pingora_error::Error::new_str("Internal error"),
+        }
+    }
+}
+
+/// Result type alias for proxy operations
+pub type ProxyResult<T> = std::result::Result<T, ProxyError>;
+
+/// Helper trait for converting errors with context
+pub trait ErrorContext<T> {
+    fn with_context(self, context: &str) -> ProxyResult<T>;
+}
+
+impl<T, E> ErrorContext<T> for std::result::Result<T, E>
+where
+    E: std::fmt::Display,
+{
+    fn with_context(self, context: &str) -> ProxyResult<T> {
+        self.map_err(|e| ProxyError::Internal(format!("{context}: {e}")))
+    }
+}
+
 /// Default empty plugin executor for new ProxyContext.
 static DEFAULT_PLUGIN_EXECUTOR: Lazy<Arc<ProxyPluginExecutor>> =
     Lazy::new(|| Arc::new(ProxyPluginExecutor::default()));
