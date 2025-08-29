@@ -20,7 +20,7 @@ use crate::{
         etcd::{json_to_resource, EtcdClientWrapper},
         Admin, Identifiable, Pingsix,
     },
-    plugin::build_plugin,
+    plugin::{build_plugin, constant_time_eq},
 };
 
 #[derive(Debug)]
@@ -73,6 +73,9 @@ impl ApiError {
 
 type ApiResult<T> = Result<T, ApiError>;
 type RequestParams = BTreeMap<String, String>;
+
+// Maximum request body size for admin API (1 MB)
+const MAX_BODY_SIZE: usize = 1_048_576;
 
 // Unified response handler
 struct ResponseHelper;
@@ -418,7 +421,7 @@ impl ServeHttp for AdminHttpApp {
 
 fn validate_api_key(http_session: &ServerSession, api_key: &str) -> ApiResult<()> {
     match http_session.get_header("x-api-key") {
-        Some(key) if key.as_bytes() == api_key.as_bytes() => Ok(()),
+        Some(key) if constant_time_eq(key.to_str().unwrap_or(""), api_key) => Ok(()),
         _ => Err(ApiError::InvalidRequest(
             "Must provide valid API key".into(),
         )),
@@ -435,12 +438,16 @@ fn validate_content_type(http_session: &ServerSession) -> ApiResult<()> {
 }
 
 async fn read_request_body(http_session: &mut ServerSession) -> Result<Vec<u8>, ApiError> {
-    let mut body_data = Vec::new();
+    let mut body_data = Vec::with_capacity(1024); // Initial capacity
     while let Some(bytes) = http_session
         .read_request_body()
         .await
         .map_err(|e| ApiError::RequestBodyReadError(e.to_string()))?
     {
+        // Check if the cumulative size exceeds the limit
+        if body_data.len() + bytes.len() > MAX_BODY_SIZE {
+            return Err(ApiError::InvalidRequest("Request body too large".into()));
+        }
         body_data.extend_from_slice(&bytes);
     }
     Ok(body_data)

@@ -154,7 +154,7 @@ impl ProxyPlugin for PluginJWTAuth {
     }
 
     async fn request_filter(&self, session: &mut Session, ctx: &mut ProxyContext) -> Result<bool> {
-        let token = self.extract_token(session);
+        let token = self.extract_token(session, ctx);
         let token = match token {
             Some(t) => t,
             None => {
@@ -209,14 +209,28 @@ impl ProxyPlugin for PluginJWTAuth {
 
         Ok(false)
     }
+
+    async fn response_filter(
+        &self,
+        _session: &mut Session,
+        upstream_response: &mut pingora_http::ResponseHeader,
+        ctx: &mut ProxyContext,
+    ) -> Result<()> {
+        // Handle cookie clearing if needed
+        if let Some(cookie_name) = ctx.get_str("jwt_auth_clear_cookie") {
+            let clear_cookie_header = format!("{}=; Max-Age=0; Path=/; HttpOnly", cookie_name);
+            upstream_response.insert_header("Set-Cookie", clear_cookie_header)?;
+        }
+        Ok(())
+    }
 }
 
 impl PluginJWTAuth {
     /// Extracts JWT from header, query, or cookie using a cleaner chain approach
-    fn extract_token(&self, session: &mut Session) -> Option<String> {
+    fn extract_token(&self, session: &mut Session, ctx: &mut ProxyContext) -> Option<String> {
         self.extract_from_header(session)
             .or_else(|| self.extract_from_query(session))
-            .or_else(|| self.extract_from_cookie(session))
+            .or_else(|| self.extract_from_cookie(session, ctx))
     }
 
     /// Extract token from header and optionally remove it
@@ -253,23 +267,15 @@ impl PluginJWTAuth {
     }
 
     /// Extract token from cookie and optionally remove it
-    fn extract_from_cookie(&self, session: &mut Session) -> Option<String> {
+    fn extract_from_cookie(&self, session: &mut Session, ctx: &mut ProxyContext) -> Option<String> {
         let token = request::get_cookie_value(session.req_header(), &self.config.cookie)
             .map(|c| c.to_string());
 
         if token.is_some() && self.config.hide_credentials {
-            self.remove_cookie_credential(session);
+            // Store the cookie name in context for later clearing in response phase
+            ctx.set("jwt_auth_clear_cookie", self.config.cookie.clone());
         }
 
         token
-    }
-
-    /// Remove cookie credential by setting an expired cookie
-    fn remove_cookie_credential(&self, _session: &mut Session) {
-        // Set an expired cookie to effectively "remove" it
-        let _cookie_header = format!("{}=; Max-Age=0; Path=/; HttpOnly", self.config.cookie);
-        // Note: This would need to be implemented in the response phase
-        // For now, we'll store this information in the context for later use
-        // This is a limitation of the current architecture where we can't modify response headers in request phase
     }
 }
