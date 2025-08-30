@@ -217,11 +217,12 @@ uris: ["/api/v1/users/{id}", "/api/v2/users/{user_id}"]
 ```
 
 **Important Notes:**
-- Use `{parameter_name}` for named parameters that capture a single path segment
-- Use `{*parameter_name}` for catch-all parameters that capture the remaining path
-- Catch-all parameters must be at the end of the path
-- Only one parameter is allowed per path segment
-- Static routes have higher priority than dynamic routes
+- A route must have at least one URI pattern defined, using either the `uri` field for a single pattern or the `uris` field for multiple patterns.
+- Use `{parameter_name}` for named parameters that capture a single path segment.
+- Use `{*parameter_name}` for catch-all parameters that capture the remaining path.
+- Catch-all parameters must be at the end of the path.
+- Only one parameter is allowed per path segment.
+- Static routes have higher priority than dynamic routes.
 
 **Route Parameter Examples:**
 ```yaml
@@ -336,6 +337,19 @@ hash_on: head     # Hash based on headers
 key: user-id      # Header name to hash
 ```
 
+### Request Retries
+
+Configure automatic retries on connection failures:
+
+```yaml
+upstreams:
+  - id: "backend-with-retry"
+    nodes:
+      "unstable-server.example.com:8080": 1
+    retries: 3           # Number of retry attempts on connection failure
+    retry_timeout: 5     # Total time in seconds allowed for all retry attempts
+```
+
 ### Health Checks
 
 Configure active health checking:
@@ -413,8 +427,7 @@ global_rules:
     plugins:
       prometheus: {}                # Enable metrics collection
       file-logger:                  # Enable access logging
-        path: /var/log/pingsix/access.log
-        format: '$remote_addr - [$time_local] "$request" $status $body_bytes_sent'
+        log_format: '$remote_addr - [$time_local] "$request" $status $body_bytes_sent'
   
   - id: "security"
     plugins:
@@ -434,13 +447,21 @@ PingSIX includes 15+ built-in plugins for various functionalities:
 ```yaml
 plugins:
   jwt-auth:
-    header: authorization           # Header containing JWT
-    query: token                   # Query parameter name
-    cookie: jwt                    # Cookie name
-    secret: "your-secret-key"      # HMAC secret
-    algorithm: HS256               # Supported: HS256, HS512, RS256, ES256
-    hide_credentials: true         # Remove JWT from request
-    store_in_ctx: true            # Store payload in context
+    header: authorization        # Header containing JWT
+    query: token                # Query parameter name
+    cookie: jwt                 # Cookie name
+    # For HMAC algorithms (HS256, HS512)
+    secret: "your-secret-key"
+    base64_secret: false        # Set to true if the secret is base64 encoded
+    # For RSA/ECDSA algorithms (RS256, ES256)
+    public_key: |
+      -----BEGIN PUBLIC KEY-----
+      ...
+      -----END PUBLIC KEY-----
+    algorithm: HS256            # Supported: HS256, HS512, RS256, ES256
+    lifetime_grace_period: 60   # Optional: 60 seconds grace period for token expiration
+    hide_credentials: true      # Remove JWT from request
+    store_in_ctx: true         # Store payload in context
 ```
 
 #### API Key Authentication
@@ -515,9 +536,15 @@ plugins:
     uri: /new/path                # Rewrite request URI
     method: POST                  # Change HTTP method
     host: new-host.example.com    # Change Host header
-    headers:                      # Add/modify headers
-      X-Custom-Header: "custom-value"
-      X-Forwarded-Proto: "https"
+    headers:                      # Add/modify/remove headers
+      set:
+        - name: "X-Header-To-Set"
+          value: "new-value"
+      add:
+        - name: "X-Header-To-Add"
+          value: "another-value"
+      remove:
+        - "X-Header-To-Remove"
     regex_uri:                    # Regex-based URI rewriting
       - "^/old/(.*)"              # Pattern
       - "/new/$1"                 # Replacement
@@ -542,23 +569,16 @@ plugins:
 ```yaml
 plugins:
   gzip:
-    min_length: 1024              # Minimum response size to compress
-    comp_level: 6                 # Compression level (1-9)
-    types:                        # MIME types to compress
-      - "text/html"
-      - "application/json"
-      - "text/css"
+    comp_level: 6                 # Compression level (0-9)
+    decompression: false          # Enable decompression if needed
 ```
 
 #### Brotli Compression
 ```yaml
 plugins:
   brotli:
-    min_length: 1024
-    comp_level: 6                 # Compression level (1-11)
-    types:
-      - "text/html"
-      - "application/json"
+    comp_level: 6                 # Compression level (0-11)
+    decompression: false          # Enable decompression if needed
 ```
 
 ### Caching
@@ -583,16 +603,15 @@ plugins:
 #### Prometheus Metrics
 ```yaml
 plugins:
-  prometheus:
-    prefer_name: true             # Use route names in metrics
+  prometheus: {}                  # Zero-configuration, enable to start metric collection
 ```
 
 #### File Logging
 ```yaml
 plugins:
   file-logger:
-    path: /var/log/pingsix/access.log
-    format: '$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent "$http_referer" "$http_user_agent" $request_time'
+    # NOTE: The log file path must be configured globally under `pingsix.log.path`.
+    log_format: '$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent "$http_referer" "$http_user_agent"'
 ```
 
 #### Request ID
@@ -601,7 +620,11 @@ plugins:
   request-id:
     header_name: X-Request-ID     # Header name for request ID
     include_in_response: true     # Include in response headers
-    algorithm: uuid4              # uuid4 or snowflake
+    algorithm: uuid               # 'uuid' or 'range_id'
+    # Optional: configuration for 'range_id' algorithm
+    range_id:
+      char_set: "ABCDEF0123456789"
+      length: 32
 ```
 
 ### Utility Plugins
@@ -619,7 +642,7 @@ plugins:
 #### gRPC Web
 ```yaml
 plugins:
-  grpc-web: {}                    # Enable gRPC-Web support
+  grpc-web: {}                    # Enable gRPC-Web support (zero-configuration)
 ```
 
 ## Admin API
@@ -860,21 +883,28 @@ global_rules:
   - id: "logging"
     plugins:
       file-logger:
-        path: /var/log/pingsix/access.log
-        format: '$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent "$http_referer" "$http_user_agent" $request_time $upstream_response_time'
+        log_format: '$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent "$http_referer" "$http_user_agent" $request_time'
 ```
 
 Available log variables:
 - `$remote_addr` - Client IP address
+- `$remote_port` - Client port
 - `$remote_user` - Remote user (if authenticated)
 - `$time_local` - Local time
-- `$request` - Full request line
+- `$request` - Full request line (`$request_method $uri $server_protocol`)
+- `$request_method` - Request method (e.g., GET)
+- `$request_id` - The unique request ID
 - `$status` - Response status code
-- `$body_bytes_sent` - Response body size
+- `$body_bytes_sent` - Response body size in bytes
+- `$http_host` - The host from the request URI
 - `$http_referer` - Referer header
 - `$http_user_agent` - User-Agent header
-- `$request_time` - Total request processing time
-- `$upstream_response_time` - Upstream response time
+- `$request_time` - Total request processing time in milliseconds
+- `$server_addr` - The server address PingSIX listened on
+- `$server_protocol` - The request protocol (e.g., http/1.1)
+- `$uri` - The request URI path
+- `$query_string` - The request query string
+- `$error` - The error message if an error occurred
 
 ## Examples
 
@@ -1015,12 +1045,7 @@ routes:
         cache_http_statuses: [200, 301, 404]
         vary: ["Accept-Encoding"]
       gzip:
-        min_length: 1024
         comp_level: 6
-        types:
-          - "text/css"
-          - "application/javascript"
-          - "text/html"
   
   - id: "api-content"
     uri: /api/{*path}               # Catch-all for /api/* requests
@@ -1136,18 +1161,21 @@ global_rules:
     plugins:
       proxy-rewrite:
         headers:
-          X-Frame-Options: "DENY"
-          X-Content-Type-Options: "nosniff"
-          X-XSS-Protection: "1; mode=block"
-          Strict-Transport-Security: "max-age=31536000; includeSubDomains"
+          add:
+            - name: "X-Frame-Options"
+              value: "DENY"
+            - name: "X-Content-Type-Options"
+              value: "nosniff"
+            - name: "X-XSS-Protection"
+              value: "1; mode=block"
+            - name: "Strict-Transport-Security"
+              value: "max-age=31536000; includeSubDomains"
   
   - id: "monitoring"
     plugins:
       prometheus: {}
       file-logger:
-        path: /var/log/pingsix/access.log
-        format: '$remote_addr - [$time_local] "$request" $status $body_bytes_sent $request_time'
-```
+        log_format: '$remote_addr - [$time_local] "$request" $status $body_bytes_sent $request_time'```
 
 ## Troubleshooting
 
@@ -1207,18 +1235,10 @@ upstreams:
 **Problem**: Plugins not working as expected.
 
 **Solutions**:
-- Validate plugin configuration syntax
-- Check plugin execution order (priority)
-- Review plugin-specific requirements
-- Enable debug logging
-
-```yaml
-# Plugin debugging
-plugins:
-  file-logger:
-    path: /tmp/debug.log
-    format: 'Plugin Debug: $request_id $status $upstream_response_time'
-```
+- Validate plugin configuration syntax in `config.yaml`.
+- Check plugin execution order (priority).
+- Review plugin-specific requirements in this guide.
+- Check PingSIX startup logs for plugin-related errors.
 
 #### 4. SSL/TLS Issues
 
@@ -1235,11 +1255,11 @@ plugins:
 **Problem**: High latency or low throughput.
 
 **Solutions**:
-- Increase thread count in pingora configuration
-- Optimize upstream connection pooling
-- Enable compression for large responses
-- Use caching for frequently accessed content
-- Monitor resource usage (CPU, memory, network)
+- Increase thread count in `pingora` configuration to match CPU cores.
+- Optimize upstream connection pooling.
+- Enable compression for large responses.
+- Use caching for frequently accessed content.
+- Monitor resource usage (CPU, memory, network).
 
 ### Debug Configuration
 
@@ -1254,8 +1274,7 @@ global_rules:
   - id: "debug-logging"
     plugins:
       file-logger:
-        path: /var/log/pingsix/debug.log
-        format: 'DEBUG: $remote_addr $request_method $uri $status $request_time $upstream_addr $upstream_response_time'
+        log_format: 'DEBUG: $remote_addr $request_method $uri $status $request_time $error'
 ```
 
 ### Health Check Monitoring
