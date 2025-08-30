@@ -9,6 +9,8 @@ use pingora_core::{
     services::{background::BackgroundService, Service},
 };
 use tokio::sync::{broadcast, watch};
+use prometheus::{register_histogram, register_int_counter, Histogram, IntCounter};
+use std::time::Instant;
 
 /// 注册表更新事件
 #[derive(Debug, Clone)]
@@ -148,6 +150,29 @@ impl HealthCheckExecutor {
     pub async fn run(&self, registry: Arc<HealthCheckRegistry>, shutdown: ShutdownWatch) {
         info!("Starting health check executor");
 
+        // metrics
+        static HC_TASKS_STARTED: Lazy<IntCounter> = Lazy::new(|| {
+            register_int_counter!(
+                "pingsix_health_check_tasks_started_total",
+                "Number of health check tasks started"
+            )
+            .unwrap()
+        });
+        static HC_TASKS_ABORTED: Lazy<IntCounter> = Lazy::new(|| {
+            register_int_counter!(
+                "pingsix_health_check_tasks_aborted_total",
+                "Number of health check tasks aborted"
+            )
+            .unwrap()
+        });
+        static HC_LOOP_LATENCY: Lazy<Histogram> = Lazy::new(|| {
+            register_histogram!(
+                "pingsix_health_check_loop_interval_ms",
+                "Loop interval latency in ms"
+            )
+            .unwrap()
+        });
+
         // 直接从registry获取更新接收器，无需锁
         let mut update_receiver = registry.subscribe_updates();
 
@@ -176,6 +201,7 @@ impl HealthCheckExecutor {
         }
 
         loop {
+            let loop_start = Instant::now();
             // 检查是否需要关闭
             if *shutdown.borrow() {
                 info!("Health check executor received shutdown signal");
@@ -183,6 +209,7 @@ impl HealthCheckExecutor {
                 for (upstream_id, handle) in running_tasks {
                     debug!("Cancelling health check task for upstream '{upstream_id}'");
                     handle.abort();
+                    HC_TASKS_ABORTED.inc();
                 }
                 break;
             }
@@ -209,6 +236,7 @@ impl HealthCheckExecutor {
                             });
 
                             running_tasks.insert(task_id, handle);
+                            HC_TASKS_STARTED.inc();
                         }
                     }
                     RegistryUpdate::Removed(id) => {
@@ -217,6 +245,7 @@ impl HealthCheckExecutor {
                         if let Some(handle) = running_tasks.remove(&id) {
                             debug!("Stopping health check task for upstream '{id}'");
                             handle.abort();
+                            HC_TASKS_ABORTED.inc();
                         }
                     }
                 }
@@ -234,6 +263,8 @@ impl HealthCheckExecutor {
 
             // 短暂等待，避免忙等待
             tokio::time::sleep(Duration::from_millis(100)).await;
+            let elapsed_ms = loop_start.elapsed().as_millis() as f64;
+            HC_LOOP_LATENCY.observe(elapsed_ms);
         }
 
         info!("Health check executor stopped");

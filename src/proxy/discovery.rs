@@ -13,6 +13,8 @@ use pingora_load_balancing::{
     Backend,
 };
 use regex::Regex;
+use std::time::{Duration, Instant};
+use prometheus::{register_histogram_vec, HistogramVec};
 
 use super::{ProxyError, ProxyResult};
 use crate::config::{Upstream, UpstreamPassHost, UpstreamScheme};
@@ -20,9 +22,33 @@ use crate::config::{Upstream, UpstreamPassHost, UpstreamScheme};
 static GLOBAL_RESOLVER: OnceCell<Arc<TokioResolver>> = OnceCell::new();
 
 fn get_global_resolver() -> Arc<TokioResolver> {
-    GLOBAL_RESOLVER
-        .get_or_init(|| Arc::new(TokioResolver::builder_tokio().unwrap().build()))
-        .clone()
+    if let Some(r) = GLOBAL_RESOLVER.get() {
+        return r.clone();
+    }
+    // Build resolver without unwrap, fallback to system config, and if all fail, log and use a noop panic-on-use resolver is not viable.
+    match TokioResolver::builder_tokio().and_then(|b| b.build()) {
+        Ok(resolver) => {
+            let arc = Arc::new(resolver);
+            let _ = GLOBAL_RESOLVER.set(arc.clone());
+            arc
+        }
+        Err(e) => {
+            log::error!("Failed to build DNS resolver: {}", e);
+            // Try default from_system_conf
+            match TokioResolver::tokio_from_system_conf() {
+                Ok(resolver) => {
+                    let arc = Arc::new(resolver);
+                    let _ = GLOBAL_RESOLVER.set(arc.clone());
+                    arc
+                }
+                Err(e2) => {
+                    log::error!("Failed to init resolver from system conf: {}", e2);
+                    // As a last resort, panic to avoid undefined DNS behavior
+                    panic!("Unable to initialize DNS resolver");
+                }
+            }
+        }
+    }
 }
 
 /// DNS-based service discovery.
@@ -62,18 +88,30 @@ impl ServiceDiscovery for DnsDiscovery {
         let domain = self.domain.as_str();
         log::debug!("Resolving DNS for domain: {domain}");
 
-        let backends: BTreeSet<Backend> = self
-            .resolver
-            .lookup_ip(domain)
-            .await
-            .map_err(|e| {
+        let ips = match self.resolver.lookup_ip(domain).await {
+            Ok(ips) => ips,
+            Err(e) => {
                 log::warn!("DNS discovery failed for domain: {domain}: {e}");
-                Error::because(
+                return Err(Error::because(
                     InternalError,
                     format!("DNS discovery failed for domain: {domain}: {e}"),
                     e,
-                )
-            })?
+                ));
+            }
+        };
+
+        // Record resolution time per domain
+        static DNS_RESOLVE_MS: Lazy<HistogramVec> = Lazy::new(|| {
+            register_histogram_vec!(
+                "pingsix_dns_resolve_duration_ms",
+                "DNS resolve duration in ms",
+                &["domain"]
+            )
+            .unwrap()
+        });
+        let start = Instant::now();
+
+        let backends: BTreeSet<Backend> = ips
             .iter()
             .map(|ip| {
                 let addr = SocketAddr::new(ip, self.port as _).to_string();
@@ -91,11 +129,15 @@ impl ServiceDiscovery for DnsDiscovery {
                 }
 
                 // Insert HttpPeer into the backend
-                assert!(backend.ext.insert::<HttpPeer>(peer).is_none());
+                let _ = backend.ext.insert::<HttpPeer>(peer);
 
                 backend
             })
             .collect();
+
+        DNS_RESOLVE_MS
+            .with_label_values(&[domain])
+            .observe(start.elapsed().as_millis() as f64);
 
         // Return backends and an empty HashMap for now
         Ok((backends, HashMap::new()))

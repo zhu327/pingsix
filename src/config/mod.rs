@@ -281,6 +281,8 @@ pub struct Timeout {
     pub connect: u64,
     pub send: u64,
     pub read: u64,
+    #[serde(default)]
+    pub total: Option<u64>,
 }
 
 #[serde_as]

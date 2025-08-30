@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
@@ -10,6 +10,7 @@ use once_cell::sync::Lazy;
 use pingora_core::upstreams::peer::HttpPeer;
 use pingora_error::Result;
 use pingora_proxy::Session;
+use prometheus::{register_histogram_vec, register_int_counter_vec, HistogramVec, IntCounterVec};
 
 use crate::{
     config::{self, Identifiable},
@@ -134,11 +135,15 @@ impl ProxyRoute {
             connect,
             read,
             send,
+            ..
         }) = self.inner.timeout
         {
             p.options.connection_timeout = Some(Duration::from_secs(connect));
             p.options.read_timeout = Some(Duration::from_secs(read));
             p.options.write_timeout = Some(Duration::from_secs(send));
+            if let Some(total) = self.inner.timeout.as_ref().and_then(|t| t.total) {
+                p.options.total_connection_timeout = Some(Duration::from_secs(total));
+            }
         }
     }
 
@@ -316,22 +321,115 @@ pub static ROUTE_MAP: Lazy<DashMap<String, Arc<ProxyRoute>>> = Lazy::new(DashMap
 static GLOBAL_ROUTE_MATCH: Lazy<ArcSwap<MatchEntry>> =
     Lazy::new(|| ArcSwap::new(Arc::new(MatchEntry::default())));
 
+// Metrics for route matcher rebuild
+static ROUTE_REBUILD_DURATION_MS: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
+        "pingsix_matcher_rebuild_duration_ms",
+        "Duration of matcher rebuild in milliseconds",
+        &["type"]
+    )
+    .unwrap()
+});
+
+static ROUTE_REBUILD_RESULTS: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pingsix_matcher_rebuild_results_total",
+        "Results of matcher rebuilds",
+        &["type", "result"]
+    )
+    .unwrap()
+});
+
 pub fn global_route_match_fetch() -> Arc<MatchEntry> {
     GLOBAL_ROUTE_MATCH.load().clone()
 }
 
 pub fn reload_global_route_match() {
+    let start = Instant::now();
     let mut matcher = MatchEntry::default();
+    let mut failures: u64 = 0;
 
     for route in ROUTE_MAP.iter() {
         debug!("Inserting route: {}", route.inner.id);
         if let Err(e) = matcher.insert_route(route.clone()) {
             log::error!("Failed to insert route {}: {}", route.inner.id, e);
-            // Continue with other routes to avoid partial failures stopping the process
+            failures += 1;
         }
     }
 
     GLOBAL_ROUTE_MATCH.store(Arc::new(matcher));
+
+    let elapsed_ms = start.elapsed().as_millis() as f64;
+    ROUTE_REBUILD_DURATION_MS
+        .with_label_values(&["route"])
+        .observe(elapsed_ms);
+    if failures == 0 {
+        ROUTE_REBUILD_RESULTS
+            .with_label_values(&["route", "success"])
+            .inc();
+    } else {
+        ROUTE_REBUILD_RESULTS
+            .with_label_values(&["route", "partial_fail"])
+            .inc_by(failures as _);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{Route as CRoute, Upstream as CUpstream, SelectionType as CSelectionType, UpstreamScheme as CScheme, UpstreamPassHost as CPassHost};
+
+    fn make_route(id: &str, uri: &str, priority: u32) -> ProxyRoute {
+        let upstream = CUpstream {
+            id: "up1".to_string(),
+            retries: None,
+            retry_timeout: None,
+            timeout: None,
+            nodes: {
+                let mut m = std::collections::HashMap::new();
+                m.insert("127.0.0.1:80".to_string(), 1u32);
+                m
+            },
+            r#type: CSelectionType::RoundRobin,
+            checks: None,
+            hash_on: crate::config::UpstreamHashOn::VARS,
+            key: "uri".to_string(),
+            scheme: CScheme::HTTP,
+            pass_host: CPassHost::PASS,
+            upstream_host: None,
+        };
+
+        let route = CRoute {
+            id: id.to_string(),
+            uri: Some(uri.to_string()),
+            uris: vec![],
+            methods: vec![],
+            host: None,
+            hosts: vec![],
+            priority,
+            plugins: Default::default(),
+            upstream: Some(upstream),
+            upstream_id: None,
+            service_id: None,
+            timeout: None,
+        };
+
+        ProxyRoute::new_with_upstream_and_plugins(route).unwrap()
+    }
+
+    #[test]
+    fn test_priority_order_for_same_uri() {
+        let r1 = Arc::new(make_route("r-high", "/foo/:id", 10));
+        let r2 = Arc::new(make_route("r-low", "/foo/:id", 5));
+
+        let mut entry = MatchEntry::default();
+        entry.insert_route(r2.clone()).unwrap();
+        entry.insert_route(r1.clone()).unwrap();
+
+        // direct access to non_host_uri router
+        let res = MatchEntry::match_uri_method(&entry.non_host_uri, "/foo/123", "GET").unwrap();
+        assert_eq!(res.1.inner.id, "r-high");
+    }
 }
 
 /// Loads routes from the given configuration.

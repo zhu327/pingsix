@@ -230,6 +230,22 @@ cargo test
 cargo run -- -c config.yaml
 ```
 
+### Recent Security and Observability Updates
+
+- JWT (jwt-auth):
+  - ES256 keys now loaded via `DecodingKey::from_ec_pem`.
+  - RS256 keys via `from_rsa_pem`.
+  - Optional JWKS support with URL, TTL cache and timeout; resolves keys via `kid`.
+- Health check, Route, SSL matchers:
+  - Added Prometheus metrics for rebuild duration and results.
+- DNS discovery:
+  - Resolver initialization avoids unwrap and falls back to system conf.
+  - Added metrics for DNS resolve latency.
+- Upstream Host handling:
+  - Remove existing `Host` before set to avoid multi-value headers.
+- Timeouts:
+  - Added optional `total` in `Timeout` for total connection timeout.
+
 ### Creating Custom Plugins
 
 ```rust

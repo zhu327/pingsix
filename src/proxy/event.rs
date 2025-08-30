@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use etcd_client::{Event, GetResponse};
+use prometheus::{register_int_counter_vec, IntCounterVec};
 
 use crate::config::{
     etcd::{json_to_resource, EtcdEventHandler},
@@ -112,6 +113,15 @@ impl ProxyEventHandler {
         T: serde::de::DeserializeOwned + Clone + Identifiable,
         P: Identifiable + InnerComparable<T>,
     {
+        static LIST_RESULTS: once_cell::sync::Lazy<IntCounterVec> = once_cell::sync::Lazy::new(|| {
+            register_int_counter_vec!(
+                "pingsix_resource_list_results_total",
+                "Results of resource list operations",
+                &["type", "result"]
+            )
+            .unwrap()
+        });
+
         let resources: Vec<T> = response
             .kvs()
             .iter()
@@ -124,6 +134,7 @@ impl ProxyEventHandler {
                         }
                         Err(e) => {
                             log::error!("Failed to load etcd {key_type}: {id} {e}");
+                            LIST_RESULTS.with_label_values(&[key_type, "invalid"]).inc();
                             None
                         }
                     }
@@ -137,13 +148,14 @@ impl ProxyEventHandler {
             .filter_map(|resource| {
                 if let Some(proxy_res) = map.get(resource.id()) {
                     if proxy_res.inner_equals(resource) {
+                        LIST_RESULTS.with_label_values(&[key_type, "reuse"]).inc();
                         return Some(proxy_res.clone());
                     }
                 }
 
                 log::info!("Configuring {}: {}", key_type, resource.id());
                 match create_proxy(resource.clone()) {
-                    Ok(proxy) => Some(Arc::new(proxy)),
+                    Ok(proxy) => { LIST_RESULTS.with_label_values(&[key_type, "created"]).inc(); Some(Arc::new(proxy)) },
                     Err(e) => {
                         log::error!(
                             "Failed to create proxy for {} {}: {}",
@@ -151,6 +163,7 @@ impl ProxyEventHandler {
                             resource.id(),
                             e
                         );
+                        LIST_RESULTS.with_label_values(&[key_type, "failed"]).inc();
                         None
                     }
                 }
@@ -224,20 +237,45 @@ impl ProxyEventHandler {
         P: Identifiable + InnerComparable<T>,
         F: Fn(T) -> pingora_error::Result<P>,
     {
+        static EVENT_RESULTS: once_cell::sync::Lazy<IntCounterVec> = once_cell::sync::Lazy::new(|| {
+            register_int_counter_vec!(
+                "pingsix_resource_event_results_total",
+                "Results of resource event handling",
+                &["type", "result"]
+            )
+            .unwrap()
+        });
+
         let key = event.kv().unwrap().key();
         match parse_key(key) {
             Ok((id, parsed_key_type)) if parsed_key_type == key_type => {
                 match json_to_resource::<T>(event.kv().unwrap().value()) {
                     Ok(resource) => {
                         log::info!("Handling {key_type}: {id}");
-                        if let Ok(proxy) = create_proxy(resource) {
-                            map.insert_resource(Arc::new(proxy));
-                        } else {
-                            log::error!("Failed to create proxy for {key_type} {id}");
+                        // retry-once strategy for transient failures
+                        match create_proxy(resource.clone()) {
+                            Ok(proxy) => {
+                                map.insert_resource(Arc::new(proxy));
+                                EVENT_RESULTS.with_label_values(&[key_type, "created"]).inc();
+                            }
+                            Err(e1) => {
+                                log::warn!("Create proxy failed, retrying: {}", e1);
+                                match create_proxy(resource) {
+                                    Ok(proxy) => {
+                                        map.insert_resource(Arc::new(proxy));
+                                        EVENT_RESULTS.with_label_values(&[key_type, "created_retry"]).inc();
+                                    }
+                                    Err(e2) => {
+                                        log::error!("Failed to create proxy for {key_type} {id}: {}", e2);
+                                        EVENT_RESULTS.with_label_values(&[key_type, "failed"]).inc();
+                                    }
+                                }
+                            }
                         }
                     }
                     Err(e) => {
                         log::error!("Failed to deserialize resource of type {key_type}: {e}");
+                        EVENT_RESULTS.with_label_values(&[key_type, "invalid"]).inc();
                     }
                 }
             }
@@ -247,6 +285,7 @@ impl ProxyEventHandler {
                     key_type,
                     String::from_utf8_lossy(key)
                 );
+                EVENT_RESULTS.with_label_values(&[key_type, "ignored"]).inc();
             }
         }
     }

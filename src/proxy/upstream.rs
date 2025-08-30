@@ -131,9 +131,9 @@ impl ProxyUpstream {
     pub fn upstream_host_rewrite(&self, upstream_request: &mut RequestHeader) {
         if self.inner.pass_host == config::UpstreamPassHost::REWRITE {
             if let Some(host) = &self.inner.upstream_host {
-                upstream_request
-                    .insert_header(http::header::HOST, host)
-                    .unwrap();
+                // Remove existing Host to avoid multi-value
+                upstream_request.headers.remove(http::header::HOST);
+                let _ = upstream_request.insert_header(http::header::HOST, host);
             }
         }
     }
@@ -161,11 +161,15 @@ impl ProxyUpstream {
             connect,
             read,
             send,
+            ..
         }) = self.inner.timeout
         {
             p.options.connection_timeout = Some(Duration::from_secs(connect));
             p.options.read_timeout = Some(Duration::from_secs(read));
             p.options.write_timeout = Some(Duration::from_secs(send));
+            if let Some(total) = self.inner.timeout.as_ref().and_then(|t| t.total) {
+                p.options.total_connection_timeout = Some(Duration::from_secs(total));
+            }
         }
     }
 }

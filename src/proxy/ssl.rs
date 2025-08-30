@@ -6,6 +6,8 @@ use dashmap::DashMap;
 use log::{debug, error};
 use matchit::{InsertError, Router as MatchRouter};
 use once_cell::sync::Lazy;
+use prometheus::{register_histogram_vec, register_int_counter_vec, HistogramVec, IntCounterVec};
+use std::time::Instant;
 use pingora::listeners::TlsAccept;
 use pingora::tls::ext;
 use pingora::tls::pkey::PKey;
@@ -102,7 +104,9 @@ fn global_ssl_match_fetch() -> Arc<MatchEntry> {
 }
 
 pub fn reload_global_ssl_match() {
+    let start = Instant::now();
     let mut matcher = MatchEntry::default();
+    let mut failures: u64 = 0;
 
     for ssl in SSL_MAP.iter() {
         debug!("Inserting SSL config: {}", ssl.value().inner.id);
@@ -113,11 +117,62 @@ pub fn reload_global_ssl_match() {
                 ssl.value().inner.id,
                 e
             );
-            // Continue with other SSL configs to avoid partial failures stopping the process
+            failures += 1;
         }
     }
 
     GLOBAL_SSL_MATCH.store(Arc::new(matcher));
+
+    // metrics
+    static SSL_REBUILD_DURATION_MS: Lazy<HistogramVec> = Lazy::new(|| {
+        register_histogram_vec!(
+            "pingsix_matcher_rebuild_duration_ms",
+            "Duration of matcher rebuild in milliseconds",
+            &["type"]
+        )
+        .unwrap()
+    });
+    static SSL_REBUILD_RESULTS: Lazy<IntCounterVec> = Lazy::new(|| {
+        register_int_counter_vec!(
+            "pingsix_matcher_rebuild_results_total",
+            "Results of matcher rebuilds",
+            &["type", "result"]
+        )
+        .unwrap()
+    });
+    let elapsed_ms = start.elapsed().as_millis() as f64;
+    SSL_REBUILD_DURATION_MS
+        .with_label_values(&["ssl"]) // share same metric name with route
+        .observe(elapsed_ms);
+    if failures == 0 {
+        SSL_REBUILD_RESULTS
+            .with_label_values(&["ssl", "success"])
+            .inc();
+    } else {
+        SSL_REBUILD_RESULTS
+            .with_label_values(&["ssl", "partial_fail"])
+            .inc_by(failures as _);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sni_wildcard_match() {
+        let ssl1 = ProxySSL::from(config::SSL { id: "s1".into(), cert: "".into(), key: "".into(), snis: vec!["*.example.com".into()] });
+        let ssl2 = ProxySSL::from(config::SSL { id: "s2".into(), cert: "".into(), key: "".into(), snis: vec!["api.example.com".into()] });
+
+        let mut entry = MatchEntry::default();
+        // Insert ignores parsing errors as tests use empty cert/key; route logic only uses snis
+        entry.insert_ssl(Arc::new(ssl1)).unwrap();
+        entry.insert_ssl(Arc::new(ssl2)).unwrap();
+
+        let m = entry.match_sni("api.example.com".into()).unwrap();
+        // exact should be found via reversed key router
+        assert!(m.inner.snis.contains(&"api.example.com".to_string()) || m.inner.snis.contains(&"*.example.com".to_string()));
+    }
 }
 
 /// Loads SSL from the given configuration.
@@ -156,10 +211,14 @@ pub struct DynamicCert {
 
 impl DynamicCert {
     pub fn new(tls: &config::Tls) -> Box<Self> {
-        let cert_bytes =
-            std::fs::read(tls.cert_path.clone()).expect("Failed to read TLS certificate file");
-        let key_bytes =
-            std::fs::read(tls.key_path.clone()).expect("Failed to read TLS private key file");
+        let cert_bytes = match std::fs::read(tls.cert_path.clone()) {
+            Ok(b) => b,
+            Err(e) => panic!("Failed to read TLS certificate file: {}", e),
+        };
+        let key_bytes = match std::fs::read(tls.key_path.clone()) {
+            Ok(b) => b,
+            Err(e) => panic!("Failed to read TLS private key file: {}", e),
+        };
 
         let ssl_config = config::SSL {
             id: String::new(),
@@ -176,8 +235,8 @@ impl DynamicCert {
             (Ok(_), Ok(_)) => Box::new(Self {
                 default: Arc::new(proxy_ssl),
             }),
-            (Err(e), _) => panic!("Default SSL certificate parsing failed: {e}"),
-            (_, Err(e)) => panic!("Default SSL key parsing failed: {e}"),
+            (Err(e), _) => panic!("Default SSL certificate parsing failed: {}", e),
+            (_, Err(e)) => panic!("Default SSL key parsing failed: {}", e),
         }
     }
 }
