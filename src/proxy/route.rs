@@ -201,10 +201,21 @@ pub struct MatchEntry {
 
 impl MatchEntry {
     /// Helper method to get or compute reversed host string with caching
+    /// Converts wildcard patterns to matchit format for reversed hosts
     fn get_reversed_host(&self, host: &str) -> String {
         self.reversed_host_cache
             .entry(host.to_string())
-            .or_insert_with(|| host.chars().rev().collect())
+            .or_insert_with(|| {
+                if let Some(domain_part) = host.strip_prefix("*") {
+                    // Convert "*.example.com" to "moc.elpmaxe.{*subdomain}"
+                    // This allows matchit to match any subdomain suffix when reversed
+                    let reversed_domain: String = domain_part.chars().rev().collect();
+                    format!("{}{{*subdomain}}", reversed_domain)
+                } else {
+                    // For exact hosts, just reverse normally
+                    host.chars().rev().collect()
+                }
+            })
             .clone()
     }
 
@@ -240,18 +251,23 @@ impl MatchEntry {
             }
         } else {
             // Insert for host URIs
-            // Host strings are reversed to enable suffix/wildcard matching with matchit's prefix-based router
-            // (e.g., "*.example.com" becomes "moc.elpmaxe.*" for efficient matching)
+            // Host strings are processed for wildcard matching:
+            // - Exact hosts are reversed: "example.com" → "moc.elpmaxe"
+            // - Wildcard hosts are converted: "*.example.com" → "moc.elpmaxe.{*subdomain}"
+            // This enables efficient suffix matching using matchit's prefix-based router
             for host in hosts.iter() {
-                let reversed_host = self.get_reversed_host(host);
-                let inner_router = self.host_uris.at_mut(reversed_host.as_str());
+                let processed_host = self.get_reversed_host(host);
+                let inner_router = self.host_uris.at_mut(processed_host.as_str());
 
                 let inner_router = match inner_router {
                     Ok(router) => router.value,
                     Err(_) => {
                         let new_router = MatchRouter::new();
-                        self.host_uris.insert(reversed_host.clone(), new_router)?;
-                        self.host_uris.at_mut(reversed_host.as_str()).unwrap().value
+                        self.host_uris.insert(processed_host.clone(), new_router)?;
+                        self.host_uris
+                            .at_mut(processed_host.as_str())
+                            .unwrap()
+                            .value
                     }
                 };
 
@@ -276,9 +292,10 @@ impl MatchEntry {
         log::debug!("match request: host={host:?}, uri={uri:?}, method={method:?}");
 
         // Attempt to match using host_uris if a valid host is provided
-        // Host is reversed to match the format used during insertion (e.g., "moc.elpmaxe.*")
         if let Some(host_str) = host.filter(|h| !h.is_empty()) {
-            let reversed_host = self.get_reversed_host(host_str);
+            // Just reverse the host and let matchit handle the matching
+            // matchit will automatically match "moc.elpmaxe.ipa" against "moc.elpmaxe.{*subdomain}"
+            let reversed_host = host_str.chars().rev().collect::<String>();
             if let Ok(v) = self.host_uris.at(&reversed_host) {
                 if let Some(result) = Self::match_uri_method(v.value, uri, method) {
                     return Some(result);
@@ -363,4 +380,94 @@ pub fn load_static_routes(config: &config::Config) -> ProxyResult<()> {
     reload_global_route_match();
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_wildcard_host_processing() {
+        let match_entry = MatchEntry::default();
+
+        // Test wildcard host conversion
+        assert_eq!(
+            match_entry.get_reversed_host("*.example.com"),
+            "moc.elpmaxe.{*subdomain}"
+        );
+
+        // Test exact host conversion
+        assert_eq!(
+            match_entry.get_reversed_host("api.example.com"),
+            "moc.elpmaxe.ipa"
+        );
+
+        // Test subdomain extraction logic for matching
+        let test_host = "api.example.com";
+        if let Some(dot_pos) = test_host.find('.') {
+            let domain_part = &test_host[dot_pos + 1..];
+            let reversed_domain: String = domain_part.chars().rev().collect();
+            let wildcard_pattern = format!("{}.{{*subdomain}}", reversed_domain);
+
+            assert_eq!(domain_part, "example.com");
+            assert_eq!(reversed_domain, "moc.elpmaxe");
+            assert_eq!(wildcard_pattern, "moc.elpmaxe.{*subdomain}");
+        }
+
+        // Test complex subdomain cases
+        assert_eq!(
+            match_entry.get_reversed_host("*.api.example.com"),
+            "moc.elpmaxe.ipa.{*subdomain}"
+        );
+
+        // Test single level domain
+        assert_eq!(match_entry.get_reversed_host("*.com"), "moc.{*subdomain}");
+    }
+
+    #[test]
+    fn test_host_matching_patterns() {
+        // Test that the wildcard pattern matching logic works correctly
+        let match_entry = MatchEntry::default();
+
+        // Test that incoming hosts are simply reversed for matching
+        let incoming_host = "api.example.com";
+        let reversed_host: String = incoming_host.chars().rev().collect();
+        assert_eq!(reversed_host, "moc.elpmaxe.ipa");
+
+        // Wildcard pattern "*.example.com" becomes "moc.elpmaxe.{*subdomain}"
+        let wildcard_pattern = match_entry.get_reversed_host("*.example.com");
+        assert_eq!(wildcard_pattern, "moc.elpmaxe.{*subdomain}");
+
+        // matchit should be able to match "moc.elpmaxe.ipa" against "moc.elpmaxe.{*subdomain}"
+        // This test just verifies our pattern generation is correct
+    }
+
+    #[test]
+    fn test_matchit_wildcard_matching() {
+        // Test that matchit can actually match our patterns
+        use matchit::Router as MatchRouter;
+
+        let mut router = MatchRouter::new();
+
+        // Insert a wildcard pattern (simulating *.example.com)
+        router
+            .insert("moc.elpmaxe.{*subdomain}", "wildcard_route")
+            .unwrap();
+
+        // Insert an exact pattern
+        router.insert("moc.elpmaxe.ipa", "exact_route").unwrap();
+
+        // Test exact match takes priority
+        let result = router.at("moc.elpmaxe.ipa").unwrap();
+        assert_eq!(result.value, &"exact_route");
+
+        // Test wildcard matching
+        let result = router.at("moc.elpmaxe.ipa.bus").unwrap(); // sub.api.example.com
+        assert_eq!(result.value, &"wildcard_route");
+        assert_eq!(result.params.get("subdomain"), Some("ipa.bus"));
+
+        let result = router.at("moc.elpmaxe.v1").unwrap(); // v1.example.com
+        assert_eq!(result.value, &"wildcard_route");
+        assert_eq!(result.params.get("subdomain"), Some("v1"));
+    }
 }

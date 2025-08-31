@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use once_cell::sync::Lazy;
 use pingora_core::upstreams::peer::HttpPeer;
-use pingora_error::{Error, Result};
+use pingora_error::{Error, ErrorType, Result};
 use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_load_balancing::Backend;
 use pingora_proxy::Session;
@@ -86,6 +86,11 @@ pub enum ProxyError {
     Plugin(String),
     Internal(String),
     Pingora(pingora_error::Error),
+    /// A generic error variant that can hold any error with context
+    WithCause {
+        message: String,
+        cause: Box<dyn std::error::Error + Send + Sync>,
+    },
 }
 
 impl std::fmt::Display for ProxyError {
@@ -101,6 +106,7 @@ impl std::fmt::Display for ProxyError {
             ProxyError::Plugin(msg) => write!(f, "Plugin execution error: {msg}"),
             ProxyError::Internal(msg) => write!(f, "Internal error: {msg}"),
             ProxyError::Pingora(err) => write!(f, "Pingora error: {err}"),
+            ProxyError::WithCause { message, cause } => write!(f, "{message}: {cause}"),
         }
     }
 }
@@ -110,6 +116,7 @@ impl std::error::Error for ProxyError {
         match self {
             ProxyError::Network(err) => Some(err),
             ProxyError::Pingora(err) => Some(err),
+            ProxyError::WithCause { cause, .. } => Some(cause.as_ref()),
             _ => None,
         }
     }
@@ -131,23 +138,81 @@ impl From<ProxyError> for Box<pingora_error::Error> {
     fn from(err: ProxyError) -> Self {
         match err {
             ProxyError::Pingora(pingora_err) => Box::new(pingora_err),
-            ProxyError::Configuration(_) => pingora_error::Error::new_str("Configuration error"),
-            ProxyError::Network(_) => pingora_error::Error::new_str("Network error"),
-            ProxyError::DnsResolution(_) => pingora_error::Error::new_str("DNS resolution failed"),
-            ProxyError::HealthCheck(_) => pingora_error::Error::new_str("Health check failed"),
-            ProxyError::RouteMatching(_) => pingora_error::Error::new_str("Route matching failed"),
-            ProxyError::UpstreamSelection(_) => {
-                pingora_error::Error::new_str("Upstream selection failed")
+            ProxyError::Configuration(msg) => Error::explain(
+                ErrorType::InternalError,
+                format!("Configuration error: {}", msg),
+            ),
+            ProxyError::Network(io_err) => {
+                Error::because(ErrorType::ConnectError, "Network error", io_err)
             }
-            ProxyError::Ssl(_) => pingora_error::Error::new_str("SSL/TLS error"),
-            ProxyError::Plugin(_) => pingora_error::Error::new_str("Plugin execution error"),
-            ProxyError::Internal(_) => pingora_error::Error::new_str("Internal error"),
+            ProxyError::DnsResolution(msg) => Error::explain(
+                ErrorType::ConnectNoRoute,
+                format!("DNS resolution failed: {}", msg),
+            ),
+            ProxyError::HealthCheck(msg) => Error::explain(
+                ErrorType::InternalError,
+                format!("Health check failed: {}", msg),
+            ),
+            ProxyError::RouteMatching(msg) => Error::explain(
+                ErrorType::InternalError,
+                format!("Route matching failed: {}", msg),
+            ),
+            ProxyError::UpstreamSelection(msg) => Error::explain(
+                ErrorType::InternalError,
+                format!("Upstream selection failed: {}", msg),
+            ),
+            ProxyError::Ssl(msg) => Error::explain(
+                ErrorType::TLSHandshakeFailure,
+                format!("SSL/TLS error: {}", msg),
+            ),
+            ProxyError::Plugin(msg) => Error::explain(
+                ErrorType::InternalError,
+                format!("Plugin execution error: {}", msg),
+            ),
+            ProxyError::Internal(msg) => {
+                Error::explain(ErrorType::InternalError, format!("Internal error: {}", msg))
+            }
+            ProxyError::WithCause { message, cause } => {
+                Error::because(ErrorType::InternalError, message, cause)
+            }
         }
     }
 }
 
 /// Result type alias for proxy operations
 pub type ProxyResult<T> = std::result::Result<T, ProxyError>;
+
+impl ProxyError {
+    /// Create a new ProxyError with an underlying cause
+    pub fn with_cause<E, S>(message: S, cause: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+        S: Into<String>,
+    {
+        ProxyError::WithCause {
+            message: message.into(),
+            cause: Box::new(cause),
+        }
+    }
+
+    /// Create a configuration error with cause
+    pub fn config_error<E, S>(message: S, cause: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+        S: Into<String>,
+    {
+        ProxyError::with_cause(format!("Configuration error: {}", message.into()), cause)
+    }
+
+    /// Create a plugin error with cause
+    pub fn plugin_error<E, S>(message: S, cause: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+        S: Into<String>,
+    {
+        ProxyError::with_cause(format!("Plugin execution error: {}", message.into()), cause)
+    }
+}
 
 /// Helper trait for converting errors with context
 pub trait ErrorContext<T> {
