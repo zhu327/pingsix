@@ -10,21 +10,21 @@ use pingora_core::{
 };
 use tokio::sync::{broadcast, watch};
 
-/// 注册表更新事件
+/// Registry update event types
 #[derive(Debug, Clone)]
 pub enum RegistryUpdate {
     Added(String),
     Removed(String),
 }
 
-/// 已注册的upstream信息
+/// Registered upstream information
 struct RegisteredUpstream {
     load_balancer: Arc<dyn BackgroundService + Send + Sync>,
     shutdown_tx: watch::Sender<bool>,
     shutdown_rx: watch::Receiver<bool>,
 }
 
-/// 健康检查注册表 - 使用DashMap提供更好的并发性能
+/// Health check registry using DashMap for better concurrent performance
 pub struct HealthCheckRegistry {
     upstreams: DashMap<String, RegisteredUpstream>,
     update_notifier: broadcast::Sender<RegistryUpdate>,
@@ -45,7 +45,7 @@ impl HealthCheckRegistry {
         Self::default()
     }
 
-    /// 注册一个upstream的健康检查 - 无需可变引用，DashMap支持并发插入
+    /// Register upstream health check - no mutable reference needed, DashMap supports concurrent inserts
     pub fn register_upstream(
         &self,
         upstream_id: String,
@@ -61,7 +61,7 @@ impl HealthCheckRegistry {
 
         self.upstreams.insert(upstream_id.clone(), registered);
 
-        // 通知executor有新的upstream注册
+        // Notify executor of new upstream registration
         if let Err(e) = self
             .update_notifier
             .send(RegistryUpdate::Added(upstream_id.clone()))
@@ -73,15 +73,15 @@ impl HealthCheckRegistry {
         Ok(())
     }
 
-    /// 注销一个upstream的健康检查 - 无需可变引用，DashMap支持并发删除
+    /// Unregister upstream health check - no mutable reference needed, DashMap supports concurrent removes
     pub fn unregister_upstream(&self, upstream_id: &str) -> bool {
         if let Some((_, registered)) = self.upstreams.remove(upstream_id) {
-            // 发送关闭信号
+            // Send shutdown signal
             if let Err(e) = registered.shutdown_tx.send(true) {
                 warn!("Failed to send shutdown signal to upstream '{upstream_id}': {e}");
             }
 
-            // 通知executor
+            // Notify executor
             if let Err(e) = self
                 .update_notifier
                 .send(RegistryUpdate::Removed(upstream_id.to_string()))
@@ -115,7 +115,7 @@ impl HealthCheckRegistry {
         })
     }
 
-    /// 获取所有upstream的ID列表 - 使用DashMap的迭代器
+    /// Get all upstream ID list using DashMap iterator
     pub fn get_all_upstream_ids(&self) -> Vec<String> {
         self.upstreams
             .iter()
@@ -148,14 +148,14 @@ impl HealthCheckExecutor {
     pub async fn run(&self, registry: Arc<HealthCheckRegistry>, shutdown: ShutdownWatch) {
         info!("Starting health check executor");
 
-        // 直接从registry获取更新接收器，无需锁
+        // Get update receiver directly from registry, no lock needed
         let mut update_receiver = registry.subscribe_updates();
 
-        // 存储已启动的健康检查任务
+        // Store started health check tasks
         let mut running_tasks: std::collections::HashMap<String, tokio::task::JoinHandle<()>> =
             std::collections::HashMap::new();
 
-        // 启动已存在的upstream的健康检查
+        // Start health checks for existing upstreams
         for upstream_id in registry.get_all_upstream_ids() {
             if let Some((task_upstream_id, load_balancer, shutdown_rx)) =
                 registry.get_upstream_for_start(&upstream_id)
@@ -165,7 +165,7 @@ impl HealthCheckExecutor {
                 let handle = tokio::spawn(async move {
                     info!("Starting health check service for upstream '{task_upstream_id}'");
 
-                    // 直接调用 LoadBalancer 的 start 方法
+                    // Call LoadBalancer's start method directly
                     load_balancer.start(shutdown_rx).await;
 
                     info!("Health check service stopped for upstream '{task_upstream_id}'");
@@ -176,10 +176,10 @@ impl HealthCheckExecutor {
         }
 
         loop {
-            // 检查是否需要关闭
+            // Check if shutdown is requested
             if *shutdown.borrow() {
                 info!("Health check executor received shutdown signal");
-                // 取消所有运行中的任务
+                // Cancel all running tasks
                 for (upstream_id, handle) in running_tasks {
                     debug!("Cancelling health check task for upstream '{upstream_id}'");
                     handle.abort();
@@ -187,12 +187,12 @@ impl HealthCheckExecutor {
                 break;
             }
 
-            // 处理注册表更新事件
+            // Handle registry update events
             while let Ok(update) = update_receiver.try_recv() {
                 match update {
                     RegistryUpdate::Added(id) => {
                         debug!("Health check executor: upstream '{id}' added");
-                        // 启动新的健康检查任务 - 直接访问registry，无需锁
+                        // Start new health check task - direct registry access, no lock needed
                         if let Some((upstream_id, load_balancer, shutdown_rx)) =
                             registry.get_upstream_for_start(&id)
                         {
@@ -201,8 +201,8 @@ impl HealthCheckExecutor {
                             let handle = tokio::spawn(async move {
                                 info!("Starting health check service for upstream '{upstream_id}'");
 
-                                // LoadBalancer::start 是一个循环，会一直运行直到收到shutdown信号
-                                // LoadBalancer 内部会处理所有的并发控制和时间调度
+                                // LoadBalancer::start runs in a loop until shutdown signal received
+                                // LoadBalancer handles all concurrency control and timing internally
                                 load_balancer.start(shutdown_rx).await;
 
                                 info!("Health check service stopped for upstream '{upstream_id}'");
@@ -213,7 +213,7 @@ impl HealthCheckExecutor {
                     }
                     RegistryUpdate::Removed(id) => {
                         debug!("Health check executor: upstream '{id}' removed");
-                        // 停止对应的健康检查任务
+                        // Stop corresponding health check task
                         if let Some(handle) = running_tasks.remove(&id) {
                             debug!("Stopping health check task for upstream '{id}'");
                             handle.abort();
@@ -222,7 +222,7 @@ impl HealthCheckExecutor {
                 }
             }
 
-            // 清理已完成的任务
+            // Clean up completed tasks
             running_tasks.retain(|upstream_id, handle| {
                 if handle.is_finished() {
                     debug!("Health check task for upstream '{upstream_id}' has finished");
@@ -240,7 +240,7 @@ impl HealthCheckExecutor {
     }
 }
 
-/// 共享健康检查服务 - 移除RwLock，使用DashMap提供更好的并发性能
+/// Shared health check service using DashMap for better concurrent performance
 #[derive(Clone)]
 pub struct SharedHealthCheckService {
     registry: Arc<HealthCheckRegistry>,
@@ -261,7 +261,7 @@ impl SharedHealthCheckService {
         Self::default()
     }
 
-    /// 注册一个upstream的健康检查 - 无需锁，直接调用registry方法
+    /// Register upstream health check - no lock needed, call registry method directly
     pub fn register_upstream(
         &self,
         upstream_id: String,
@@ -270,7 +270,7 @@ impl SharedHealthCheckService {
         self.registry.register_upstream(upstream_id, load_balancer)
     }
 
-    /// 注销一个upstream的健康检查 - 无需锁，直接调用registry方法
+    /// Unregister upstream health check - no lock needed, call registry method directly
     pub fn unregister_upstream(&self, upstream_id: &str) -> bool {
         self.registry.unregister_upstream(upstream_id)
     }

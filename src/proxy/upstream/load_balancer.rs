@@ -56,7 +56,7 @@ impl Identifiable for ProxyUpstream {
 }
 
 impl ProxyUpstream {
-    /// 创建一个使用共享健康检查服务的ProxyUpstream
+    /// Creates a ProxyUpstream that uses the shared health check service
     pub fn new_with_shared_health_check(upstream: config::Upstream) -> ProxyResult<Self> {
         let mut proxy_upstream = ProxyUpstream {
             inner: upstream.clone(),
@@ -65,7 +65,7 @@ impl ProxyUpstream {
             })?,
         };
 
-        // 注册到共享健康检查服务
+        // Register with shared health check service
         proxy_upstream
             .register_health_check()
             .with_context(&format!(
@@ -76,9 +76,9 @@ impl ProxyUpstream {
         Ok(proxy_upstream)
     }
 
-    /// 注册健康检查到共享服务
+    /// Register health check with shared service
     fn register_health_check(&mut self) -> ProxyResult<()> {
-        // 直接获取 LoadBalancer 的 Arc 引用
+        // Get direct Arc reference to the LoadBalancer
         let load_balancer: Arc<
             dyn pingora_core::services::background::BackgroundService + Send + Sync,
         > = match &self.lb {
@@ -90,7 +90,7 @@ impl ProxyUpstream {
 
         let upstream_id = self.inner.id.clone();
 
-        // 注册到共享服务
+        // Register with shared health check service
         SHARED_HEALTH_CHECK_SERVICE
             .register_upstream(upstream_id.clone(), load_balancer)
             .map_err(|e| {
@@ -105,7 +105,7 @@ impl ProxyUpstream {
         Ok(())
     }
 
-    /// 停止健康检查服务
+    /// Stop health check service for this upstream
     fn stop_health_check(&mut self) {
         let upstream_id = self.id();
         SHARED_HEALTH_CHECK_SERVICE.unregister_upstream(upstream_id);
@@ -128,7 +128,7 @@ impl ProxyUpstream {
 }
 
 impl Drop for ProxyUpstream {
-    /// 停止健康检查服务
+    /// Stop health check service when upstream is dropped
     fn drop(&mut self) {
         self.stop_health_check();
     }

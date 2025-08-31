@@ -1,4 +1,4 @@
-//! Core module containing fundamental types and utilities for the pingsix proxy.
+//! Core components for the Pingsix proxy.
 //!
 //! This module provides the essential building blocks for the proxy system:
 //! - Error handling and result types
@@ -30,16 +30,16 @@ use serde_json::Value as JsonValue;
 
 /// Abstract trait for upstream backend selection
 ///
-/// This trait provides a decoupled interface for backend selection without
-/// depending on specific upstream implementations.
+/// Decouples route logic from specific upstream implementations, enabling
+/// different load balancing strategies and upstream configurations.
 pub trait UpstreamSelector: Send + Sync {
     /// Select a backend for the given session
-    fn select_backend<'a>(&'a self, session: &'a mut Session) -> Option<Backend>;
+    fn select_backend(&self, session: &mut Session) -> Option<Backend>;
 
     /// Get the number of retries configured for this upstream
     fn get_retries(&self) -> Option<usize>;
 
-    /// Get the retry timeout configured for this upstream  
+    /// Get the retry timeout configured for this upstream
     fn get_retry_timeout(&self) -> Option<u64>;
 
     /// Rewrite the upstream host in the request header if needed
@@ -60,7 +60,7 @@ pub trait RouteContext: Send + Sync {
     fn service_id(&self) -> Option<&str>;
 
     /// Select an HTTP peer for the route
-    fn select_http_peer<'a>(&'a self, session: &'a mut Session) -> ProxyResult<Box<HttpPeer>>;
+    fn select_http_peer(&self, session: &mut Session) -> ProxyResult<Box<HttpPeer>>;
 
     /// Build plugin executor for this route
     fn build_plugin_executor(&self) -> Arc<ProxyPluginExecutor>;
@@ -74,6 +74,8 @@ pub trait RouteContext: Send + Sync {
 // =============================================================================
 
 /// Unified error types for the pingsix proxy.
+///
+/// Provides context-aware error handling with chaining support for better debugging.
 #[derive(Debug)]
 pub enum ProxyError {
     Configuration(String),
@@ -236,6 +238,8 @@ where
 pub type PluginCreateFn = fn(JsonValue) -> Result<Arc<dyn ProxyPlugin>>;
 
 /// The core plugin trait that defines the lifecycle hooks for proxy plugins.
+///
+/// Plugin execution follows APISIX's phase model for consistency with existing ecosystems.
 #[async_trait]
 pub trait ProxyPlugin: Send + Sync {
     /// Return the name of this plugin
@@ -244,11 +248,11 @@ pub trait ProxyPlugin: Send + Sync {
     /// Return the priority of this plugin
     fn priority(&self) -> i32;
 
-    /// Handle the incoming request.
+    /// Handle the incoming request in the access phase.
     ///
-    /// In this phase, users can parse, validate, rate limit, perform access control and/or
-    /// return a response for this request.
-    /// Like APISIX rewrite access phase.
+    /// Use this phase for: request validation, authentication, rate limiting,
+    /// access control, and early response generation.
+    /// Corresponds to APISIX's rewrite/access phase.
     async fn request_filter(
         &self,
         _session: &mut Session,
@@ -257,7 +261,10 @@ pub trait ProxyPlugin: Send + Sync {
         Ok(false)
     }
 
-    /// Handle the incoming request before any downstream module is executed.
+    /// Handle the incoming request before any downstream processing.
+    ///
+    /// Use this for early request inspection and modification before
+    /// core proxy logic executes.
     async fn early_request_filter(
         &self,
         _session: &mut Session,
@@ -268,7 +275,9 @@ pub trait ProxyPlugin: Send + Sync {
 
     /// Modify the request before it is sent to the upstream
     ///
-    /// Like APISIX before_proxy phase.
+    /// Use this for: adding authentication headers, request transformation,
+    /// and upstream-specific modifications.
+    /// Corresponds to APISIX's before_proxy phase.
     async fn upstream_request_filter(
         &self,
         _session: &mut Session,
@@ -280,7 +289,8 @@ pub trait ProxyPlugin: Send + Sync {
 
     /// Modify the response header before it is sent to the downstream
     ///
-    /// Like APISIX header_filter phase.
+    /// Use this for: adding security headers, CORS handling, and response transformation.
+    /// Corresponds to APISIX's header_filter phase.
     async fn response_filter(
         &self,
         _session: &mut Session,
@@ -292,7 +302,8 @@ pub trait ProxyPlugin: Send + Sync {
 
     /// Handle the response body chunks
     ///
-    /// Like APISIX body_filter phase.
+    /// Use this for: content compression, body transformation, and filtering.
+    /// Corresponds to APISIX's body_filter phase.
     fn response_body_filter(
         &self,
         _session: &mut Session,
@@ -303,18 +314,18 @@ pub trait ProxyPlugin: Send + Sync {
         Ok(())
     }
 
-    /// This filter is called when the entire response is sent to the downstream successfully or
-    /// there is a fatal error that terminate the request.
+    /// Called after the complete response is sent or on fatal error.
     ///
-    /// An error log is already emitted if there is any error. This phase is used for collecting
-    /// metrics and sending access logs.
+    /// Use this for: metrics collection, access logging, cleanup operations.
+    /// Error logging is already handled by the framework.
     async fn logging(&self, _session: &mut Session, _e: Option<&Error>, _ctx: &mut ProxyContext) {}
 }
 
-/// Utility function for constant-time string comparison
+/// Constant-time string comparison to prevent timing attacks.
+///
+/// Used primarily for secret/token comparison in authentication plugins.
 pub fn constant_time_eq(a: &str, b: &str) -> bool {
-    // Simple constant-time comparison implementation
-    // For production use, consider adding the `subtle` crate dependency
+    // Early return for different lengths is safe from timing attacks
     if a.len() != b.len() {
         return false;
     }
@@ -326,36 +337,38 @@ pub fn constant_time_eq(a: &str, b: &str) -> bool {
     result == 0
 }
 
-/// Applies regex-based URI rewriting based on provided precompiled patterns.
+/// Applies regex-based URI rewriting using precompiled patterns.
+///
+/// Patterns are applied in order until first match. This enables implementing
+/// complex routing rules, redirects, and URL transformations efficiently.
 ///
 /// # Arguments
 /// - `uri`: The input URI to be rewritten.
-/// - `regex_patterns`: A slice of tuples containing precompiled `Regex` objects and their corresponding replacement templates.
+/// - `regex_patterns`: Precompiled regex patterns with replacement templates.
 ///
 /// # Returns
-/// - `String`: The rewritten URI if a pattern matches, or the original URI if no match is found.
+/// The rewritten URI if a pattern matches, otherwise the original URI.
 ///
-/// # Notes
-/// - The regex patterns are precompiled during plugin creation (e.g., in `proxy_rewrite` or `redirect` plugins)
-///   to avoid repeated compilation overhead.
-/// - This function assumes that the regex patterns are valid, as they are validated during plugin configuration.
+/// # Performance Notes
+/// Regex patterns are precompiled during plugin initialization to avoid
+/// per-request compilation overhead in high-traffic scenarios.
 pub fn apply_regex_uri_template(uri: &str, regex_patterns: &[(Regex, String)]) -> String {
     for (re, redirect_template) in regex_patterns {
         if let Some(captures) = re.captures(uri) {
-            // Generate new URI by replacing capture groups in the template
+            // Build new URI by substituting capture groups into template
             let redirect_uri = captures
                 .iter()
                 .skip(1) // Skip the full match
                 .enumerate()
                 .fold(redirect_template.to_string(), |acc, (i, capture)| {
-                    // Replace $1, $2, ... with capture groups
+                    // Replace $1, $2, ... with actual capture group values
                     acc.replace(&format!("${}", i + 1), capture.unwrap().as_str())
                 });
             return redirect_uri;
         }
     }
 
-    // If no match, return original URI
+    // Return original URI if no patterns match
     uri.to_string()
 }
 
@@ -363,32 +376,22 @@ pub fn apply_regex_uri_template(uri: &str, regex_patterns: &[(Regex, String)]) -
 // PLUGIN EXECUTOR
 // =============================================================================
 
-/// Default empty plugin executor for new ProxyContext.
+/// Shared empty plugin executor instance to avoid allocations for routes without plugins.
 static DEFAULT_PLUGIN_EXECUTOR: Lazy<Arc<ProxyPluginExecutor>> =
     Lazy::new(|| Arc::new(ProxyPluginExecutor::default()));
 
-/// A struct that manages the execution of proxy plugins.
+/// Manages execution of multiple plugins in priority order.
 ///
-/// # Fields
-/// - `plugins`: A vector of reference-counted pointers to `ProxyPlugin` instances.
-///   These plugins are executed in the order of their priorities, typically determined
-///   during the construction of the `ProxyPluginExecutor`.
-///
-/// # Purpose
-/// - This struct is responsible for holding and managing a collection of proxy plugins.
-/// - It is typically used to facilitate the execution of plugins in a proxy routing context,
-///   where plugins can perform various tasks such as authentication, logging, traffic shaping, etc.
-///
-/// # Usage
-/// - The plugins are expected to be sorted by their priority (in descending order) during
-///   the initialization of the `ProxyPluginExecutor`.
+/// Plugins are sorted by priority (higher numbers execute first) to ensure
+/// critical plugins like auth and rate limiting run before others.
+/// Uses Arc for efficient sharing across multiple concurrent requests.
 #[derive(Default)]
 pub struct ProxyPluginExecutor {
     pub plugins: Vec<Arc<dyn ProxyPlugin>>,
 }
 
 impl ProxyPluginExecutor {
-    /// Get the default empty plugin executor
+    /// Returns shared empty executor instance to minimize memory allocation.
     pub fn default_shared() -> Arc<Self> {
         DEFAULT_PLUGIN_EXECUTOR.clone()
     }
@@ -476,7 +479,10 @@ impl ProxyPlugin for ProxyPluginExecutor {
 // PROXY CONTEXT
 // =============================================================================
 
-/// Holds the context for each proxy request.
+/// Request-scoped context shared across all plugin phases.
+///
+/// Contains routing information, retry state, and plugin-specific data.
+/// The vars field enables plugins to share data across different execution phases.
 pub struct ProxyContext {
     /// The matched proxy route, if any.
     pub route: Option<Arc<dyn RouteContext>>,
@@ -494,7 +500,7 @@ pub struct ProxyContext {
 
 impl Default for ProxyContext {
     fn default() -> Self {
-        // Initialize vars and insert request_start timestamp
+        // Pre-populate with request timestamp for performance metrics
         let mut vars: HashMap<String, Box<dyn Any + Send + Sync>> = HashMap::new();
         vars.insert("request_start".to_string(), Box::new(Instant::now()));
 
@@ -510,22 +516,22 @@ impl Default for ProxyContext {
 }
 
 impl ProxyContext {
-    /// Store a typed value into the context.
+    /// Store a typed value into the context for inter-plugin communication.
     pub fn set<T: Any + Send + Sync>(&mut self, key: impl Into<String>, value: T) {
         self.vars.insert(key.into(), Box::new(value));
     }
 
-    /// Get a typed reference from the context.
+    /// Get a typed reference from the context with type safety.
     pub fn get<T: Any>(&self, key: &str) -> Option<&T> {
         self.vars.get(key).and_then(|v| v.downcast_ref::<T>())
     }
 
-    /// Get a string slice if the stored value is a `String`.
+    /// Convenience method for string values to avoid repeated type annotation.
     pub fn get_str(&self, key: &str) -> Option<&str> {
         self.get::<String>(key).map(|s| s.as_str())
     }
 
-    /// Check if a key exists in the context.
+    /// Check if a key exists without retrieving the value.
     pub fn contains(&self, key: &str) -> bool {
         self.vars.contains_key(key)
     }

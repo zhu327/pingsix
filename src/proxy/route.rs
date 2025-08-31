@@ -25,14 +25,15 @@ use super::{
     MapOperations,
 };
 
-/// Proxy route.
+/// Proxy route with upstream and plugin configuration.
 ///
-/// Manages routing of requests to appropriate proxy load balancers.
+/// Routes are compiled at startup and cached for high-performance request matching.
+/// Plugin executors are pre-built to avoid per-request overhead.
 pub struct ProxyRoute {
     pub inner: config::Route,
     pub upstream: Option<Arc<ProxyUpstream>>,
     pub plugins: Vec<Arc<dyn ProxyPlugin>>,
-    /// Cached plugin executor to avoid rebuilding on each request
+    /// Pre-built plugin executor to avoid repeated construction during request processing
     cached_plugin_executor: once_cell::sync::OnceCell<Arc<ProxyPluginExecutor>>,
 }
 
@@ -102,7 +103,7 @@ impl RouteContext for ProxyRoute {
         self.inner.service_id.as_deref()
     }
 
-    fn select_http_peer<'a>(&'a self, session: &'a mut Session) -> ProxyResult<Box<HttpPeer>> {
+    fn select_http_peer(&self, session: &mut Session) -> ProxyResult<Box<HttpPeer>> {
         let upstream = self.resolve_upstream().ok_or_else(|| {
             ProxyError::UpstreamSelection(
                 "Failed to retrieve upstream configuration for route".to_string(),

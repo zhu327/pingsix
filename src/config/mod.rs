@@ -17,14 +17,14 @@ use serde_json::Value as JsonValue;
 use serde_with::{serde_as, DisplayFromStr};
 use validator::{Validate, ValidationError};
 
-// Compiled regex for validating upstream node keys (IPv4, IPv6, or domain names)
+// Pre-compiled regex for upstream node validation to avoid per-request compilation overhead
 static NODE_KEY_REGEX: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
         r"(?i)^(?:(?:\d{1,3}\.){3}\d{1,3}|\[[0-9a-f:]+\]|[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*)(?::\d+)?$"
     ).expect("Invalid regex pattern for node key validation")
 });
 
-/// Trait for types with an ID field, used for unique ID validation.
+/// Enables uniform ID handling across configuration entities for validation.
 pub trait Identifiable {
     fn id(&self) -> &str;
     fn set_id(&mut self, id: String);
@@ -50,20 +50,20 @@ impl_identifiable!(Service);
 impl_identifiable!(GlobalRule);
 impl_identifiable!(SSL);
 
-/// Pingsix core config
+/// Root configuration structure combining Pingora framework config with Pingsix-specific settings.
 #[serde_as]
 #[derive(Default, Debug, Serialize, Deserialize, Validate)]
 #[validate(schema(function = "Config::validate_resource_id"))]
 pub struct Config {
-    /// pingora framework config
+    /// Pingora framework configuration (workers, logging, etc.)
     #[serde(default)]
     pub pingora: ServerConf,
 
-    /// pingsix base config
+    /// Pingsix-specific configuration (listeners, etcd, plugins, etc.)
     #[validate(nested)]
     pub pingsix: Pingsix,
 
-    // static resource config
+    // Static resource definitions - used when etcd is not configured
     #[validate(nested)]
     #[serde(default)]
     pub routes: Vec<Route>,
@@ -81,9 +81,12 @@ pub struct Config {
     pub ssls: Vec<SSL>,
 }
 
-// Config file load and validation
+// Configuration loading and validation methods
 impl Config {
-    // Does not have to be async until we want runtime reload
+    /// Loads configuration from YAML file with comprehensive validation.
+    ///
+    /// Synchronous loading is intentional - configuration should be validated
+    /// at startup before any async operations begin.
     pub fn load_from_yaml<P>(path: P) -> Result<Self>
     where
         P: AsRef<std::path::Path> + std::fmt::Display,
@@ -95,7 +98,7 @@ impl Config {
         Self::from_yaml(&conf_str)
     }
 
-    // config file load entry point
+    /// Main configuration loading entry point that combines file config with CLI overrides.
     pub fn load_yaml_with_opt_override(opt: &Opt) -> Result<Self> {
         if let Some(path) = &opt.conf {
             let mut conf = Self::load_from_yaml(path)?;
@@ -106,6 +109,7 @@ impl Config {
         }
     }
 
+    /// Parses YAML configuration string with comprehensive validation.
     pub fn from_yaml(conf_str: &str) -> Result<Self> {
         trace!("Read conf file: {conf_str}");
         let conf: Config = serde_yaml::from_str(conf_str).or_err_with(ReadError, || {
@@ -114,11 +118,11 @@ impl Config {
 
         trace!("Loaded conf: {conf:?}");
 
-        // Use validator to validate conf file
+        // Validate configuration structure and constraints
         conf.validate()
             .or_err_with(FileReadError, || "Conf file validation failed")?;
 
-        // Validate unique IDs
+        // Ensure all resource IDs are unique within their respective types
         Self::validate_unique_ids(&conf.routes, "route")
             .or_err_with(FileReadError, || "Route ID validation failed")?;
         Self::validate_unique_ids(&conf.upstreams, "upstream")
@@ -133,6 +137,7 @@ impl Config {
         Ok(conf)
     }
 
+    /// Serializes configuration back to YAML format for debugging or export.
     #[allow(dead_code)]
     pub fn to_yaml(&self) -> String {
         serde_yaml::to_string(self).unwrap_or_else(|e| {
@@ -141,6 +146,7 @@ impl Config {
         })
     }
 
+    /// Applies CLI option overrides to loaded configuration.
     pub fn merge_with_opt(&mut self, opt: &Opt) {
         if opt.daemon {
             self.pingora.daemon = true;

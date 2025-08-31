@@ -233,7 +233,7 @@ pub fn json_to_resource<T>(value: &[u8]) -> Result<T, Box<dyn Error>>
 where
     T: serde::de::DeserializeOwned,
 {
-    // 直接、高效地从JSON字节反序列化
+    // Direct, efficient deserialization from JSON bytes
     let resource: T = serde_json::from_slice(value)?;
     Ok(resource)
 }

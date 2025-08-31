@@ -23,7 +23,10 @@ use serde_json::Value as JsonValue;
 
 use crate::core::{PluginCreateFn, ProxyPlugin};
 
-/// Registry of plugin builders
+/// Global registry mapping plugin names to their factory functions.
+///
+/// Plugins are registered with their priority values as comments for reference.
+/// Higher priority values execute earlier in the plugin chain.
 static PLUGIN_BUILDER_REGISTRY: Lazy<HashMap<&'static str, PluginCreateFn>> = Lazy::new(|| {
     let arr: Vec<(&str, PluginCreateFn)> = vec![
         (
@@ -63,21 +66,20 @@ static PLUGIN_BUILDER_REGISTRY: Lazy<HashMap<&'static str, PluginCreateFn>> = La
     arr.into_iter().collect()
 });
 
-/// Builds a plugin instance based on its name and configuration.
+/// Creates plugin instances from configuration using a factory pattern.
+///
+/// Looks up the plugin builder function in the global registry and invokes it
+/// with the provided configuration. Fails fast for unknown plugin types.
 ///
 /// # Arguments
-/// - `name`: The name of the plugin to be created.
-/// - `cfg`: The configuration for the plugin, provided as a `YamlValue`.
+/// - `name`: Plugin identifier (must match registry keys)
+/// - `cfg`: Plugin configuration as JSON
 ///
 /// # Returns
-/// - `Result<Arc<dyn ProxyPlugin>>`: On success, returns a reference-counted pointer to the created plugin instance.
-///   On failure, returns an error.
+/// Arc-wrapped plugin instance for thread-safe sharing across requests
 ///
 /// # Errors
-/// - `ReadError`: Returned if the plugin name is not found in the `PLUGIN_BUILDER_REGISTRY`.
-///
-/// # Notes
-/// - This function retrieves the appropriate plugin builder from a global registry and invokes it with the provided configuration.
+/// Returns `ReadError` for unknown plugin names or configuration parsing failures
 pub fn build_plugin(name: &str, cfg: JsonValue) -> Result<Arc<dyn ProxyPlugin>> {
     let builder = PLUGIN_BUILDER_REGISTRY
         .get(name)

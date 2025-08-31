@@ -33,16 +33,16 @@ use crate::{
 };
 
 // --- START: Global Cache Infrastructure ---
-// 1. 缓存后端: 使用内存缓存
+// 1. Cache backend: In-memory cache for high performance
 static CACHE_BACKEND: Lazy<MemCache> = Lazy::new(MemCache::new);
 
-// 2. 默认缓存元数据: 默认不缓存，除非上游显式指定
+// 2. Default cache metadata: No caching by default unless explicitly configured
 const CACHE_DEFAULT: CacheMetaDefaults = CacheMetaDefaults::new(|_| None, 0, 0);
 
-// 3. 驱逐管理器: 根据服务器内存调整，这里以 512MB 为例
+// 3. Eviction manager: Adjust based on server memory, using 512MB as example
 static EVICTION_MANAGER: Lazy<Manager> = Lazy::new(|| Manager::new(512 * 1024 * 1024));
 
-// 4. 缓存锁: 超时时间应略大于上游 P99 响应时间
+// 4. Cache lock: Timeout should be slightly larger than upstream P99 response time
 static CACHE_LOCK: Lazy<Box<CacheKeyLockImpl>> =
     Lazy::new(|| CacheLock::new_boxed(Duration::from_secs(5)));
 // --- END: Global Cache Infrastructure ---
@@ -214,7 +214,7 @@ impl ProxyHttp for HttpService {
     }
 
     fn request_cache_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<()> {
-        // 检查缓存绕过头部
+        // Check for cache bypass headers
         if session.req_header().headers.contains_key("x-bypass-cache")
             || session.req_header().headers.contains_key("cache-control")
                 && session
@@ -229,11 +229,11 @@ impl ProxyHttp for HttpService {
             return Ok(());
         }
 
-        // 检查是否存在 CacheSettings
+        // Check for cache settings from plugin configuration
         if let Some(settings) = ctx.get::<Arc<CacheSettings>>(CTX_KEY_CACHE_SETTINGS) {
             log::debug!("Cache settings found, enabling Pingora cache.");
 
-            // 启用缓存
+            // Enable caching with configured backend and eviction manager
             session.cache.enable(
                 &*CACHE_BACKEND,
                 Some(
@@ -245,7 +245,7 @@ impl ProxyHttp for HttpService {
                 None,
             );
 
-            // 设置最大文件大小（如果配置了的话）
+            // Set maximum file size if configured
             if settings.max_file_size_bytes > 0 {
                 session
                     .cache
@@ -265,7 +265,7 @@ impl ProxyHttp for HttpService {
         ctx: &mut Self::CTX,
         req: &RequestHeader,
     ) -> Option<HashBinary> {
-        // 只有在缓存设置存在时才处理Vary
+        // Only process Vary headers when cache settings are present
         if let Some(settings) = ctx.get::<Arc<CacheSettings>>(CTX_KEY_CACHE_SETTINGS) {
             let mut key = VarianceBuilder::new();
             let mut vary_headers: HashSet<String> = HashSet::new();
@@ -371,19 +371,19 @@ impl ProxyHttp for HttpService {
     }
 }
 
-/// 确保 CacheControl 有 max-age，如果没有则添加默认 TTL
+/// Ensures CacheControl has max-age set, adding default TTL if missing
 fn ensure_max_age(cc: Option<CacheControl>, settings: &CacheSettings) -> Option<CacheControl> {
     match cc {
         Some(existing_cc) => {
-            // 检查是否已经有 max-age
+            // Check if max-age is already present
             if existing_cc.max_age().unwrap_or(None).is_some() {
                 return Some(existing_cc);
             }
 
-            // 需要添加 max-age，复制现有指令
+            // Need to add max-age, copy existing directives
             let mut directives = DirectiveMap::with_capacity(existing_cc.directives.len() + 1);
 
-            // 复制现有指令（除了 max-age）
+            // Copy existing directives (excluding max-age)
             for (key, value) in &existing_cc.directives {
                 if key != "max-age" {
                     let cloned_value = value.as_ref().map(|val| DirectiveValue(val.0.clone()));
@@ -391,14 +391,14 @@ fn ensure_max_age(cc: Option<CacheControl>, settings: &CacheSettings) -> Option<
                 }
             }
 
-            // 添加 max-age 指令
+            // Add max-age directive
             let max_age_value = DirectiveValue(settings.ttl.as_secs().to_string().into_bytes());
             directives.insert("max-age".to_string(), Some(max_age_value));
 
             Some(CacheControl { directives })
         }
         None => {
-            // 没有 Cache-Control 头，创建只包含 max-age 的新实例
+            // No Cache-Control header, create new instance with max-age only
             let mut directives = DirectiveMap::with_capacity(1);
             let max_age_value = DirectiveValue(settings.ttl.as_secs().to_string().into_bytes());
             directives.insert("max-age".to_string(), Some(max_age_value));

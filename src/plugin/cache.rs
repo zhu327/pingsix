@@ -16,11 +16,13 @@ use crate::core::{ProxyContext, ProxyPlugin};
 pub const PLUGIN_NAME: &str = "cache";
 const PRIORITY: i32 = 1085;
 
-// 上下文中所使用的KEY
+// Context key for sharing cache settings between plugin and HttpService
 pub const CTX_KEY_CACHE_SETTINGS: &str = "pingsix_cache_settings";
 
-/// 这是插件和 HttpService 之间的通信契约
-/// 它是一个轻量级的数据结构，只包含缓存决策所需的信息
+/// Lightweight cache configuration passed to HttpService.
+///
+/// This serves as a communication contract between the cache plugin and the HTTP service,
+/// containing only the essential information needed for caching decisions during request processing.
 #[derive(Clone)]
 pub struct CacheSettings {
     pub ttl: Duration,
@@ -53,7 +55,8 @@ pub struct PluginConfig {
     #[serde(default)]
     pub hide_cache_headers: bool,
 
-    /// 最大缓存文件大小（字节），0 表示无限制
+    /// Maximum cacheable response size in bytes. Zero means no limit.
+    /// Used to prevent memory exhaustion from caching large responses.
     #[serde(default)]
     pub max_file_size_bytes: usize,
 }
@@ -97,7 +100,7 @@ fn validate_regexes(patterns: &[String]) -> Result<(), ValidationError> {
 pub struct PluginCache {
     methods: HashSet<Method>,
     no_cache_regex: Vec<Regex>,
-    // 预编译共享的设置，避免在每个请求中都创建
+    // Pre-compiled shared settings to avoid recreation on each request
     cache_settings: Arc<CacheSettings>,
 }
 
@@ -124,7 +127,7 @@ pub fn create_cache_plugin(cfg: JsonValue) -> Result<Arc<dyn ProxyPlugin>> {
         })
         .collect::<Result<Vec<_>>>()?;
 
-    // 在插件创建时就构建好 CacheSettings
+    // Pre-build cache settings at plugin creation to avoid per-request overhead
     let cache_settings = Arc::new(CacheSettings {
         ttl: Duration::from_secs(config.ttl),
         statuses,

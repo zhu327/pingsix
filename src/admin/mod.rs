@@ -74,7 +74,7 @@ type RequestParams = BTreeMap<String, String>;
 // Maximum request body size for admin API (1 MB)
 const MAX_BODY_SIZE: usize = 1_048_576;
 
-// 新的资源处理trait，简化资源验证逻辑
+// Resource handling trait for simplified validation logic across admin APIs
 trait AdminResource: DeserializeOwned + Validate + Identifiable + Send + Sync + 'static {
     const RESOURCE_TYPE: &'static str;
 
@@ -82,24 +82,24 @@ trait AdminResource: DeserializeOwned + Validate + Identifiable + Send + Sync + 
         let resource = json_to_resource::<Self>(data)
             .map_err(|e| ApiError::InvalidRequest(format!("Invalid JSON data: {e}")))?;
 
-        // 基础验证
+        // Basic field validation using the validator crate
         resource.validate().map_err(|e| {
             ApiError::ValidationError(format!("{} validation failed: {e}", Self::RESOURCE_TYPE))
         })?;
 
-        // 插件验证（如果适用）
+        // Additional plugin-specific validation if applicable
         Self::validate_plugins_if_supported(&resource)?;
 
         Ok(resource)
     }
 
     fn validate_plugins_if_supported(_resource: &Self) -> ApiResult<()> {
-        // 默认实现：无插件验证
+        // Default: no plugin validation needed
         Ok(())
     }
 }
 
-// 为所有支持的资源类型实现AdminResource
+// Implement AdminResource for all supported configuration types
 impl AdminResource for config::Route {
     const RESOURCE_TYPE: &'static str = "routes";
 
@@ -147,7 +147,7 @@ impl AdminResource for config::SSL {
     const RESOURCE_TYPE: &'static str = "ssls";
 }
 
-// 泛型handler，大大简化了代码
+// Generic handler that significantly reduces code duplication
 struct ResourceHandler<T: AdminResource> {
     _phantom: PhantomData<T>,
 }
@@ -195,7 +195,7 @@ impl<T: AdminResource> Handler for ResourceHandler<T> {
 
         let key = Self::extract_key(&params)?;
 
-        // 使用泛型资源验证
+        // Use generic resource validation
         T::validate_resource(&body_data)?;
 
         etcd.put(&key, body_data)
@@ -206,7 +206,7 @@ impl<T: AdminResource> Handler for ResourceHandler<T> {
     }
 }
 
-// GET handler - 为了区分操作类型，我们需要单独的类型
+// GET handler - separate type needed to distinguish operation types
 struct GetHandler<T: AdminResource> {
     _phantom: PhantomData<T>,
 }
@@ -294,7 +294,7 @@ impl AdminHttpApp {
             router: Router::new(),
         };
 
-        // 注册路由变得更简洁，类型安全
+        // Register routes with type safety and reduced boilerplate
         this.register_resource_routes::<config::Route>()
             .register_resource_routes::<config::Upstream>()
             .register_resource_routes::<config::Service>()

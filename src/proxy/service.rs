@@ -50,7 +50,7 @@ impl ProxyService {
             plugins: Vec::with_capacity(service.plugins.len()),
         };
 
-        // 配置 upstream
+        // Configure upstream if specified
         if let Some(ref upstream_config) = service.upstream {
             let proxy_upstream =
                 ProxyUpstream::new_with_shared_health_check(upstream_config.clone()).with_context(
@@ -59,7 +59,7 @@ impl ProxyService {
             proxy_service.upstream = Some(Arc::new(proxy_upstream));
         }
 
-        // 加载插件
+        // Load configured plugins
         for (name, value) in service.plugins {
             let plugin = build_plugin(&name, value).map_err(|e| {
                 ProxyError::Plugin(format!(

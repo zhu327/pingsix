@@ -17,10 +17,11 @@ use crate::utils::{
 pub const PLUGIN_NAME: &str = "ip-restriction";
 const PRIORITY: i32 = 3000;
 
-/// Creates an IP Restriction plugin instance.
-/// This plugin restricts access based on client IP addresses, allowing or denying requests
-/// based on configured whitelist and blacklist of IP networks (in CIDR notation, e.g., `192.168.1.0/24`).
-/// Supports proxy chain detection through X-Forwarded-For and X-Real-IP headers.
+/// Creates an IP restriction plugin for access control based on client IP addresses.
+///
+/// Supports CIDR notation for network ranges (e.g., `192.168.1.0/24`, `2001:db8::/32`).
+/// Handles proxy chains by examining X-Forwarded-For and X-Real-IP headers when configured.
+/// Whitelist takes precedence over blacklist for overlapping ranges.
 pub fn create_ip_restriction_plugin(cfg: JsonValue) -> Result<Arc<dyn ProxyPlugin>> {
     #[derive(Deserialize)]
     struct RawConfig {
@@ -83,30 +84,27 @@ pub fn create_ip_restriction_plugin(cfg: JsonValue) -> Result<Arc<dyn ProxyPlugi
     Ok(Arc::new(PluginIPRestriction { config }))
 }
 
-/// Configuration for the IP Restriction plugin.
+/// Configuration for IP-based access control.
 #[derive(Default, Debug, Serialize, Deserialize)]
 struct PluginConfig {
-    /// List of allowed IP networks in CIDR notation (e.g., `192.168.1.0/24`, `2001:db8::/32`).
-    /// If non-empty, only IPs in these networks are allowed.
+    /// Allowed IP networks in CIDR notation. Empty list allows all IPs.
     #[serde(default)]
     whitelist: Vec<IpNetwork>,
 
-    /// List of denied IP networks in CIDR notation.
-    /// IPs in these networks are blocked.
+    /// Denied IP networks in CIDR notation. Checked after whitelist.
     #[serde(default)]
     blacklist: Vec<IpNetwork>,
 
-    /// Optional custom rejection message sent in the response body for blocked requests.
-    /// If not set, no response body is sent.
+    /// Custom rejection message for blocked requests.
     message: Option<String>,
 
-    /// List of trusted proxy IP networks that are allowed to set X-Forwarded-For headers.
-    /// Only used when `use_forwarded_headers` is true.
+    /// Trusted proxy networks allowed to set forwarded headers.
+    /// Used for proxy chain validation when use_forwarded_headers is true.
     #[serde(default)]
     trusted_proxies: Vec<IpNetwork>,
 
-    /// Whether to use X-Forwarded-For and X-Real-IP headers to determine the real client IP.
-    /// Only headers from trusted proxies are considered.
+    /// Enable parsing of X-Forwarded-For and X-Real-IP headers from trusted proxies.
+    /// Prevents IP spoofing by validating proxy chain.
     #[serde(default)]
     use_forwarded_headers: bool,
 }
