@@ -25,6 +25,7 @@ impl Write for AsyncWriter {
         match self.sender.try_send(data) {
             Ok(_) => Ok(buf.len()),
             Err(e) => {
+                // Use stderr for critical logging infrastructure errors
                 eprintln!("Log buffer full, discarding message: {e}");
                 // Return Ok to avoid breaking env_logger, which expects success
                 Ok(buf.len())
@@ -111,24 +112,24 @@ impl Service for Logger {
                 // Shutdown signal handling
                 _ = shutdown.changed() => {
                     if *shutdown.borrow() {
-                        log::info!("Shutdown signal received, stopping write log");
+                        log::debug!("Shutdown signal received, stopping log writer");
                         break;
                     }
                 },
                 _ = flush_interval.tick() => {
                     if let Err(e) = file.flush().await {
-                        log::error!("Failed to flush to log file '{log_file_path}': {e}");
+                        log::error!("Failed to flush log file '{}': {}", log_file_path, e);
                     }
                 },
                 data = self.receiver.recv() => {
                     match data {
                         Some(data) => {
                             if let Err(e) = file.write_all(&data).await {
-                                log::error!("Failed to write to log file '{log_file_path}': {e}");
+                                log::error!("Failed to write to log file '{}': {}", log_file_path, e);
                             }
                         }
                         None => {
-                            log::info!("Log channel closed, stopping write log");
+                            log::debug!("Log channel closed, stopping log writer");
                             break;
                         }
                     }
@@ -137,7 +138,7 @@ impl Service for Logger {
         }
 
         if let Err(e) = file.flush().await {
-            log::error!("Failed to flush log file '{log_file_path}': {e}");
+            log::error!("Failed to flush log file '{}': {}", log_file_path, e);
         }
     }
 

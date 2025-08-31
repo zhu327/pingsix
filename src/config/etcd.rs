@@ -61,10 +61,7 @@ impl EtcdConfigSync {
     /// Get or initialize the etcd client.
     async fn get_client(&mut self) -> Result<&mut Client, EtcdError> {
         if self.client.is_none() {
-            log::info!(
-                "Creating new etcd client for prefix '{}'",
-                self.config.prefix
-            );
+            log::debug!("Creating etcd client for prefix '{}'", self.config.prefix);
             self.client = Some(create_client(&self.config).await?);
         }
 
@@ -121,7 +118,7 @@ impl EtcdConfigSync {
             EtcdError::WatchOperationFailed(format!("Failed to receive watch message: {e}"))
         })? {
             if response.canceled() {
-                log::warn!("Watch stream for prefix '{prefix}' was canceled");
+                log::debug!("Watch stream for prefix '{}' was canceled", prefix);
                 break;
             }
 
@@ -134,7 +131,7 @@ impl EtcdConfigSync {
 
     /// Reset the client on failure.
     fn reset_client(&mut self) {
-        log::warn!("Resetting etcd client for prefix '{}'", self.config.prefix);
+        log::debug!("Resetting etcd client for prefix '{}'", self.config.prefix);
         self.client = None;
     }
 
@@ -146,7 +143,7 @@ impl EtcdConfigSync {
                 // Shutdown signal handling
                 _ = shutdown.changed() => {
                     if *shutdown.borrow() {
-                        log::info!("Shutdown signal received, stopping etcd config sync for prefix '{}'", self.config.prefix);
+                        log::debug!("Shutdown signal received, stopping etcd config sync for prefix '{}'", self.config.prefix);
                         return;
                     }
                 },
@@ -167,7 +164,7 @@ impl EtcdConfigSync {
                 // Shutdown signal handling during watch
                 _ = shutdown.changed() => {
                     if *shutdown.borrow() {
-                        log::info!("Shutdown signal received, stopping etcd config sync for prefix '{}'", self.config.prefix);
+                        log::debug!("Shutdown signal received, stopping etcd config sync for prefix '{}'", self.config.prefix);
                         return;
                     }
                 },
@@ -259,10 +256,7 @@ impl EtcdClientWrapper {
         let mut client_guard = self.client.lock().await;
 
         if client_guard.is_none() {
-            log::info!(
-                "Creating new etcd client for prefix '{}'",
-                self.config.prefix
-            );
+            log::debug!("Creating etcd client for prefix '{}'", self.config.prefix);
             *client_guard = Some(
                 create_client(&self.config)
                     .await

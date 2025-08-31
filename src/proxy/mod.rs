@@ -44,15 +44,15 @@ where
         if let Some(entry) = self.get(id) {
             Some(entry.clone())
         } else {
-            log::warn!("Resource with id '{id}' not found");
+            log::debug!("Resource '{}' not found in cache", id);
             None
         }
     }
 
     fn reload_resources(&self, resources: Vec<Arc<T>>) {
-        // Log incoming resources
+        // Log incoming resources for debug
         for resource in &resources {
-            log::info!("Upstream resource: {}", resource.id());
+            log::debug!("Reloading resource: {}", resource.id());
         }
 
         // Build a set of IDs to keep
@@ -64,14 +64,14 @@ where
         // Insert or update all resources
         for resource in resources {
             let key = resource.id().to_string();
-            log::info!("Inserting or updating resource '{key}'");
+            log::debug!("Inserting or updating resource '{}'", key);
             self.insert(key, resource);
         }
     }
 
     fn insert_resource(&self, resource: Arc<T>) {
         let key = resource.id();
-        log::info!("Inserting resource '{key}'");
+        log::debug!("Inserting resource '{}'", key);
         self.insert(key.to_string(), resource);
     }
 }

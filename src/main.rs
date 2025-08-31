@@ -59,32 +59,35 @@ fn main() {
 
     // If etcd is enabled, start config sync service; otherwise, load static configs
     let etcd_sync = if let Some(etcd_cfg) = &config.pingsix.etcd {
-        log::info!("Adding etcd config sync...");
+        log::debug!(
+            "Initializing etcd config sync with prefix: {}",
+            etcd_cfg.prefix
+        );
         let event_handler = ProxyEventHandler::new();
         Some(EtcdConfigSync::new(
             etcd_cfg.clone(),
             Box::new(event_handler),
         ))
     } else {
-        log::info!("Loading static services, upstreams, and routes...");
+        log::debug!("Loading static configurations from config file");
         if let Err(e) = load_static_ssls(&config) {
-            eprintln!("Failed to load static SSLs: {e}");
+            log::error!("Failed to load static SSLs: {e}");
             std::process::exit(1);
         }
         if let Err(e) = load_static_upstreams(&config) {
-            eprintln!("Failed to load static upstreams: {e}");
+            log::error!("Failed to load static upstreams: {e}");
             std::process::exit(1);
         }
         if let Err(e) = load_static_services(&config) {
-            eprintln!("Failed to load static services: {e}");
+            log::error!("Failed to load static services: {e}");
             std::process::exit(1);
         }
         if let Err(e) = load_static_global_rules(&config) {
-            eprintln!("Failed to load static global rules: {e}");
+            log::error!("Failed to load static global rules: {e}");
             std::process::exit(1);
         }
         if let Err(e) = load_static_routes(&config) {
-            eprintln!("Failed to load static routes: {e}");
+            log::error!("Failed to load static routes: {e}");
             std::process::exit(1);
         }
         None
@@ -95,13 +98,13 @@ fn main() {
 
     // Add log service
     if let Some(log_service) = logger {
-        log::info!("Adding log sync service...");
+        log::debug!("Initializing log sync service");
         pingsix_server.add_service(log_service);
     }
 
     // Add Etcd config sync service
     if let Some(etcd_service) = etcd_sync {
-        log::info!("Adding etcd config sync service...");
+        log::debug!("Initializing etcd config sync service");
         pingsix_server.add_service(etcd_service);
     }
 
@@ -113,26 +116,26 @@ fn main() {
     );
 
     // Add listeners
-    log::info!("Adding listeners...");
+    log::debug!("Configuring listeners");
     if let Err(e) = add_listeners(&mut http_service, &config.pingsix) {
-        eprintln!("Failed to add listeners: {e}");
+        log::error!("Failed to add listeners: {e}");
         std::process::exit(1);
     }
 
     // Add shared health check service
-    log::info!("Adding shared health check service...");
+    log::debug!("Initializing shared health check service");
     pingsix_server.add_service(SHARED_HEALTH_CHECK_SERVICE.clone());
 
     // Add optional services (Sentry, Prometheus, Admin)
     add_optional_services(&mut pingsix_server, &config.pingsix);
 
     // Start server
-    log::info!("Bootstrapping...");
+    log::info!("Starting pingsix server");
     pingsix_server.bootstrap();
-    log::info!("Bootstrapped. Adding Services...");
+    log::debug!("Server bootstrapped, adding services");
     pingsix_server.add_service(http_service);
 
-    log::info!("Starting Server...");
+    log::info!("Pingsix server running");
     pingsix_server.run_forever();
 }
 
@@ -175,15 +178,15 @@ fn add_listeners(
 /// Add optional services (Sentry, Prometheus, Admin).
 fn add_optional_services(server: &mut Server, cfg: &config::Pingsix) {
     if let Some(sentry_cfg) = &cfg.sentry {
-        log::info!("Adding Sentry config...");
+        log::debug!("Configuring Sentry monitoring");
         let dsn = match sentry_cfg.dsn.clone().into_dsn() {
             Ok(Some(dsn)) => dsn,
             Ok(None) => {
-                log::warn!("Sentry DSN is empty or invalid, Sentry disabled.");
+                log::warn!("Sentry DSN is empty, monitoring disabled");
                 return;
             }
             Err(e) => {
-                log::error!("Error parsing Sentry DSN: {e}");
+                log::error!("Invalid Sentry DSN configuration: {e}");
                 return; // Skip Sentry if DSN is invalid
             }
         };
@@ -191,18 +194,27 @@ fn add_optional_services(server: &mut Server, cfg: &config::Pingsix) {
             dsn: Some(dsn),
             ..Default::default()
         });
+        log::info!("Sentry monitoring enabled");
     }
 
     if cfg.etcd.is_some() && cfg.admin.is_some() {
-        log::info!("Adding Admin HTTP...");
+        log::debug!("Configuring admin HTTP interface");
         let admin_service_http = AdminHttpApp::admin_http_service(cfg);
         server.add_service(admin_service_http);
+        log::info!("Admin HTTP interface enabled");
     }
 
     if let Some(prometheus_cfg) = &cfg.prometheus {
-        log::info!("Adding Prometheus HTTP...");
+        log::debug!(
+            "Configuring Prometheus metrics endpoint on {}",
+            prometheus_cfg.address
+        );
         let mut prometheus_service_http = Service::prometheus_http_service();
         prometheus_service_http.add_tcp(&prometheus_cfg.address.to_string());
         server.add_service(prometheus_service_http);
+        log::info!(
+            "Prometheus metrics endpoint enabled on {}",
+            prometheus_cfg.address
+        );
     }
 }

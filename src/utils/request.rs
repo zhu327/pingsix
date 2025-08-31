@@ -57,7 +57,7 @@ fn handle_vars(session: &mut Session, key: &str) -> String {
             .map_or_else(|| "".to_string(), |addr| addr.to_string()),
         // Add other variables here if needed
         _ => {
-            log::warn!("Unsupported variable key for hashing: {key}");
+            log::debug!("Unsupported variable key for hashing: {}", key);
             "".to_string()
         }
     }
@@ -154,9 +154,9 @@ pub fn get_cookie_value<'a>(req_header: &'a RequestHeader, cookie_name: &str) ->
             // Note: This simple parsing doesn't handle cookies without '=',
             // or cookies where the value contains ';', '=', or needs decoding.
         }
-        log::debug!("Cookie '{cookie_name}' not found within Cookie header.");
+        log::debug!("Cookie '{}' not found within Cookie header", cookie_name);
     } else {
-        log::debug!("No Cookie header found.");
+        log::debug!("No Cookie header found");
     }
 
     None // Return None if the header doesn't exist or the cookie isn't found
@@ -237,6 +237,6 @@ pub fn get_client_ip(session: &Session) -> String {
     }
 
     // 4. Unable to determine IP
-    log::warn!("Could not determine client IP address.");
+    log::debug!("Could not determine client IP address");
     "".to_string()
 }

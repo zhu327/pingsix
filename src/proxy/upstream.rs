@@ -30,7 +30,7 @@ pub fn upstream_fetch(id: &str) -> Option<Arc<ProxyUpstream>> {
     match UPSTREAM_MAP.get(id) {
         Some(upstream) => Some(upstream.value().clone()),
         None => {
-            log::warn!("Upstream with id '{id}' not found");
+            log::debug!("Upstream '{}' not found in cache", id);
             None
         }
     }
@@ -96,7 +96,7 @@ impl ProxyUpstream {
                 ProxyError::HealthCheck(format!("Failed to register health check: {e}"))
             })?;
 
-        info!(
+        log::debug!(
             "Registered upstream '{}' to shared health check service",
             self.inner.id
         );
@@ -351,11 +351,11 @@ pub fn load_static_upstreams(config: &config::Config) -> ProxyResult<()> {
         .upstreams
         .iter()
         .map(|upstream| {
-            info!("Configuring Upstream: {}", upstream.id);
+            log::debug!("Configuring upstream: {}", upstream.id);
             match ProxyUpstream::new_with_shared_health_check(upstream.clone()) {
                 Ok(proxy_upstream) => Ok(Arc::new(proxy_upstream)),
                 Err(e) => {
-                    log::error!("Failed to configure Upstream {}: {}", upstream.id, e);
+                    log::error!("Failed to configure upstream {}: {}", upstream.id, e);
                     Err(e)
                 }
             }
@@ -367,6 +367,6 @@ pub fn load_static_upstreams(config: &config::Config) -> ProxyResult<()> {
     // Insert all ProxyUpstream instances into the global map.
     UPSTREAM_MAP.reload_resources(proxy_upstreams);
 
-    info!("Loaded {upstream_count} upstreams with shared health check service");
+    log::info!("Loaded {} upstreams", upstream_count);
     Ok(())
 }
