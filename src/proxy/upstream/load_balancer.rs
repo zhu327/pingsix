@@ -19,11 +19,12 @@ use pingora_proxy::Session;
 
 use crate::{
     config::{self, Identifiable},
-    core::{ErrorContext, ProxyError, ProxyResult},
+    core::{ErrorContext, ProxyError, ProxyResult, UpstreamSelector},
+    proxy::MapOperations,
     utils::request::request_selector_key,
 };
 
-use super::{discovery::HybridDiscovery, health_check::SHARED_HEALTH_CHECK_SERVICE, MapOperations};
+use super::{discovery::HybridDiscovery, health_check::SHARED_HEALTH_CHECK_SERVICE};
 
 /// Fetches an upstream by its ID.
 pub fn upstream_fetch(id: &str) -> Option<Arc<ProxyUpstream>> {
@@ -104,53 +105,11 @@ impl ProxyUpstream {
         Ok(())
     }
 
-    /// Selects a backend server for a given session.
-    pub fn select_backend<'a>(&'a self, session: &'a mut Session) -> Option<Backend> {
-        let key = request_selector_key(session, &self.inner.hash_on, self.inner.key.as_str());
-        log::debug!("proxy lb key: {}", &key);
-
-        let mut backend = match &self.lb {
-            SelectionLB::RoundRobin(lb) => lb.upstreams.select(key.as_bytes(), 256),
-            SelectionLB::Random(lb) => lb.upstreams.select(key.as_bytes(), 256),
-            SelectionLB::Fnv(lb) => lb.upstreams.select(key.as_bytes(), 256),
-            SelectionLB::Ketama(lb) => lb.upstreams.select(key.as_bytes(), 256),
-        };
-
-        if let Some(backend) = backend.as_mut() {
-            if let Some(peer) = backend.ext.get_mut::<HttpPeer>() {
-                self.set_timeout(peer);
-            }
-        }
-
-        backend
-    }
-
-    /// Rewrites the upstream host in the request header if needed.
-    pub fn upstream_host_rewrite(&self, upstream_request: &mut RequestHeader) {
-        if self.inner.pass_host == config::UpstreamPassHost::REWRITE {
-            if let Some(host) = &self.inner.upstream_host {
-                upstream_request
-                    .insert_header(http::header::HOST, host)
-                    .unwrap();
-            }
-        }
-    }
-
     /// 停止健康检查服务
     fn stop_health_check(&mut self) {
         let upstream_id = self.id();
         SHARED_HEALTH_CHECK_SERVICE.unregister_upstream(upstream_id);
         info!("Unregistered upstream '{upstream_id}' from shared health check service");
-    }
-
-    /// Gets the number of retries from the upstream configuration.
-    pub fn get_retries(&self) -> Option<usize> {
-        self.inner.retries.map(|r| r as _)
-    }
-
-    /// Gets the retry timeout from the upstream configuration.
-    pub fn get_retry_timeout(&self) -> Option<u64> {
-        self.inner.retry_timeout
     }
 
     /// Sets the timeout for an `HttpPeer`.
@@ -172,6 +131,47 @@ impl Drop for ProxyUpstream {
     /// 停止健康检查服务
     fn drop(&mut self) {
         self.stop_health_check();
+    }
+}
+
+// Implementation of UpstreamSelector trait for decoupling from core module
+impl UpstreamSelector for ProxyUpstream {
+    fn select_backend<'a>(&'a self, session: &'a mut Session) -> Option<Backend> {
+        let key = request_selector_key(session, &self.inner.hash_on, self.inner.key.as_str());
+        log::debug!("proxy lb key: {}", &key);
+
+        let mut backend = match &self.lb {
+            SelectionLB::RoundRobin(lb) => lb.upstreams.select(key.as_bytes(), 256),
+            SelectionLB::Random(lb) => lb.upstreams.select(key.as_bytes(), 256),
+            SelectionLB::Fnv(lb) => lb.upstreams.select(key.as_bytes(), 256),
+            SelectionLB::Ketama(lb) => lb.upstreams.select(key.as_bytes(), 256),
+        };
+
+        if let Some(backend) = backend.as_mut() {
+            if let Some(peer) = backend.ext.get_mut::<HttpPeer>() {
+                self.set_timeout(peer);
+            }
+        }
+
+        backend
+    }
+
+    fn get_retries(&self) -> Option<usize> {
+        self.inner.retries.map(|r| r as _)
+    }
+
+    fn get_retry_timeout(&self) -> Option<u64> {
+        self.inner.retry_timeout
+    }
+
+    fn upstream_host_rewrite(&self, upstream_request: &mut RequestHeader) {
+        if self.inner.pass_host == config::UpstreamPassHost::REWRITE {
+            if let Some(host) = &self.inner.upstream_host {
+                upstream_request
+                    .insert_header(http::header::HOST, host)
+                    .unwrap();
+            }
+        }
     }
 }
 

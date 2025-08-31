@@ -19,9 +19,32 @@ use once_cell::sync::Lazy;
 use pingora_core::upstreams::peer::HttpPeer;
 use pingora_error::{Error, Result};
 use pingora_http::{RequestHeader, ResponseHeader};
+use pingora_load_balancing::Backend;
 use pingora_proxy::Session;
 use regex::Regex;
 use serde_json::Value as JsonValue;
+
+// =============================================================================
+// UPSTREAM ABSTRACTION
+// =============================================================================
+
+/// Abstract trait for upstream backend selection
+///
+/// This trait provides a decoupled interface for backend selection without
+/// depending on specific upstream implementations.
+pub trait UpstreamSelector: Send + Sync {
+    /// Select a backend for the given session
+    fn select_backend<'a>(&'a self, session: &'a mut Session) -> Option<Backend>;
+
+    /// Get the number of retries configured for this upstream
+    fn get_retries(&self) -> Option<usize>;
+
+    /// Get the retry timeout configured for this upstream  
+    fn get_retry_timeout(&self) -> Option<u64>;
+
+    /// Rewrite the upstream host in the request header if needed
+    fn upstream_host_rewrite(&self, upstream_request: &mut RequestHeader);
+}
 
 // =============================================================================
 // ROUTE ABSTRACTION
@@ -43,7 +66,7 @@ pub trait RouteContext: Send + Sync {
     fn build_plugin_executor(&self) -> Arc<ProxyPluginExecutor>;
 
     /// Resolve upstream for this route
-    fn resolve_upstream(&self) -> Option<Arc<crate::proxy::upstream::ProxyUpstream>>;
+    fn resolve_upstream(&self) -> Option<Arc<dyn UpstreamSelector>>;
 }
 
 // =============================================================================

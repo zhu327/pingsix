@@ -3,10 +3,8 @@
 //! This module defines resource management and the generic
 //! `MapOperations` trait for managing resources in a thread-safe map.
 
-pub mod discovery;
 pub mod event;
 pub mod global_rule;
-pub mod health_check;
 pub mod route;
 pub mod service;
 pub mod ssl;

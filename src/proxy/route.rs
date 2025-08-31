@@ -153,14 +153,16 @@ impl RouteContext for ProxyRoute {
             .clone()
     }
 
-    fn resolve_upstream(&self) -> Option<Arc<ProxyUpstream>> {
+    fn resolve_upstream(&self) -> Option<Arc<dyn crate::core::UpstreamSelector>> {
         self.upstream
             .clone()
+            .map(|u| u as Arc<dyn crate::core::UpstreamSelector>)
             .or_else(|| {
                 self.inner
                     .upstream_id
                     .as_ref()
                     .and_then(|id| upstream_fetch(id.as_str()))
+                    .map(|u| u as Arc<dyn crate::core::UpstreamSelector>)
             })
             .or_else(|| {
                 self.inner

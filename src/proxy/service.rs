@@ -74,10 +74,17 @@ impl ProxyService {
     }
 
     /// Gets the upstream for the service.
-    pub fn resolve_upstream(&self) -> Option<Arc<ProxyUpstream>> {
+    pub fn resolve_upstream(&self) -> Option<Arc<dyn crate::core::UpstreamSelector>> {
         self.upstream
             .clone()
-            .or_else(|| self.inner.upstream_id.as_deref().and_then(upstream_fetch))
+            .map(|u| u as Arc<dyn crate::core::UpstreamSelector>)
+            .or_else(|| {
+                self.inner
+                    .upstream_id
+                    .as_deref()
+                    .and_then(upstream_fetch)
+                    .map(|u| u as Arc<dyn crate::core::UpstreamSelector>)
+            })
     }
 }
 

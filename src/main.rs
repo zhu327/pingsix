@@ -25,11 +25,10 @@ use logging::Logger;
 use proxy::{
     event::ProxyEventHandler,
     global_rule::load_static_global_rules,
-    health_check::SHARED_HEALTH_CHECK_SERVICE,
     route::load_static_routes,
     service::load_static_services,
     ssl::{load_static_ssls, DynamicCert},
-    upstream::load_static_upstreams,
+    upstream::{load_static_upstreams, SHARED_HEALTH_CHECK_SERVICE},
 };
 use service::http::HttpService;
 
