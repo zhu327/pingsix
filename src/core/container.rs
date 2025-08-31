@@ -8,7 +8,7 @@ use std::sync::Arc;
 use super::{
     registry::ResourceRegistry,
     traits::{HealthChecker, PluginExecutor},
-    ProxyResult,
+    error::ProxyResult,
 };
 
 /// Main dependency injection container

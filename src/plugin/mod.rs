@@ -14,6 +14,10 @@ pub mod proxy_rewrite;
 pub mod redirect;
 pub mod request_id;
 
+// New plugin system modules
+pub mod manager;
+pub mod adapter;
+
 use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;

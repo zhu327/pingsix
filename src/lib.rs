@@ -4,7 +4,9 @@
 
 pub mod admin;
 pub mod config;
+pub mod core;
 pub mod logging;
+pub mod orchestration;
 pub mod plugin;
 pub mod proxy;
 pub mod service;

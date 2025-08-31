@@ -9,7 +9,7 @@ use pingora_core::upstreams::peer::HttpPeer;
 use pingora_proxy::Session;
 use pingora_load_balancing::Backend;
 
-use super::{ProxyContext, ProxyResult};
+use super::{context::ProxyContext, error::ProxyResult};
 
 /// Trait for upstream selection and load balancing
 #[async_trait]
