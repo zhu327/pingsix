@@ -11,6 +11,7 @@ use std::{
 };
 
 use super::traits::{PluginExecutor, RouteResolver};
+use super::error::ProxyResult;
 
 /// Context that holds per-request state and metadata
 pub struct ProxyContext {
@@ -104,7 +105,7 @@ impl PluginExecutor for EmptyPluginExecutor {
         &self,
         _session: &mut pingora_proxy::Session,
         _ctx: &mut ProxyContext,
-    ) -> super::ProxyResult<()> {
+    ) -> ProxyResult<()> {
         Ok(())
     }
 
@@ -112,7 +113,7 @@ impl PluginExecutor for EmptyPluginExecutor {
         &self,
         _session: &mut pingora_proxy::Session,
         _ctx: &mut ProxyContext,
-    ) -> super::ProxyResult<bool> {
+    ) -> ProxyResult<bool> {
         Ok(false)
     }
 
@@ -121,7 +122,7 @@ impl PluginExecutor for EmptyPluginExecutor {
         _session: &mut pingora_proxy::Session,
         _upstream_request: &mut pingora_http::RequestHeader,
         _ctx: &mut ProxyContext,
-    ) -> super::ProxyResult<()> {
+    ) -> ProxyResult<()> {
         Ok(())
     }
 
@@ -130,7 +131,7 @@ impl PluginExecutor for EmptyPluginExecutor {
         _session: &mut pingora_proxy::Session,
         _upstream_response: &mut pingora_http::ResponseHeader,
         _ctx: &mut ProxyContext,
-    ) -> super::ProxyResult<()> {
+    ) -> ProxyResult<()> {
         Ok(())
     }
 }

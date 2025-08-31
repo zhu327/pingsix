@@ -10,14 +10,15 @@ use super::{
     traits::{HealthChecker, PluginExecutor},
     error::ProxyResult,
 };
+use crate::plugin::manager::PluginManager;
 
 /// Main dependency injection container
 pub struct ServiceContainer {
     /// Resource registry for routes, upstreams, and services
     registry: Arc<ResourceRegistry>,
     
-    /// Global plugin executor
-    global_plugin_executor: Arc<dyn PluginExecutor>,
+    /// Plugin manager for handling all plugins
+    plugin_manager: Arc<PluginManager>,
     
     /// Health checker service
     health_checker: Arc<dyn HealthChecker>,
@@ -31,7 +32,7 @@ impl ServiceContainer {
     pub fn new() -> Self {
         Self {
             registry: Arc::new(ResourceRegistry::new()),
-            global_plugin_executor: Arc::new(EmptyPluginExecutor),
+            plugin_manager: Arc::new(PluginManager::new()),
             health_checker: Arc::new(NoOpHealthChecker),
             config_manager: Arc::new(StaticConfigManager),
         }
@@ -40,13 +41,13 @@ impl ServiceContainer {
     /// Create a container with custom components
     pub fn with_components(
         registry: Arc<ResourceRegistry>,
-        global_plugin_executor: Arc<dyn PluginExecutor>,
+        plugin_manager: Arc<PluginManager>,
         health_checker: Arc<dyn HealthChecker>,
         config_manager: Arc<dyn ConfigManager>,
     ) -> Self {
         Self {
             registry,
-            global_plugin_executor,
+            plugin_manager,
             health_checker,
             config_manager,
         }
@@ -57,9 +58,14 @@ impl ServiceContainer {
         &self.registry
     }
 
+    /// Get the plugin manager
+    pub fn plugin_manager(&self) -> &PluginManager {
+        &self.plugin_manager
+    }
+
     /// Get the global plugin executor
     pub fn global_plugin_executor(&self) -> Arc<dyn PluginExecutor> {
-        self.global_plugin_executor.clone()
+        self.plugin_manager.global_executor()
     }
 
     /// Get the health checker
@@ -72,9 +78,9 @@ impl ServiceContainer {
         self.config_manager.clone()
     }
 
-    /// Update the global plugin executor
-    pub fn set_global_plugin_executor(&mut self, executor: Arc<dyn PluginExecutor>) {
-        self.global_plugin_executor = executor;
+    /// Update the plugin manager
+    pub fn set_plugin_manager(&mut self, manager: Arc<PluginManager>) {
+        self.plugin_manager = manager;
     }
 
     /// Update the health checker

@@ -161,8 +161,104 @@ impl PluginManager {
 
     /// Register all built-in plugin factories
     fn register_builtin_plugins(&mut self) {
-        // We'll implement this after we create the adapter layer
-        // This will bridge the old plugin system to the new interface
+        // Register all existing plugins through adapters
+        use crate::plugin::adapter::PluginAdapter;
+        use crate::plugin::*;
+
+        // Authentication & Security plugins
+        self.register_factory("jwt-auth".to_string(), |config| {
+            jwt_auth::create_jwt_auth_plugin(config)
+                .map(|p| Arc::new(PluginAdapter::new(p)) as Arc<dyn PluginInterface>)
+                .map_err(Into::into)
+        });
+
+        self.register_factory("key-auth".to_string(), |config| {
+            key_auth::create_key_auth_plugin(config)
+                .map(|p| Arc::new(PluginAdapter::new(p)) as Arc<dyn PluginInterface>)
+                .map_err(Into::into)
+        });
+
+        self.register_factory("ip-restriction".to_string(), |config| {
+            ip_restriction::create_ip_restriction_plugin(config)
+                .map(|p| Arc::new(PluginAdapter::new(p)) as Arc<dyn PluginInterface>)
+                .map_err(Into::into)
+        });
+
+        self.register_factory("cors".to_string(), |config| {
+            cors::create_cors_plugin(config)
+                .map(|p| Arc::new(PluginAdapter::new(p)) as Arc<dyn PluginInterface>)
+                .map_err(Into::into)
+        });
+
+        // Traffic Management plugins
+        self.register_factory("limit-count".to_string(), |config| {
+            limit_count::create_limit_count_plugin(config)
+                .map(|p| Arc::new(PluginAdapter::new(p)) as Arc<dyn PluginInterface>)
+                .map_err(Into::into)
+        });
+
+        self.register_factory("proxy-rewrite".to_string(), |config| {
+            proxy_rewrite::create_proxy_rewrite_plugin(config)
+                .map(|p| Arc::new(PluginAdapter::new(p)) as Arc<dyn PluginInterface>)
+                .map_err(Into::into)
+        });
+
+        self.register_factory("redirect".to_string(), |config| {
+            redirect::create_redirect_plugin(config)
+                .map(|p| Arc::new(PluginAdapter::new(p)) as Arc<dyn PluginInterface>)
+                .map_err(Into::into)
+        });
+
+        self.register_factory("cache".to_string(), |config| {
+            cache::create_cache_plugin(config)
+                .map(|p| Arc::new(PluginAdapter::new(p)) as Arc<dyn PluginInterface>)
+                .map_err(Into::into)
+        });
+
+        // Observability plugins
+        self.register_factory("prometheus".to_string(), |config| {
+            prometheus::create_prometheus_plugin(config)
+                .map(|p| Arc::new(PluginAdapter::new(p)) as Arc<dyn PluginInterface>)
+                .map_err(Into::into)
+        });
+
+        self.register_factory("file-logger".to_string(), |config| {
+            file_logger::create_file_logger_plugin(config)
+                .map(|p| Arc::new(PluginAdapter::new(p)) as Arc<dyn PluginInterface>)
+                .map_err(Into::into)
+        });
+
+        self.register_factory("request-id".to_string(), |config| {
+            request_id::create_request_id_plugin(config)
+                .map(|p| Arc::new(PluginAdapter::new(p)) as Arc<dyn PluginInterface>)
+                .map_err(Into::into)
+        });
+
+        // Performance plugins
+        self.register_factory("gzip".to_string(), |config| {
+            gzip::create_gzip_plugin(config)
+                .map(|p| Arc::new(PluginAdapter::new(p)) as Arc<dyn PluginInterface>)
+                .map_err(Into::into)
+        });
+
+        self.register_factory("brotli".to_string(), |config| {
+            brotli::create_brotli_plugin(config)
+                .map(|p| Arc::new(PluginAdapter::new(p)) as Arc<dyn PluginInterface>)
+                .map_err(Into::into)
+        });
+
+        self.register_factory("grpc-web".to_string(), |config| {
+            grpc_web::create_grpc_web_plugin(config)
+                .map(|p| Arc::new(PluginAdapter::new(p)) as Arc<dyn PluginInterface>)
+                .map_err(Into::into)
+        });
+
+        // Utility plugins
+        self.register_factory("echo".to_string(), |config| {
+            echo::create_echo_plugin(config)
+                .map(|p| Arc::new(PluginAdapter::new(p)) as Arc<dyn PluginInterface>)
+                .map_err(Into::into)
+        });
     }
 }
 
@@ -223,6 +319,19 @@ impl PluginExecutor for PluginExecutorImpl {
     ) -> ProxyResult<()> {
         for plugin in &self.plugins {
             plugin.response_filter(session, upstream_response, ctx).await?;
+        }
+        Ok(())
+    }
+
+    fn response_body_filter(
+        &self,
+        session: &mut Session,
+        body: &mut Option<Bytes>,
+        end_of_stream: bool,
+        ctx: &mut ProxyContext,
+    ) -> ProxyResult<()> {
+        for plugin in &self.plugins {
+            plugin.response_body_filter(session, body, end_of_stream, ctx)?;
         }
         Ok(())
     }

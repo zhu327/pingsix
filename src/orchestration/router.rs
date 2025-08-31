@@ -12,7 +12,7 @@ use crate::{
     core::{
         registry::ResourceRegistry,
         traits::RouteResolver,
-        ProxyResult, ProxyError,
+        error::{ProxyResult, ProxyError},
     },
     utils::request::get_request_host,
 };
@@ -110,12 +110,51 @@ impl RouteMatchEngine {
         self.host_routers.clear();
         self.default_router = MatchRouter::new();
 
-        // Rebuild routers from registry
+        // Group routes by host for efficient matching
+        let mut host_routes: std::collections::HashMap<String, Vec<(String, String)>> = 
+            std::collections::HashMap::new();
+        let mut default_routes: Vec<(String, String)> = Vec::new();
+
+        // Collect routes and group by host
         for route_id in route_ids {
             if let Some(route) = registry.get_route(&route_id) {
-                // This would need to be implemented based on your route configuration
-                // For now, this is a placeholder
-                log::debug!("Rebuilding route: {}", route.id());
+                let hosts = route.get_hosts();
+                let uris = route.get_uris();
+                
+                for uri in uris {
+                    if hosts.is_empty() {
+                        // No specific host, add to default router
+                        default_routes.push((route_id.clone(), uri));
+                    } else {
+                        // Add to host-specific routers
+                        for host in &hosts {
+                            host_routes
+                                .entry(host.clone())
+                                .or_insert_with(Vec::new)
+                                .push((route_id.clone(), uri.clone()));
+                        }
+                    }
+                }
+                
+                log::debug!("Added route: {} with hosts: {:?}", route.id(), hosts);
+            }
+        }
+
+        // Build host-specific routers
+        for (host, routes) in host_routes {
+            let mut router = MatchRouter::new();
+            for (route_id, uri) in routes {
+                if let Err(e) = router.insert(uri, route_id) {
+                    log::warn!("Failed to insert route for host {}: {}", host, e);
+                }
+            }
+            self.host_routers.insert(host, router);
+        }
+
+        // Build default router
+        for (route_id, uri) in default_routes {
+            if let Err(e) = self.default_router.insert(uri, route_id) {
+                log::warn!("Failed to insert default route: {}", e);
             }
         }
 

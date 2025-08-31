@@ -12,6 +12,14 @@ pub mod service;
 pub mod ssl;
 pub mod upstream;
 
+// New trait-based implementations
+pub mod new_route;
+pub mod new_service;
+pub mod new_upstream;
+
+// Adapters for migration
+pub mod adapters;
+
 use std::{
     any::Any,
     collections::{BTreeMap, HashMap, HashSet},

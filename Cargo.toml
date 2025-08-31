@@ -3,6 +3,10 @@ name = "pingsix"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+new-architecture = []
+
 [dependencies]
 arc-swap = "1.7.1"
 async-trait = "0.1.83"

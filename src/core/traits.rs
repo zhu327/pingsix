@@ -50,6 +50,15 @@ pub trait RouteResolver: Send + Sync {
     
     /// Get route priority
     fn priority(&self) -> u32;
+    
+    /// Get route hosts for matching
+    fn get_hosts(&self) -> Vec<String>;
+    
+    /// Get route URIs for matching
+    fn get_uris(&self) -> Vec<String>;
+    
+    /// Check if route matches the given host and path
+    fn matches(&self, host: Option<&str>, path: &str) -> bool;
 }
 
 /// Trait for plugin execution
@@ -84,6 +93,18 @@ pub trait PluginExecutor: Send + Sync {
         upstream_response: &mut pingora_http::ResponseHeader,
         ctx: &mut ProxyContext,
     ) -> ProxyResult<()>;
+
+    /// Execute response body filters
+    fn response_body_filter(
+        &self,
+        session: &mut Session,
+        body: &mut Option<bytes::Bytes>,
+        end_of_stream: bool,
+        ctx: &mut ProxyContext,
+    ) -> ProxyResult<()> {
+        // Default implementation does nothing
+        Ok(())
+    }
 }
 
 /// Trait for resource management operations
