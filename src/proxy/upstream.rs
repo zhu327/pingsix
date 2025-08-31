@@ -19,13 +19,11 @@ use pingora_proxy::Session;
 
 use crate::{
     config::{self, Identifiable},
+    core::{ErrorContext, ProxyError, ProxyResult},
     utils::request::request_selector_key,
 };
 
-use super::{
-    discovery::HybridDiscovery, health_check::SHARED_HEALTH_CHECK_SERVICE, ErrorContext,
-    MapOperations, ProxyError, ProxyResult,
-};
+use super::{discovery::HybridDiscovery, health_check::SHARED_HEALTH_CHECK_SERVICE, MapOperations};
 
 /// Fetches an upstream by its ID.
 pub fn upstream_fetch(id: &str) -> Option<Arc<ProxyUpstream>> {

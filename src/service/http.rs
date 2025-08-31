@@ -27,11 +27,9 @@ use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_proxy::{ProxyHttp, Session};
 
 use crate::{
-    plugin::{
-        cache::{CacheSettings, CTX_KEY_CACHE_SETTINGS},
-        ProxyPlugin,
-    },
-    proxy::{global_rule::global_plugin_fetch, route::global_route_match_fetch, ProxyContext},
+    core::{ProxyContext, ProxyPlugin, RouteContext},
+    plugin::cache::{CacheSettings, CTX_KEY_CACHE_SETTINGS},
+    proxy::{global_rule::global_plugin_fetch, route::global_route_match_fetch},
 };
 
 // --- START: Global Cache Infrastructure ---

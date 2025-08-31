@@ -8,11 +8,11 @@ use pingora_proxy::Session;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
-use crate::proxy::ProxyContext;
-use crate::utils::request::{get_client_ip, get_req_header_value};
-
-use super::ProxyPlugin;
-use crate::utils::response::ResponseBuilder;
+use crate::core::{ProxyContext, ProxyPlugin};
+use crate::utils::{
+    request::{get_client_ip, get_req_header_value},
+    response::ResponseBuilder,
+};
 
 pub const PLUGIN_NAME: &str = "ip-restriction";
 const PRIORITY: i32 = 3000;

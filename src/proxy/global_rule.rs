@@ -6,10 +6,11 @@ use once_cell::sync::Lazy;
 
 use crate::{
     config::{self, Identifiable},
-    plugin::{build_plugin, ProxyPlugin},
+    core::{ProxyError, ProxyPlugin, ProxyPluginExecutor, ProxyResult},
+    plugin::build_plugin,
 };
 
-use super::{MapOperations, ProxyError, ProxyPluginExecutor, ProxyResult};
+use super::MapOperations;
 
 /// Represents a proxy service that manages upstreams.
 pub struct ProxyGlobalRule {

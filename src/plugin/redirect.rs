@@ -10,9 +10,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use validator::{Validate, ValidationError};
 
-use crate::{proxy::ProxyContext, utils::request::get_request_host};
-
-use super::{apply_regex_uri_template, ProxyPlugin};
+use crate::{
+    core::{apply_regex_uri_template, ProxyContext, ProxyPlugin},
+    utils::request::get_request_host,
+};
 
 pub const PLUGIN_NAME: &str = "redirect";
 const PRIORITY: i32 = 900;

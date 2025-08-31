@@ -6,9 +6,7 @@ use pingora_error::Result;
 use pingora_proxy::Session;
 use serde_json::Value as JsonValue;
 
-use crate::proxy::ProxyContext;
-
-use super::ProxyPlugin;
+use crate::core::{ProxyContext, ProxyPlugin};
 
 pub const PLUGIN_NAME: &str = "grpc-web";
 const PRIORITY: i32 = 505;

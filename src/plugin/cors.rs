@@ -10,9 +10,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use validator::{Validate, ValidationError};
 
-use crate::{proxy::ProxyContext, utils::request};
-
-use super::ProxyPlugin;
+use crate::{
+    core::{ProxyContext, ProxyPlugin},
+    utils::request,
+};
 
 pub const PLUGIN_NAME: &str = "cors";
 const PRIORITY: i32 = 4000;

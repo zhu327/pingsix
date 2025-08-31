@@ -12,8 +12,7 @@ use serde_json::Value as JsonValue;
 use std::sync::Arc;
 use validator::{Validate, ValidationError};
 
-use super::{apply_regex_uri_template, ProxyPlugin};
-use crate::proxy::ProxyContext;
+use crate::core::{apply_regex_uri_template, ProxyContext, ProxyPlugin};
 
 pub const PLUGIN_NAME: &str = "proxy-rewrite";
 const PRIORITY: i32 = 1008;

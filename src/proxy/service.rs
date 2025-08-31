@@ -5,12 +5,13 @@ use once_cell::sync::Lazy;
 
 use crate::{
     config::{self, Identifiable},
-    plugin::{build_plugin, ProxyPlugin},
+    core::{ErrorContext, ProxyError, ProxyPlugin, ProxyResult},
+    plugin::build_plugin,
 };
 
 use super::{
     upstream::{upstream_fetch, ProxyUpstream},
-    ErrorContext, MapOperations, ProxyError, ProxyResult,
+    MapOperations,
 };
 
 /// Fetches a service by its ID.

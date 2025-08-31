@@ -20,7 +20,8 @@ use crate::{
         etcd::{json_to_resource, EtcdClientWrapper},
         Admin, Identifiable, Pingsix,
     },
-    plugin::{build_plugin, constant_time_eq},
+    core::constant_time_eq,
+    plugin::build_plugin,
     utils::response::{CommonErrors, ResponseBuilder},
 };
 

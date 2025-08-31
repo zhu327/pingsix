@@ -11,9 +11,10 @@ use serde_json::Value as JsonValue;
 use uuid::Uuid;
 use validator::{Validate, ValidationError};
 
-use crate::{proxy::ProxyContext, utils::request};
-
-use super::ProxyPlugin;
+use crate::{
+    core::{ProxyContext, ProxyPlugin},
+    utils::request,
+};
 
 pub const PLUGIN_NAME: &str = "request-id";
 const PRIORITY: i32 = 12015;

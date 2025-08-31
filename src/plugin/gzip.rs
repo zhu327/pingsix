@@ -10,9 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use validator::Validate;
 
-use crate::proxy::ProxyContext;
-
-use super::ProxyPlugin;
+use crate::core::{ProxyContext, ProxyPlugin};
 
 pub const PLUGIN_NAME: &str = "gzip";
 const PRIORITY: i32 = 995;

@@ -8,10 +8,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use validator::Validate;
 
-use crate::{proxy::ProxyContext, utils::request};
-
-use super::{constant_time_eq, ProxyPlugin};
-use crate::utils::response::ResponseBuilder;
+use crate::{
+    core::{constant_time_eq, ProxyContext, ProxyPlugin},
+    utils::{request, response::ResponseBuilder},
+};
 
 pub const PLUGIN_NAME: &str = "key-auth";
 const PRIORITY: i32 = 2500;

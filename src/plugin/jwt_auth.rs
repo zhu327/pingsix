@@ -9,10 +9,10 @@ use pingora_proxy::Session;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
-use crate::{proxy::ProxyContext, utils::request};
-
-use super::ProxyPlugin;
-use crate::utils::response::ResponseBuilder;
+use crate::{
+    core::{ProxyContext, ProxyPlugin},
+    utils::{request, response::ResponseBuilder},
+};
 
 pub const PLUGIN_NAME: &str = "jwt-auth";
 const PRIORITY: i32 = 2510;

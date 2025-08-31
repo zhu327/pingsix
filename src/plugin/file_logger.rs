@@ -10,9 +10,10 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
-use crate::{proxy::ProxyContext, utils::request};
-
-use super::ProxyPlugin;
+use crate::{
+    core::{ProxyContext, ProxyPlugin},
+    utils::request,
+};
 
 pub const PLUGIN_NAME: &str = "file-logger";
 const PRIORITY: i32 = 399;

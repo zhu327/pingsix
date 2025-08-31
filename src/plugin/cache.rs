@@ -11,8 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use validator::{Validate, ValidationError};
 
-use super::ProxyPlugin;
-use crate::proxy::ProxyContext;
+use crate::core::{ProxyContext, ProxyPlugin};
 
 pub const PLUGIN_NAME: &str = "cache";
 const PRIORITY: i32 = 1085;

@@ -9,10 +9,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use validator::{Validate, ValidationError};
 
-use crate::{config::UpstreamHashOn, proxy::ProxyContext, utils::request::request_selector_key};
-
-use super::ProxyPlugin;
-use crate::utils::response::ResponseBuilder;
+use crate::{
+    config::UpstreamHashOn,
+    core::{ProxyContext, ProxyPlugin},
+    utils::{request::request_selector_key, response::ResponseBuilder},
+};
 
 pub const PLUGIN_NAME: &str = "limit-count";
 const PRIORITY: i32 = 1002;

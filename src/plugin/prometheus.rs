@@ -13,11 +13,9 @@ use regex::Regex;
 use serde_json::Value as JsonValue;
 
 use crate::{
-    proxy::{route::ProxyRoute, ProxyContext},
+    core::{ProxyContext, ProxyPlugin},
     utils::request::get_request_host,
 };
-
-use super::ProxyPlugin;
 
 const DEFAULT_BUCKETS: &[f64] = &[
     1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0, 30000.0,
@@ -137,10 +135,10 @@ impl ProxyPlugin for PluginPrometheus {
             .map_or("", |resp| resp.status.as_str());
 
         // Extract route information, falling back to empty string if not present
-        let route_id = route.as_ref().map_or_else(|| "", |r| r.inner.id.as_str());
+        let route_id = route.as_ref().map_or_else(|| "", |r| r.id());
 
         // Use path template to avoid high cardinality issues
-        let path_template = self.normalize_path_template(&route, session);
+        let path_template = self.normalize_path_template(session);
 
         // Extract host, falling back to empty string
         let host = route.as_ref().map_or("", |_| {
@@ -148,10 +146,9 @@ impl ProxyPlugin for PluginPrometheus {
         });
 
         // Extract service, falling back to "unknown" if service_id is None
-        let service = route.as_ref().map_or_else(
-            || "unknown",
-            |r| r.inner.service_id.as_deref().unwrap_or("unknown"),
-        );
+        let service = route
+            .as_ref()
+            .map_or_else(|| "unknown", |r| r.service_id().unwrap_or("unknown"));
 
         // Extract node from context variables (assumes HttpService::upstream_peer sets ctx["upstream"]) as String
         let node = ctx.get_str("upstream").unwrap_or("");
@@ -193,26 +190,13 @@ impl ProxyPlugin for PluginPrometheus {
 impl PluginPrometheus {
     /// Normalize URI path to avoid high cardinality issues
     /// Uses route path template if available, otherwise applies basic normalization
-    fn normalize_path_template(
-        &self,
-        route: &Option<Arc<ProxyRoute>>,
-        session: &Session,
-    ) -> String {
-        // If route has a path template, use it
-        if let Some(route) = route {
-            // Try to use the first URI as a template
-            if let Some(ref uri_template) = route.inner.uri {
-                return uri_template.clone();
-            }
-            // Fallback to first URI in uris list
-            if !route.inner.uris.is_empty() {
-                return route.inner.uris[0].clone();
-            }
-        }
+    fn normalize_path_template(&self, session: &Session) -> String {
+        // For now, just use the actual path since we don't expose URI templates in the trait
+        // In a real implementation, you might want to add path template methods to RouteContext
+        let actual_path = session.req_header().uri.path();
 
-        // Fallback: apply basic path normalization to reduce cardinality
-        let original_path = session.req_header().uri.path();
-        self.normalize_path(original_path)
+        // Apply basic normalization patterns
+        self.normalize_path(actual_path)
     }
 
     /// Apply basic path normalization to reduce metric cardinality

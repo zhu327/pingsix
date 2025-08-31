@@ -14,8 +14,10 @@ use pingora_load_balancing::{
 };
 use regex::Regex;
 
-use super::{ProxyError, ProxyResult};
-use crate::config::{Upstream, UpstreamPassHost, UpstreamScheme};
+use crate::{
+    config::{Upstream, UpstreamPassHost, UpstreamScheme},
+    core::{ProxyError, ProxyResult},
+};
 
 static GLOBAL_RESOLVER: OnceCell<Arc<TokioResolver>> = OnceCell::new();
 

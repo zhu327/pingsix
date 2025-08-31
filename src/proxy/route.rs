@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
+use async_trait::async_trait;
 use dashmap::DashMap;
 use log::debug;
 use matchit::{InsertError, Router as MatchRouter};
@@ -13,14 +14,15 @@ use pingora_proxy::Session;
 
 use crate::{
     config::{self, Identifiable},
-    plugin::{build_plugin, ProxyPlugin},
+    core::{ErrorContext, ProxyError, ProxyPlugin, ProxyPluginExecutor, ProxyResult, RouteContext},
+    plugin::build_plugin,
     utils::request::get_request_host,
 };
 
 use super::{
     service::service_fetch,
     upstream::{upstream_fetch, ProxyUpstream},
-    ErrorContext, MapOperations, ProxyError, ProxyPluginExecutor, ProxyResult,
+    MapOperations,
 };
 
 /// Proxy route.
@@ -72,24 +74,6 @@ impl ProxyRoute {
         Ok(proxy_route)
     }
 
-    /// Gets the upstream for the route.
-    pub fn resolve_upstream(&self) -> Option<Arc<ProxyUpstream>> {
-        self.upstream
-            .clone()
-            .or_else(|| {
-                self.inner
-                    .upstream_id
-                    .as_ref()
-                    .and_then(|id| upstream_fetch(id.as_str()))
-            })
-            .or_else(|| {
-                self.inner
-                    .service_id
-                    .as_ref()
-                    .and_then(|id| service_fetch(id).and_then(|s| s.resolve_upstream()))
-            })
-    }
-
     /// Gets the list of hosts for the route.
     fn get_hosts(&self) -> Vec<String> {
         let hosts = self.inner.get_hosts();
@@ -106,8 +90,19 @@ impl ProxyRoute {
             vec![]
         }
     }
+}
 
-    pub fn select_http_peer<'a>(&'a self, session: &'a mut Session) -> ProxyResult<Box<HttpPeer>> {
+#[async_trait]
+impl RouteContext for ProxyRoute {
+    fn id(&self) -> &str {
+        &self.inner.id
+    }
+
+    fn service_id(&self) -> Option<&str> {
+        self.inner.service_id.as_deref()
+    }
+
+    fn select_http_peer<'a>(&'a self, session: &'a mut Session) -> ProxyResult<Box<HttpPeer>> {
         let upstream = self.resolve_upstream().ok_or_else(|| {
             ProxyError::UpstreamSelection(
                 "Failed to retrieve upstream configuration for route".to_string(),
@@ -128,30 +123,7 @@ impl ProxyRoute {
         Ok(Box::new(peer.clone()))
     }
 
-    /// Sets the timeout for an `HttpPeer` based on the route configuration.
-    fn set_timeout(&self, p: &mut HttpPeer) {
-        if let Some(config::Timeout {
-            connect,
-            read,
-            send,
-        }) = self.inner.timeout
-        {
-            p.options.connection_timeout = Some(Duration::from_secs(connect));
-            p.options.read_timeout = Some(Duration::from_secs(read));
-            p.options.write_timeout = Some(Duration::from_secs(send));
-        }
-    }
-
-    /// Builds a `ProxyPluginExecutor` by combining plugins from both a route and its associated service.
-    /// Uses caching to avoid rebuilding the executor on each request.
-    ///
-    /// # Returns
-    /// - `Arc<ProxyPluginExecutor>`: A cached reference-counted pointer to a `ProxyPluginExecutor`.
-    ///
-    /// # Performance Notes
-    /// - The executor is built once and cached for subsequent requests
-    /// - Plugins from the route take precedence over those from the service in case of naming conflicts
-    pub fn build_plugin_executor(&self) -> Arc<ProxyPluginExecutor> {
+    fn build_plugin_executor(&self) -> Arc<ProxyPluginExecutor> {
         self.cached_plugin_executor
             .get_or_init(|| {
                 let mut plugin_map: HashMap<String, Arc<dyn ProxyPlugin>> = HashMap::new();
@@ -179,6 +151,39 @@ impl ProxyRoute {
                 })
             })
             .clone()
+    }
+
+    fn resolve_upstream(&self) -> Option<Arc<ProxyUpstream>> {
+        self.upstream
+            .clone()
+            .or_else(|| {
+                self.inner
+                    .upstream_id
+                    .as_ref()
+                    .and_then(|id| upstream_fetch(id.as_str()))
+            })
+            .or_else(|| {
+                self.inner
+                    .service_id
+                    .as_ref()
+                    .and_then(|id| service_fetch(id).and_then(|s| s.resolve_upstream()))
+            })
+    }
+}
+
+impl ProxyRoute {
+    /// Sets the timeout for an `HttpPeer` based on the route configuration.
+    fn set_timeout(&self, p: &mut HttpPeer) {
+        if let Some(config::Timeout {
+            connect,
+            read,
+            send,
+        }) = self.inner.timeout
+        {
+            p.options.connection_timeout = Some(Duration::from_secs(connect));
+            p.options.read_timeout = Some(Duration::from_secs(read));
+            p.options.write_timeout = Some(Duration::from_secs(send));
+        }
     }
 }
 
