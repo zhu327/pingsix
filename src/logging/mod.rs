@@ -47,7 +47,7 @@ pub struct Logger {
 impl Logger {
     pub fn new(config: config::Log) -> Self {
         // Bounded channel with configurable buffer size (default: 1024)
-        let (sender, receiver) = channel::<Vec<u8>>(1024);
+        let (sender, receiver) = channel::<Vec<u8>>(4096);
         Self {
             sender,
             receiver,

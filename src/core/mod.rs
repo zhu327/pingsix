@@ -653,11 +653,6 @@ impl ProxyContext {
         self.get::<String>(key).map(|s| s.as_str())
     }
 
-    /// Check if a key exists without retrieving the value.
-    pub fn contains(&self, key: &str) -> bool {
-        self.vars.contains_key(key)
-    }
-
     /// Get the elapsed time since request start in milliseconds.
     pub fn elapsed_ms(&self) -> u128 {
         self.request_start.elapsed().as_millis()

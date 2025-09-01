@@ -157,7 +157,7 @@ impl LogFormat {
                 Segment::Static(text) => output.push_str(text),
                 Segment::Variable(var) => {
                     let value = self.get_variable_value(var, session, e, ctx);
-                    output.push_str(value);
+                    output.push_str(&value);
                 }
             }
         }
@@ -165,113 +165,68 @@ impl LogFormat {
         output
     }
 
-    /// Extract variable value - separated for better readability and potential caching
-    fn get_variable_value<'a>(
+    /// Extract variable value - separated for better readability
+    fn get_variable_value(
         &self,
         var: &str,
-        session: &'a mut Session,
-        e: Option<&'a Error>,
-        ctx: &'a mut ProxyContext,
-    ) -> &'a str {
+        session: &mut Session,
+        e: Option<&Error>,
+        ctx: &mut ProxyContext,
+    ) -> String {
         // Handle custom variables first
         if let Some(custom_var_name) = var.strip_prefix("var_") {
-            return ctx.get_str(custom_var_name).unwrap_or("");
+            return ctx.get_str(custom_var_name).unwrap_or("").to_string();
         }
 
         // Handle built-in variables
         match var {
-            "request_method" => session.req_header().method.as_str(),
-            "uri" => session.req_header().uri.path(),
-            "query_string" => session.req_header().uri.query().unwrap_or_default(),
-            "http_host" => session.req_header().uri.host().unwrap_or_default(),
-            "request_time" => {
-                // Store in context to avoid recalculation
-                let key = "_log_request_time";
-                if !ctx.contains(key) {
-                    let time_str = ctx.elapsed_ms().to_string();
-                    ctx.set(key, time_str);
-                }
-                ctx.get_str(key).unwrap_or("")
-            }
+            "request_method" => session.req_header().method.as_str().to_string(),
+            "uri" => session.req_header().uri.path().to_string(),
+            "query_string" => session
+                .req_header()
+                .uri
+                .query()
+                .unwrap_or_default()
+                .to_string(),
+            "http_host" => session
+                .req_header()
+                .uri
+                .host()
+                .unwrap_or_default()
+                .to_string(),
+            "request_time" => ctx.elapsed_ms().to_string(),
             "http_user_agent" => request::get_req_header_value(session.req_header(), "user-agent")
+                .unwrap_or_default()
+                .to_string(),
+            "http_referer" => request::get_req_header_value(session.req_header(), "referer")
+                .unwrap_or_default()
+                .to_string(),
+            "remote_addr" => session
+                .client_addr()
+                .map(|addr| addr.to_string())
                 .unwrap_or_default(),
-            "http_referer" => {
-                request::get_req_header_value(session.req_header(), "referer").unwrap_or_default()
-            }
-            "remote_addr" => {
-                // Cache remote address to avoid repeated computation
-                let key = "_log_remote_addr";
-                if !ctx.contains(key) {
-                    let addr_str = session
-                        .client_addr()
-                        .map(|addr| addr.to_string())
-                        .unwrap_or_default();
-                    ctx.set(key, addr_str);
-                }
-                ctx.get_str(key).unwrap_or("")
-            }
-            "remote_port" => {
-                // Cache remote port
-                let key = "_log_remote_port";
-                if !ctx.contains(key) {
-                    let port_str = session
-                        .client_addr()
-                        .and_then(|s| s.as_inet())
-                        .map_or_else(|| "".to_string(), |i| i.port().to_string());
-                    ctx.set(key, port_str);
-                }
-                ctx.get_str(key).unwrap_or("")
-            }
-            "server_addr" => {
-                // Cache server address
-                let key = "_log_server_addr";
-                if !ctx.contains(key) {
-                    let addr_str = session
-                        .server_addr()
-                        .map_or_else(|| "".to_string(), |addr| addr.to_string());
-                    ctx.set(key, addr_str);
-                }
-                ctx.get_str(key).unwrap_or("")
-            }
-            "status" => {
-                // Cache status
-                let key = "_log_status";
-                if !ctx.contains(key) {
-                    let status_str = session
-                        .response_written()
-                        .map(|v| v.status.as_u16().to_string())
-                        .unwrap_or_default();
-                    ctx.set(key, status_str);
-                }
-                ctx.get_str(key).unwrap_or("")
-            }
+            "remote_port" => session
+                .client_addr()
+                .and_then(|s| s.as_inet())
+                .map_or_else(|| "".to_string(), |i| i.port().to_string()),
+            "server_addr" => session
+                .server_addr()
+                .map_or_else(|| "".to_string(), |addr| addr.to_string()),
+            "status" => session
+                .response_written()
+                .map(|v| v.status.as_u16().to_string())
+                .unwrap_or_default(),
             "server_protocol" => {
                 if session.is_http2() {
-                    "http/2"
+                    "http/2".to_string()
                 } else {
-                    "http/1.1"
+                    "http/1.1".to_string()
                 }
             }
-            "request_id" => ctx.get_str("request-id").unwrap_or(""),
-            "body_bytes_sent" => {
-                // Cache body bytes sent
-                let key = "_log_body_bytes_sent";
-                if !ctx.contains(key) {
-                    let bytes_str = session.body_bytes_sent().to_string();
-                    ctx.set(key, bytes_str);
-                }
-                ctx.get_str(key).unwrap_or("")
-            }
-            "error" => {
-                // Cache error message
-                let key = "_log_error";
-                if !ctx.contains(key) {
-                    let error_str = e.map(|e| e.to_string()).unwrap_or_default();
-                    ctx.set(key, error_str);
-                }
-                ctx.get_str(key).unwrap_or("")
-            }
-            _ => "",
+            "request_id" => ctx.get_str("request-id").unwrap_or("").to_string(),
+            "body_bytes_sent" => session.body_bytes_sent().to_string(),
+            "error" => e.map(|e| e.to_string()).unwrap_or_default(),
+            _ => "".to_string(),
         }
     }
 }
