@@ -6,16 +6,17 @@
 2. [Getting Started](#getting-started)
 3. [Core Concepts](#core-concepts)
 4. [Configuration](#configuration)
-5. [Routing](#routing)
-6. [Upstreams](#upstreams)
-7. [Services](#services)
-8. [Global Rules](#global-rules)
-9. [Plugins](#plugins)
-10. [Admin API](#admin-api)
-11. [SSL/TLS Configuration](#ssltls-configuration)
-12. [Monitoring and Observability](#monitoring-and-observability)
-13. [Examples](#examples)
-14. [Troubleshooting](#troubleshooting)
+5. [Docker Deployment](#docker-deployment)
+6. [Routing](#routing)
+7. [Upstreams](#upstreams)
+8. [Services](#services)
+9. [Global Rules](#global-rules)
+10. [Plugins](#plugins)
+11. [Admin API](#admin-api)
+12. [SSL/TLS Configuration](#ssltls-configuration)
+13. [Monitoring and Observability](#monitoring-and-observability)
+14. [Examples](#examples)
+15. [Troubleshooting](#troubleshooting)
 
 ## Introduction
 
@@ -170,6 +171,155 @@ pingsix:
     connect_timeout: 10
     user: username      # Optional authentication
     password: password  # Optional authentication
+```
+
+## Docker Deployment
+
+PingSIX provides a multi-stage Docker build for efficient containerized deployment. The Docker image is optimized for production use with minimal attack surface and resource consumption.
+
+### Building the Docker Image
+
+Build the PingSIX Docker image from the project root:
+
+```bash
+# Build the Docker image
+docker build -t pingsix:latest .
+
+# Build for multiple architectures (if using buildx)
+docker buildx build --platform linux/amd64,linux/arm64 -t pingsix:latest .
+```
+
+### Docker Image Features
+
+The PingSIX Docker image includes:
+
+- **Multi-stage build**: Optimized build process with dependency caching
+- **Minimal runtime**: Based on Debian Bookworm Slim for security and size
+- **Non-root user**: Runs as `pingsix` user for enhanced security
+- **Pre-configured directories**: Logging and runtime directories with proper permissions
+- **Exposed ports**: 8080 (HTTP), 9091 (Prometheus), 9181 (Admin API)
+
+### Running PingSIX with Docker
+
+#### Basic Usage
+
+```bash
+# Run with default configuration
+docker run -d --name pingsix \
+  -p 8080:8080 \
+  -p 9091:9091 \
+  -p 9181:9181 \
+  pingsix:latest
+
+# Run with custom configuration
+docker run -d --name pingsix \
+  -p 8080:8080 \
+  -v /path/to/config.yaml:/app/config.yaml:ro \
+  pingsix:latest
+
+# Run with custom configuration and log persistence
+docker run -d --name pingsix \
+  -p 8080:8080 \
+  -v /path/to/config.yaml:/app/config.yaml:ro \
+  -v /path/to/logs:/var/log/pingsix \
+  pingsix:latest
+```
+
+#### Docker Compose Deployment
+
+Create a `docker-compose.yml` file for easy deployment:
+
+```yaml
+version: '3.8'
+
+services:
+  pingsix:
+    image: pingsix:latest
+    container_name: pingsix
+    restart: unless-stopped
+    ports:
+      - "80:8080"      # HTTP traffic
+      - "443:8443"     # HTTPS traffic (if configured)
+      - "9091:9091"    # Prometheus metrics
+      - "9181:9181"    # Admin API
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./ssl:/etc/ssl:ro                    # SSL certificates
+      - pingsix-logs:/var/log/pingsix        # Log persistence
+    environment:
+      - RUST_LOG=info
+    networks:
+      - pingsix-network
+
+  # Optional: etcd for dynamic configuration
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.9
+    container_name: pingsix-etcd
+    restart: unless-stopped
+    ports:
+      - "2379:2379"
+      - "2380:2380"
+    environment:
+      - ETCD_NAME=etcd1
+      - ETCD_DATA_DIR=/etcd-data
+      - ETCD_LISTEN_CLIENT_URLS=http://0.0.0.0:2379
+      - ETCD_ADVERTISE_CLIENT_URLS=http://etcd:2379
+      - ETCD_LISTEN_PEER_URLS=http://0.0.0.0:2380
+      - ETCD_INITIAL_ADVERTISE_PEER_URLS=http://etcd:2380
+      - ETCD_INITIAL_CLUSTER=etcd1=http://etcd:2380
+      - ETCD_INITIAL_CLUSTER_TOKEN=etcd-cluster-1
+      - ETCD_INITIAL_CLUSTER_STATE=new
+    volumes:
+      - etcd-data:/etcd-data
+    networks:
+      - pingsix-network
+
+volumes:
+  pingsix-logs:
+  etcd-data:
+
+networks:
+  pingsix-network:
+    driver: bridge
+```
+
+Run the stack:
+
+```bash
+# Start the services
+docker-compose up -d
+
+# View logs
+docker-compose logs -f pingsix
+
+# Stop the services
+docker-compose down
+
+# Stop and remove volumes
+docker-compose down -v
+```
+
+### Configuration Best Practices
+
+#### Volume Mounts
+
+```yaml
+volumes:
+  # Configuration (read-only)
+  - ./config.yaml:/app/config.yaml:ro
+  
+  # SSL certificates (read-only)
+  - ./ssl:/etc/ssl:ro
+  
+  # Logs (read-write)
+  - ./logs:/var/log/pingsix
+```
+
+#### Environment Variables
+
+```bash
+# Logging level
+RUST_LOG=info
 ```
 
 ## Routing
@@ -1175,7 +1325,8 @@ global_rules:
     plugins:
       prometheus: {}
       file-logger:
-        log_format: '$remote_addr - [$time_local] "$request" $status $body_bytes_sent $request_time'```
+        log_format: '$remote_addr - [$time_local] "$request" $status $body_bytes_sent $request_time'
+```
 
 ## Troubleshooting
 

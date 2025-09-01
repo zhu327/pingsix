@@ -1,0 +1,55 @@
+# 构建上下文中排除的文件和目录
+
+# Rust 构建产物
+target/
+**/*.rs.bk
+*.pdb
+
+# Git 相关
+.git/
+.gitignore
+
+# 文档
+*.md
+docs/
+
+# IDE 和编辑器文件
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 操作系统文件
+.DS_Store
+Thumbs.db
+
+# 日志文件
+*.log
+logs/
+
+# 临时文件
+tmp/
+temp/
+
+# Docker 相关
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# 测试文件
+tests/
+benches/
+
+# CI/CD 配置
+.github/
+.gitlab-ci.yml
+.travis.yml
+
+# 其他配置文件（保留 config.yaml 用于默认配置）
+config.docker.yaml
+prometheus.yml
+
+# 许可证和法律文件
+LICENSE*
+NOTICE*

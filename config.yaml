@@ -17,14 +17,14 @@ pingsix:
     #     key_path: /etc/ssl/server.key
     #   offer_h2: true
   
-  etcd:
-    host:
-      - "http://192.168.2.141:2379"
-    prefix: /apisix
+  # etcd:
+  #   host:
+  #     - "http://192.168.2.141:2379"
+  #   prefix: /apisix
 
-  admin:
-    address: "0.0.0.0:9181"
-    api_key: pingsix
+  # admin:
+  #   address: "0.0.0.0:9181"
+  #   api_key: pingsix
 
   prometheus:
     address: 0.0.0.0:9091
