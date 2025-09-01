@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use pingora::ErrorType::InternalError;
-use pingora_error::{ErrorType::ReadError, OrErr, Result};
+
+use pingora_error::Result;
 use pingora_http::ResponseHeader;
 use pingora_proxy::Session;
 use rand::prelude::*;
@@ -12,29 +12,26 @@ use uuid::Uuid;
 use validator::{Validate, ValidationError};
 
 use crate::{
-    core::{ProxyContext, ProxyPlugin},
+    core::{ProxyContext, ProxyError, ProxyPlugin, ProxyResult},
     utils::request,
 };
 
 pub const PLUGIN_NAME: &str = "request-id";
 const PRIORITY: i32 = 12015;
 
-// Constants for configuration and context keys
-const DEFAULT_HEADER_NAME: &str = "X-Request-Id";
+// Note: Request ID is now stored directly in ProxyContext.request_id field
+/// Default header name for request ID
+const DEFAULT_REQUEST_ID_HEADER: &str = "X-Request-Id";
+/// UUID algorithm identifier for request ID generation
 const ALGORITHM_UUID: &str = "uuid";
+/// Range ID algorithm identifier for request ID generation
 const ALGORITHM_RANGE_ID: &str = "range_id";
-const REQUEST_ID_KEY: &str = "request-id";
+/// Default character set used for generating range-based request IDs
 const DEFAULT_CHAR_SET: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIGKLMNOPQRSTUVWXYZ0123456789";
 
 /// Creates a Request ID plugin instance with the given configuration.
-pub fn create_request_id_plugin(cfg: JsonValue) -> Result<Arc<dyn ProxyPlugin>> {
-    let config: PluginConfig =
-        serde_json::from_value(cfg).or_err(ReadError, "Invalid request id plugin config")?;
-
-    config
-        .validate()
-        .or_err(ReadError, "Invalid request id plugin config")?;
-
+pub fn create_request_id_plugin(cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyPlugin>> {
+    let config = PluginConfig::try_from(cfg)?;
     Ok(Arc::new(PluginRequestID { config }))
 }
 
@@ -54,7 +51,7 @@ struct PluginConfig {
 
 impl PluginConfig {
     fn default_header_name() -> String {
-        DEFAULT_HEADER_NAME.to_string()
+        DEFAULT_REQUEST_ID_HEADER.to_string()
     }
 
     fn default_include_in_response() -> bool {
@@ -91,6 +88,23 @@ impl RangeID {
 
     pub fn default_length() -> u32 {
         16
+    }
+}
+
+impl TryFrom<JsonValue> for PluginConfig {
+    type Error = ProxyError;
+
+    fn try_from(value: JsonValue) -> Result<Self, Self::Error> {
+        let config: PluginConfig = serde_json::from_value(value)
+            .map_err(|e| ProxyError::serialization_error("Invalid request id plugin config", e))?;
+
+        config.validate().map_err(|e| {
+            ProxyError::validation_error(format!(
+                "Request ID plugin config validation failed: {e}"
+            ))
+        })?;
+
+        Ok(config)
     }
 }
 
@@ -141,12 +155,14 @@ impl ProxyPlugin for PluginRequestID {
                     session
                         .req_header_mut()
                         .insert_header(self.config.header_name.clone(), &request_id)
-                        .or_err(InternalError, "Session insert header fail")?;
+                        .map_err(|e| {
+                            ProxyError::Internal(format!("Session insert header fail: {e}"))
+                        })?;
                     request_id
                 }
             };
 
-        ctx.set(REQUEST_ID_KEY, value);
+        ctx.set_request_id(value);
 
         Ok(false)
     }
@@ -158,11 +174,13 @@ impl ProxyPlugin for PluginRequestID {
         ctx: &mut ProxyContext,
     ) -> Result<()> {
         if self.config.include_in_response {
-            let value = ctx.get_str(REQUEST_ID_KEY).unwrap(); // Safe: inserted in request_filter
-
-            upstream_response
-                .insert_header(self.config.header_name.clone(), value)
-                .or_err(InternalError, "Upstream response insert header fail")?;
+            if let Some(request_id) = ctx.request_id() {
+                upstream_response
+                    .insert_header(self.config.header_name.clone(), request_id)
+                    .map_err(|e| {
+                        ProxyError::Internal(format!("Upstream response insert header fail: {e}"))
+                    })?;
+            }
         }
 
         Ok(())

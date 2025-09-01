@@ -58,11 +58,13 @@ impl Identifiable for ProxyUpstream {
 impl ProxyUpstream {
     /// Creates a ProxyUpstream that uses the shared health check service
     pub fn new_with_shared_health_check(upstream: config::Upstream) -> ProxyResult<Self> {
+        let lb = SelectionLB::try_from(upstream.clone()).map_err(|e| {
+            ProxyError::Configuration(format!("Failed to create load balancer: {e}"))
+        })?;
+
         let mut proxy_upstream = ProxyUpstream {
-            inner: upstream.clone(),
-            lb: SelectionLB::try_from(upstream.clone()).map_err(|e| {
-                ProxyError::Configuration(format!("Failed to create load balancer: {e}"))
-            })?,
+            inner: upstream,
+            lb,
         };
 
         // Register with shared health check service
@@ -70,7 +72,7 @@ impl ProxyUpstream {
             .register_health_check()
             .with_context(&format!(
                 "Failed to register health check for upstream '{}'",
-                upstream.id
+                proxy_upstream.inner.id
             ))?;
 
         Ok(proxy_upstream)

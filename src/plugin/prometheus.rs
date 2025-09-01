@@ -1,9 +1,8 @@
 use std::sync::Arc;
-use std::time::Instant;
 
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
-use pingora_core::{Error, Result};
+use pingora_core::Error;
 use pingora_proxy::Session;
 use prometheus::{
     register_histogram_vec, register_int_counter, register_int_counter_vec, HistogramOpts,
@@ -13,7 +12,7 @@ use regex::Regex;
 use serde_json::Value as JsonValue;
 
 use crate::{
-    core::{ProxyContext, ProxyPlugin},
+    core::{ProxyContext, ProxyPlugin, ProxyResult},
     utils::request::get_request_host,
 };
 
@@ -107,7 +106,7 @@ static RESPONSE_SIZE: Lazy<HistogramVec> = Lazy::new(|| {
 pub const PLUGIN_NAME: &str = "prometheus";
 const PRIORITY: i32 = 500;
 
-pub fn create_prometheus_plugin(_cfg: JsonValue) -> Result<Arc<dyn ProxyPlugin>> {
+pub fn create_prometheus_plugin(_cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyPlugin>> {
     Ok(Arc::new(PluginPrometheus {}))
 }
 
@@ -159,10 +158,7 @@ impl ProxyPlugin for PluginPrometheus {
             .inc();
 
         // Record request latency
-        let elapsed_ms = ctx
-            .get::<Instant>("request_start")
-            .map(|t| t.elapsed().as_millis() as f64)
-            .unwrap_or(0.0);
+        let elapsed_ms = ctx.elapsed_ms_f64();
         LATENCY
             .with_label_values(&["request", route_id, service, node])
             .observe(elapsed_ms);

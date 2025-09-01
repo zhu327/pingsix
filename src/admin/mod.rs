@@ -53,7 +53,7 @@ impl fmt::Display for ApiError {
 impl Error for ApiError {}
 
 impl ApiError {
-    fn into_response(self) -> Response<Vec<u8>> {
+    fn into_response(self) -> ApiResponse {
         match self {
             ApiError::EtcdGetError(_)
             | ApiError::EtcdPutError(_)
@@ -69,12 +69,17 @@ impl ApiError {
 }
 
 type ApiResult<T> = Result<T, ApiError>;
+type ApiResponse = Response<Vec<u8>>;
 type RequestParams = BTreeMap<String, String>;
 
 // Maximum request body size for admin API (1 MB)
 const MAX_BODY_SIZE: usize = 1_048_576;
 
-// Resource handling trait for simplified validation logic across admin APIs
+/// Resource handling trait for simplified validation logic across admin APIs.
+///
+/// This trait provides a unified interface for validating and processing configuration
+/// resources (routes, services, upstreams, etc.) through the admin API. It combines
+/// JSON deserialization, field validation, and plugin-specific validation in a single step.
 trait AdminResource: DeserializeOwned + Validate + Identifiable + Send + Sync + 'static {
     const RESOURCE_TYPE: &'static str;
 
@@ -175,7 +180,7 @@ trait Handler {
         etcd: &EtcdClientWrapper,
         session: &mut ServerSession,
         params: RequestParams,
-    ) -> ApiResult<Response<Vec<u8>>>;
+    ) -> ApiResult<ApiResponse>;
 }
 
 // PUT handler
@@ -186,7 +191,7 @@ impl<T: AdminResource> Handler for ResourceHandler<T> {
         etcd: &EtcdClientWrapper,
         http_session: &mut ServerSession,
         params: RequestParams,
-    ) -> ApiResult<Response<Vec<u8>>> {
+    ) -> ApiResult<ApiResponse> {
         validate_content_type(http_session)?;
 
         let body_data = read_request_body(http_session)
@@ -226,7 +231,7 @@ impl<T: AdminResource> Handler for GetHandler<T> {
         etcd: &EtcdClientWrapper,
         _http_session: &mut ServerSession,
         params: RequestParams,
-    ) -> ApiResult<Response<Vec<u8>>> {
+    ) -> ApiResult<ApiResponse> {
         let key = ResourceHandler::<T>::extract_key(&params)?;
 
         match etcd.get(&key).await {
@@ -262,7 +267,7 @@ impl<T: AdminResource> Handler for DeleteHandler<T> {
         etcd: &EtcdClientWrapper,
         _http_session: &mut ServerSession,
         params: RequestParams,
-    ) -> ApiResult<Response<Vec<u8>>> {
+    ) -> ApiResult<ApiResponse> {
         let key = ResourceHandler::<T>::extract_key(&params)?;
 
         etcd.delete(&key)
@@ -342,7 +347,7 @@ impl AdminHttpApp {
 
 #[async_trait]
 impl ServeHttp for AdminHttpApp {
-    async fn response(&self, http_session: &mut ServerSession) -> Response<Vec<u8>> {
+    async fn response(&self, http_session: &mut ServerSession) -> ApiResponse {
         http_session.set_keepalive(None);
 
         if validate_api_key(http_session, &self.config.api_key).is_err() {

@@ -1,17 +1,16 @@
 use std::sync::Arc;
-use std::time::Instant;
 
 use async_trait::async_trait;
 use log::info;
-use pingora_core::{Error, Result};
-use pingora_error::{ErrorType::ReadError, OrErr};
+use pingora_core::Error;
+use pingora_error::Result;
 use pingora_proxy::Session;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
 use crate::{
-    core::{ProxyContext, ProxyPlugin},
+    core::{ProxyContext, ProxyError, ProxyPlugin, ProxyResult},
     utils::request,
 };
 
@@ -19,10 +18,8 @@ pub const PLUGIN_NAME: &str = "file-logger";
 const PRIORITY: i32 = 399;
 
 /// Creates a file logger plugin instance with the given configuration.
-pub fn create_file_logger_plugin(cfg: JsonValue) -> Result<Arc<dyn ProxyPlugin>> {
-    let config: PluginConfig = serde_json::from_value(cfg)
-        .or_err_with(ReadError, || "Invalid file logger plugin config")?;
-
+pub fn create_file_logger_plugin(cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyPlugin>> {
+    let config = PluginConfig::try_from(cfg)?;
     let log_format = LogFormat::parse(&config.log_format)?;
 
     Ok(Arc::new(PluginFileLogger { log_format }))
@@ -42,6 +39,15 @@ struct PluginConfig {
 impl PluginConfig {
     fn default_log_format() -> String {
         "$remote_addr \"$request_method $uri\" $status".to_string()
+    }
+}
+
+impl TryFrom<JsonValue> for PluginConfig {
+    type Error = ProxyError;
+
+    fn try_from(value: JsonValue) -> Result<Self, Self::Error> {
+        serde_json::from_value(value)
+            .map_err(|e| ProxyError::serialization_error("Invalid file logger plugin config", e))
     }
 }
 
@@ -80,9 +86,9 @@ struct LogFormat {
 impl LogFormat {
     /// Parses a log format string into a `LogFormat` struct.
     /// Variables are identified by `$` prefix (e.g., `$remote_addr`).
-    fn parse(format: &str) -> Result<Self> {
+    fn parse(format: &str) -> ProxyResult<Self> {
         let re = Regex::new(r"\$[a-zA-Z0-9_]+")
-            .or_err_with(ReadError, || "Failed to parse log format")?;
+            .map_err(|e| ProxyError::Internal(format!("Failed to parse log format: {e}")))?;
         let mut segments = Vec::new();
         let mut last_pos = 0;
         let mut estimated_capacity = 0;
@@ -182,10 +188,7 @@ impl LogFormat {
                 // Store in context to avoid recalculation
                 let key = "_log_request_time";
                 if !ctx.contains(key) {
-                    let time_str = ctx
-                        .get::<Instant>("request_start")
-                        .map(|t| t.elapsed().as_millis().to_string())
-                        .unwrap_or_default();
+                    let time_str = ctx.elapsed_ms().to_string();
                     ctx.set(key, time_str);
                 }
                 ctx.get_str(key).unwrap_or("")

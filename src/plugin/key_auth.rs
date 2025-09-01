@@ -2,33 +2,30 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use http::StatusCode;
-use pingora_error::{ErrorType::ReadError, OrErr, Result};
+use pingora_error::Result;
 use pingora_proxy::Session;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use validator::Validate;
 
 use crate::{
-    core::{constant_time_eq, ProxyContext, ProxyPlugin},
+    core::{constant_time_eq, ProxyContext, ProxyError, ProxyPlugin, ProxyResult},
     utils::{request, response::ResponseBuilder},
 };
 
 pub const PLUGIN_NAME: &str = "key-auth";
 const PRIORITY: i32 = 2500;
-const DEFAULT_HEADER: &str = "apikey";
-const DEFAULT_QUERY: &str = "apikey";
+
+/// Default header name for API key
+const DEFAULT_API_KEY_HEADER: &str = "apikey";
+/// Default query parameter name for API key
+const DEFAULT_API_KEY_QUERY: &str = "apikey";
 
 /// Creates a Key Auth plugin instance with the given configuration.
 /// This plugin authenticates requests by matching an API key in the HTTP header or query parameter
 /// against configured keys. If the key is invalid or missing, it returns a `401 Unauthorized` response.
-pub fn create_key_auth_plugin(cfg: JsonValue) -> Result<Arc<dyn ProxyPlugin>> {
-    let config: PluginConfig = serde_json::from_value(cfg)
-        .or_err_with(ReadError, || "Failed to parse key auth plugin config")?;
-
-    config
-        .validate()
-        .or_err_with(ReadError, || "Key auth plugin config validation failed")?;
-
+pub fn create_key_auth_plugin(cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyPlugin>> {
+    let config = PluginConfig::try_from(cfg)?;
     Ok(Arc::new(PluginKeyAuth { config }))
 }
 
@@ -62,11 +59,11 @@ struct PluginConfig {
 
 impl PluginConfig {
     fn default_header() -> String {
-        DEFAULT_HEADER.to_string()
+        DEFAULT_API_KEY_HEADER.to_string()
     }
 
     fn default_query() -> String {
-        DEFAULT_QUERY.to_string()
+        DEFAULT_API_KEY_QUERY.to_string()
     }
 
     fn default_hide_credentials() -> bool {
@@ -82,6 +79,22 @@ impl PluginConfig {
         } else {
             vec![]
         }
+    }
+}
+
+impl TryFrom<JsonValue> for PluginConfig {
+    type Error = ProxyError;
+
+    fn try_from(value: JsonValue) -> Result<Self, Self::Error> {
+        let config: PluginConfig = serde_json::from_value(value).map_err(|e| {
+            ProxyError::serialization_error("Failed to parse key auth plugin config", e)
+        })?;
+
+        config.validate().map_err(|e| {
+            ProxyError::validation_error(format!("Key auth plugin config validation failed: {e}"))
+        })?;
+
+        Ok(config)
     }
 }
 

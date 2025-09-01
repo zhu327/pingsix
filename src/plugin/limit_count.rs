@@ -2,7 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use http::StatusCode;
-use pingora_error::{ErrorType::ReadError, OrErr, Result};
+use pingora_error::Result;
 use pingora_limits::rate::Rate;
 use pingora_proxy::Session;
 use serde::{Deserialize, Serialize};
@@ -11,7 +11,7 @@ use validator::{Validate, ValidationError};
 
 use crate::{
     config::UpstreamHashOn,
-    core::{ProxyContext, ProxyPlugin},
+    core::{ProxyContext, ProxyError, ProxyPlugin, ProxyResult},
     utils::{request::request_selector_key, response::ResponseBuilder},
 };
 
@@ -22,13 +22,8 @@ const PRIORITY: i32 = 1002;
 /// This plugin enforces rate limiting on requests based on a key derived from the request
 /// (e.g., client IP, header, or custom variable). Exceeding the limit results in a configurable
 /// response (default: `503 Service Unavailable`).
-pub fn create_limit_count_plugin(cfg: JsonValue) -> Result<Arc<dyn ProxyPlugin>> {
-    let config: PluginConfig = serde_json::from_value(cfg)
-        .or_err_with(ReadError, || "Invalid limit count plugin config")?;
-
-    config
-        .validate()
-        .or_err_with(ReadError, || "Invalid limit count plugin config")?;
+pub fn create_limit_count_plugin(cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyPlugin>> {
+    let config = PluginConfig::try_from(cfg)?;
 
     let rate = Rate::new(Duration::from_secs(config.time_window as u64));
 
@@ -95,6 +90,23 @@ impl PluginConfig {
 
     fn default_key_missing_policy() -> KeyMissingPolicy {
         KeyMissingPolicy::Allow
+    }
+}
+
+impl TryFrom<JsonValue> for PluginConfig {
+    type Error = ProxyError;
+
+    fn try_from(value: JsonValue) -> Result<Self, Self::Error> {
+        let config: PluginConfig = serde_json::from_value(value)
+            .map_err(|e| ProxyError::serialization_error("Invalid limit count plugin config", e))?;
+
+        config.validate().map_err(|e| {
+            ProxyError::validation_error(format!(
+                "Limit count plugin config validation failed: {e}"
+            ))
+        })?;
+
+        Ok(config)
     }
 }
 

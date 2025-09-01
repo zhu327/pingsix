@@ -4,14 +4,14 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use http::Method;
-use pingora_error::{ErrorType::ReadError, OrErr, Result};
+use pingora_error::Result;
 use pingora_proxy::Session;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use validator::{Validate, ValidationError};
 
-use crate::core::{ProxyContext, ProxyPlugin};
+use crate::core::{ProxyContext, ProxyError, ProxyPlugin, ProxyResult};
 
 pub const PLUGIN_NAME: &str = "cache";
 const PRIORITY: i32 = 1085;
@@ -97,6 +97,22 @@ fn validate_regexes(patterns: &[String]) -> Result<(), ValidationError> {
     Ok(())
 }
 
+impl TryFrom<JsonValue> for PluginConfig {
+    type Error = ProxyError;
+
+    fn try_from(value: JsonValue) -> Result<Self, Self::Error> {
+        let config: PluginConfig = serde_json::from_value(value).map_err(|e| {
+            ProxyError::serialization_error("Failed to parse cache plugin config", e)
+        })?;
+
+        config.validate().map_err(|e| {
+            ProxyError::validation_error(format!("Cache plugin config validation failed: {e}"))
+        })?;
+
+        Ok(config)
+    }
+}
+
 pub struct PluginCache {
     methods: HashSet<Method>,
     no_cache_regex: Vec<Regex>,
@@ -104,12 +120,8 @@ pub struct PluginCache {
     cache_settings: Arc<CacheSettings>,
 }
 
-pub fn create_cache_plugin(cfg: JsonValue) -> Result<Arc<dyn ProxyPlugin>> {
-    let config: PluginConfig = serde_json::from_value(cfg)
-        .or_err_with(ReadError, || "Failed to parse cache plugin config")?;
-    config
-        .validate()
-        .or_err_with(ReadError, || "Cache plugin config validation failed")?;
+pub fn create_cache_plugin(cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyPlugin>> {
+    let config = PluginConfig::try_from(cfg)?;
 
     let methods = config
         .cache_http_methods
@@ -121,7 +133,12 @@ pub fn create_cache_plugin(cfg: JsonValue) -> Result<Arc<dyn ProxyPlugin>> {
         .no_cache_str
         .iter()
         .map(|s| {
-            Regex::new(s).or_err_with(ReadError, || format!("Invalid regex in no_cache_str: {s}"))
+            Regex::new(s).map_err(|e| -> Box<pingora_error::Error> {
+                ProxyError::validation_error(format!(
+                    "Invalid regex in no_cache_str '{s}': {e}"
+                ))
+                .into()
+            })
         })
         .collect::<Result<Vec<_>>>()?;
 

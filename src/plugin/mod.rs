@@ -17,11 +17,9 @@ pub mod request_id;
 use std::{collections::HashMap, sync::Arc};
 
 use once_cell::sync::Lazy;
-use pingora::OkOrErr;
-use pingora_error::{ErrorType::ReadError, Result};
 use serde_json::Value as JsonValue;
 
-use crate::core::{PluginCreateFn, ProxyPlugin};
+use crate::core::{PluginCreateFn, ProxyError, ProxyPlugin, ProxyResult};
 
 /// Global registry mapping plugin names to their factory functions.
 ///
@@ -80,9 +78,9 @@ static PLUGIN_BUILDER_REGISTRY: Lazy<HashMap<&'static str, PluginCreateFn>> = La
 ///
 /// # Errors
 /// Returns `ReadError` for unknown plugin names or configuration parsing failures
-pub fn build_plugin(name: &str, cfg: JsonValue) -> Result<Arc<dyn ProxyPlugin>> {
+pub fn build_plugin(name: &str, cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyPlugin>> {
     let builder = PLUGIN_BUILDER_REGISTRY
         .get(name)
-        .or_err(ReadError, "Unknown plugin type")?;
+        .ok_or_else(|| ProxyError::Plugin("Unknown plugin type".to_string()))?;
     builder(cfg)
 }

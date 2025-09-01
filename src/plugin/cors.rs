@@ -2,7 +2,7 @@ use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
 use http::{header, Method, StatusCode};
-use pingora_error::{ErrorType::ReadError, OrErr, Result};
+use pingora_error::Result;
 use pingora_http::ResponseHeader;
 use pingora_proxy::Session;
 use regex::Regex;
@@ -11,7 +11,7 @@ use serde_json::Value as JsonValue;
 use validator::{Validate, ValidationError};
 
 use crate::{
-    core::{ProxyContext, ProxyPlugin},
+    core::{ProxyContext, ProxyError, ProxyPlugin, ProxyResult},
     utils::request,
 };
 
@@ -19,13 +19,8 @@ pub const PLUGIN_NAME: &str = "cors";
 const PRIORITY: i32 = 4000;
 
 /// Creates an CORS plugin instance with the given configuration.
-pub fn create_cors_plugin(cfg: JsonValue) -> Result<Arc<dyn ProxyPlugin>> {
-    let config: PluginConfig = serde_json::from_value(cfg)
-        .or_err_with(ReadError, || "Failed to parse CORS plugin config")?;
-
-    config
-        .validate()
-        .or_err_with(ReadError, || "CORS plugin config validation failed")?;
+pub fn create_cors_plugin(cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyPlugin>> {
+    let config = PluginConfig::try_from(cfg)?;
 
     // Pre-compile regex patterns and create optimized config
     let compiled_config = config.compile_and_optimize()?;
@@ -119,7 +114,7 @@ impl PluginConfig {
         Ok(())
     }
 
-    fn compile_and_optimize(self) -> Result<OptimizedPluginConfig> {
+    fn compile_and_optimize(self) -> ProxyResult<OptimizedPluginConfig> {
         // Pre-compile regex patterns
         let compiled_regexes = if let Some(regex_list) = &self.allow_origins_by_regex {
             let compiled: Vec<Arc<Regex>> = regex_list
@@ -127,7 +122,12 @@ impl PluginConfig {
                 .map(|re| {
                     Regex::new(re)
                         .map(Arc::new)
-                        .or_err_with(ReadError, || format!("Invalid regex pattern: {re}"))
+                        .map_err(|e| -> Box<pingora_error::Error> {
+                            ProxyError::validation_error(format!(
+                                "Invalid regex pattern '{re}': {e}"
+                            ))
+                            .into()
+                        })
                 })
                 .collect::<Result<Vec<_>>>()?;
             Some(compiled)
@@ -159,6 +159,22 @@ impl PluginConfig {
             allow_origins_by_regex: compiled_regexes,
             allow_origins_set,
         })
+    }
+}
+
+impl TryFrom<JsonValue> for PluginConfig {
+    type Error = ProxyError;
+
+    fn try_from(value: JsonValue) -> Result<Self, Self::Error> {
+        let config: PluginConfig = serde_json::from_value(value).map_err(|e| {
+            ProxyError::serialization_error("Failed to parse CORS plugin config", e)
+        })?;
+
+        config.validate().map_err(|e| {
+            ProxyError::validation_error(format!("CORS plugin config validation failed: {e}"))
+        })?;
+
+        Ok(config)
     }
 }
 

@@ -3,12 +3,12 @@ use std::{net::IpAddr, sync::Arc};
 use async_trait::async_trait;
 use http::StatusCode;
 use ipnetwork::IpNetwork;
-use pingora_error::{ErrorType::ReadError, OrErr, Result};
+use pingora_error::Result;
 use pingora_proxy::Session;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
-use crate::core::{ProxyContext, ProxyPlugin};
+use crate::core::{ProxyContext, ProxyError, ProxyPlugin, ProxyResult};
 use crate::utils::{
     request::{get_client_ip, get_req_header_value},
     response::ResponseBuilder,
@@ -17,40 +17,55 @@ use crate::utils::{
 pub const PLUGIN_NAME: &str = "ip-restriction";
 const PRIORITY: i32 = 3000;
 
+/// Raw configuration for IP restriction plugin (before parsing networks).
+#[derive(Deserialize)]
+struct RawConfig {
+    #[serde(default)]
+    whitelist: Vec<String>,
+    #[serde(default)]
+    blacklist: Vec<String>,
+    message: Option<String>,
+    #[serde(default)]
+    trusted_proxies: Vec<String>,
+    #[serde(default = "RawConfig::default_use_forwarded_headers")]
+    use_forwarded_headers: bool,
+}
+
+impl RawConfig {
+    fn default_use_forwarded_headers() -> bool {
+        false
+    }
+}
+
+impl TryFrom<JsonValue> for RawConfig {
+    type Error = ProxyError;
+
+    fn try_from(value: JsonValue) -> Result<Self, Self::Error> {
+        serde_json::from_value(value).map_err(|e| {
+            ProxyError::serialization_error("Failed to parse IP restriction plugin config", e)
+        })
+    }
+}
+
 /// Creates an IP restriction plugin for access control based on client IP addresses.
 ///
 /// Supports CIDR notation for network ranges (e.g., `192.168.1.0/24`, `2001:db8::/32`).
 /// Handles proxy chains by examining X-Forwarded-For and X-Real-IP headers when configured.
 /// Whitelist takes precedence over blacklist for overlapping ranges.
-pub fn create_ip_restriction_plugin(cfg: JsonValue) -> Result<Arc<dyn ProxyPlugin>> {
-    #[derive(Deserialize)]
-    struct RawConfig {
-        #[serde(default)]
-        whitelist: Vec<String>,
-        #[serde(default)]
-        blacklist: Vec<String>,
-        message: Option<String>,
-        #[serde(default)]
-        trusted_proxies: Vec<String>,
-        #[serde(default = "RawConfig::default_use_forwarded_headers")]
-        use_forwarded_headers: bool,
-    }
-
-    impl RawConfig {
-        fn default_use_forwarded_headers() -> bool {
-            false
-        }
-    }
-
-    let raw_config: RawConfig = serde_json::from_value(cfg)
-        .or_err_with(ReadError, || "Failed to parse IP restriction plugin config")?;
+pub fn create_ip_restriction_plugin(cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyPlugin>> {
+    let raw_config = RawConfig::try_from(cfg)?;
 
     let whitelist = raw_config
         .whitelist
         .into_iter()
         .map(|s| {
             s.parse::<IpNetwork>()
-                .or_err_with(ReadError, || format!("Invalid whitelist IP network: {s}"))
+                .map_err(|e| -> Box<pingora_error::Error> {
+                    ProxyError::validation_error(format!(
+                        "Invalid whitelist IP network '{s}': {e}"
+                    ))
+                    .into()
+                })
         })
         .collect::<Result<Vec<_>>>()?;
 
@@ -59,7 +74,12 @@ pub fn create_ip_restriction_plugin(cfg: JsonValue) -> Result<Arc<dyn ProxyPlugi
         .into_iter()
         .map(|s| {
             s.parse::<IpNetwork>()
-                .or_err_with(ReadError, || format!("Invalid blacklist IP network: {s}"))
+                .map_err(|e| -> Box<pingora_error::Error> {
+                    ProxyError::validation_error(format!(
+                        "Invalid blacklist IP network '{s}': {e}"
+                    ))
+                    .into()
+                })
         })
         .collect::<Result<Vec<_>>>()?;
 
@@ -67,9 +87,13 @@ pub fn create_ip_restriction_plugin(cfg: JsonValue) -> Result<Arc<dyn ProxyPlugi
         .trusted_proxies
         .into_iter()
         .map(|s| {
-            s.parse::<IpNetwork>().or_err_with(ReadError, || {
-                format!("Invalid trusted proxy IP network: {s}")
-            })
+            s.parse::<IpNetwork>()
+                .map_err(|e| -> Box<pingora_error::Error> {
+                    ProxyError::validation_error(format!(
+                        "Invalid trusted proxy IP network '{s}': {e}"
+                    ))
+                    .into()
+                })
         })
         .collect::<Result<Vec<_>>>()?;
 
@@ -157,9 +181,12 @@ impl PluginIPRestriction {
     fn get_real_client_ip(&self, session: &Session) -> Result<IpAddr> {
         if self.config.use_forwarded_headers {
             // Get the immediate client IP (could be a proxy)
-            let immediate_client = get_client_ip(session)
-                .parse::<IpAddr>()
-                .or_err_with(ReadError, || "Failed to parse immediate client IP")?;
+            let immediate_client = get_client_ip(session).parse::<IpAddr>().map_err(
+                |e| -> Box<pingora_error::Error> {
+                    ProxyError::Internal(format!("Failed to parse immediate client IP: {e}"))
+                        .into()
+                },
+            )?;
 
             // Check if the immediate client is a trusted proxy
             if self.is_trusted_proxy(immediate_client) {
@@ -175,7 +202,9 @@ impl PluginIPRestriction {
             // Use direct client IP without considering proxy headers
             get_client_ip(session)
                 .parse::<IpAddr>()
-                .or_err_with(ReadError, || "Failed to parse client IP")
+                .map_err(|e| -> Box<pingora_error::Error> {
+                    ProxyError::Internal(format!("Failed to parse client IP: {e}")).into()
+                })
         }
     }
 

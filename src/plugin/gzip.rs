@@ -4,24 +4,20 @@ use async_trait::async_trait;
 use pingora::{
     modules::http::compression::ResponseCompression, protocols::http::compression::Algorithm,
 };
-use pingora_error::{ErrorType::ReadError, OrErr, Result};
+use pingora_error::Result;
 use pingora_proxy::Session;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use validator::Validate;
 
-use crate::core::{ProxyContext, ProxyPlugin};
+use crate::core::{ProxyContext, ProxyError, ProxyPlugin, ProxyResult};
 
 pub const PLUGIN_NAME: &str = "gzip";
 const PRIORITY: i32 = 995;
 
 /// Creates a Gzip plugin instance with the given configuration.
-pub fn create_gzip_plugin(cfg: JsonValue) -> Result<Arc<dyn ProxyPlugin>> {
-    let config: PluginConfig =
-        serde_json::from_value(cfg).or_err_with(ReadError, || "Invalid gzip plugin config")?;
-    config
-        .validate()
-        .or_err_with(ReadError, || "Gzip plugin config validation failed")?;
+pub fn create_gzip_plugin(cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyPlugin>> {
+    let config = PluginConfig::try_from(cfg)?;
     Ok(Arc::new(PluginGzip { config }))
 }
 
@@ -42,6 +38,21 @@ impl PluginConfig {
     /// Default compression level.
     fn default_comp_level() -> u32 {
         1
+    }
+}
+
+impl TryFrom<JsonValue> for PluginConfig {
+    type Error = ProxyError;
+
+    fn try_from(value: JsonValue) -> Result<Self, Self::Error> {
+        let config: PluginConfig = serde_json::from_value(value)
+            .map_err(|e| ProxyError::serialization_error("Invalid gzip plugin config", e))?;
+
+        config.validate().map_err(|e| {
+            ProxyError::validation_error(format!("Gzip plugin config validation failed: {e}"))
+        })?;
+
+        Ok(config)
     }
 }
 

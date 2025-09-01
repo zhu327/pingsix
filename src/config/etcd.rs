@@ -1,39 +1,22 @@
-use std::{error::Error, fmt, sync::Arc, time::Duration};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use etcd_client::{Client, ConnectOptions, Event, GetOptions, GetResponse, WatchOptions};
 use pingora::server::ListenFds;
 use pingora_core::{server::ShutdownWatch, services::Service};
-use tokio::{sync::Mutex, time::sleep};
+use tokio::{
+    sync::{Mutex, OnceCell},
+    time::sleep,
+};
 
 use super::Etcd;
+use crate::core::{ProxyError, ProxyResult};
 
 // Retry delay constants
 const LIST_RETRY_DELAY: Duration = Duration::from_secs(3);
 const WATCH_RETRY_DELAY: Duration = Duration::from_secs(1);
 
-#[derive(Debug)]
-pub enum EtcdError {
-    ClientNotInitialized,
-    ConnectionFailed(String),
-    ListOperationFailed(String),
-    WatchOperationFailed(String),
-    Other(String),
-}
-
-impl fmt::Display for EtcdError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            EtcdError::ClientNotInitialized => write!(f, "Etcd client is not initialized"),
-            EtcdError::ConnectionFailed(msg) => write!(f, "Connection failed: {msg}"),
-            EtcdError::ListOperationFailed(msg) => write!(f, "List operation failed: {msg}"),
-            EtcdError::WatchOperationFailed(msg) => write!(f, "Watch operation failed: {msg}"),
-            EtcdError::Other(msg) => write!(f, "Other error: {msg}"),
-        }
-    }
-}
-
-impl std::error::Error for EtcdError {}
+// EtcdError is now replaced by ProxyError::Etcd variant
 
 /// Service responsible for syncing and watching etcd configuration changes.
 pub struct EtcdConfigSync {
@@ -59,17 +42,19 @@ impl EtcdConfigSync {
     }
 
     /// Get or initialize the etcd client.
-    async fn get_client(&mut self) -> Result<&mut Client, EtcdError> {
+    async fn get_client(&mut self) -> ProxyResult<&mut Client> {
         if self.client.is_none() {
             log::debug!("Creating etcd client for prefix '{}'", self.config.prefix);
             self.client = Some(create_client(&self.config).await?);
         }
 
-        self.client.as_mut().ok_or(EtcdError::ClientNotInitialized)
+        self.client
+            .as_mut()
+            .ok_or_else(|| ProxyError::etcd_error("Etcd client is not initialized"))
     }
 
     /// Synchronize etcd data on initialization.
-    async fn list(&mut self) -> Result<(), EtcdError> {
+    async fn list(&mut self) -> ProxyResult<()> {
         let prefix = self.config.prefix.clone();
         let client = self.get_client().await?;
 
@@ -77,15 +62,13 @@ impl EtcdConfigSync {
         let response = client
             .get(prefix.as_str(), Some(options))
             .await
-            .map_err(|e| {
-                EtcdError::ListOperationFailed(format!("Failed to list key '{prefix}': {e}"))
-            })?;
+            .map_err(|e| ProxyError::etcd_error(format!("Failed to list key '{prefix}': {e}")))?;
 
         if let Some(header) = response.header() {
             self.revision = header.revision();
         } else {
-            return Err(EtcdError::Other(
-                "Failed to get header from list response".to_string(),
+            return Err(ProxyError::etcd_error(
+                "Failed to get header from list response",
             ));
         }
 
@@ -94,7 +77,7 @@ impl EtcdConfigSync {
     }
 
     /// Watch for etcd data changes.
-    async fn watch(&mut self) -> Result<(), EtcdError> {
+    async fn watch(&mut self) -> ProxyResult<()> {
         let prefix = self.config.prefix.clone();
         let start_revision = self.revision + 1;
         let options = WatchOptions::new()
@@ -106,17 +89,18 @@ impl EtcdConfigSync {
         let (mut watcher, mut stream) = client
             .watch(prefix.as_str(), Some(options))
             .await
-            .map_err(|e| {
-                EtcdError::WatchOperationFailed(format!("Failed to watch key '{prefix}': {e}"))
-            })?;
+            .map_err(|e| ProxyError::etcd_error(format!("Failed to watch key '{prefix}': {e}")))?;
 
-        watcher.request_progress().await.map_err(|e| {
-            EtcdError::WatchOperationFailed(format!("Failed to request progress: {e}"))
-        })?;
+        watcher
+            .request_progress()
+            .await
+            .map_err(|e| ProxyError::etcd_error(format!("Failed to request progress: {e}")))?;
 
-        while let Some(response) = stream.message().await.map_err(|e| {
-            EtcdError::WatchOperationFailed(format!("Failed to receive watch message: {e}"))
-        })? {
+        while let Some(response) = stream
+            .message()
+            .await
+            .map_err(|e| ProxyError::etcd_error(format!("Failed to receive watch message: {e}")))?
+        {
             if response.canceled() {
                 log::debug!("Watch stream for prefix '{prefix}' was canceled");
                 break;
@@ -207,7 +191,7 @@ pub trait EtcdEventHandler {
     fn handle_list_response(&self, response: &GetResponse);
 }
 
-async fn create_client(cfg: &Etcd) -> Result<Client, EtcdError> {
+async fn create_client(cfg: &Etcd) -> ProxyResult<Client> {
     let mut options = ConnectOptions::default();
     if let Some(timeout) = cfg.timeout {
         options = options.with_timeout(Duration::from_secs(timeout as _));
@@ -222,103 +206,83 @@ async fn create_client(cfg: &Etcd) -> Result<Client, EtcdError> {
     Client::connect(cfg.host.clone(), Some(options))
         .await
         .map_err(|e| {
-            EtcdError::ConnectionFailed(format!(
-                "Failed to connect to host '{:?}': {}",
-                cfg.host, e
-            ))
+            ProxyError::etcd_error(format!("Failed to connect to host '{:?}': {}", cfg.host, e))
         })
 }
 
-pub fn json_to_resource<T>(value: &[u8]) -> Result<T, Box<dyn Error>>
+pub fn json_to_resource<T>(value: &[u8]) -> ProxyResult<T>
 where
     T: serde::de::DeserializeOwned,
 {
     // Direct, efficient deserialization from JSON bytes
-    let resource: T = serde_json::from_slice(value)?;
+    let resource: T = serde_json::from_slice(value)
+        .map_err(|e| ProxyError::serialization_error("Failed to deserialize JSON", e))?;
     Ok(resource)
 }
 
 /// Wrapper for etcd client used by Admin API, ensuring local mutability.
 pub struct EtcdClientWrapper {
     config: Etcd,
-    client: Arc<Mutex<Option<Client>>>,
+    client: OnceCell<Mutex<Client>>,
 }
 
 impl EtcdClientWrapper {
     pub fn new(cfg: Etcd) -> Self {
         Self {
             config: cfg,
-            client: Arc::new(Mutex::new(None)),
+            client: OnceCell::new(),
         }
     }
 
-    async fn ensure_connected(&self) -> Result<Arc<Mutex<Option<Client>>>, EtcdError> {
-        let mut client_guard = self.client.lock().await;
-
-        if client_guard.is_none() {
-            log::debug!("Creating etcd client for prefix '{}'", self.config.prefix);
-            *client_guard = Some(
-                create_client(&self.config)
-                    .await
-                    .map_err(|e| EtcdError::ConnectionFailed(e.to_string()))?,
-            );
-        }
-
-        Ok(self.client.clone())
+    async fn ensure_connected(&self) -> ProxyResult<&Mutex<Client>> {
+        self.client
+            .get_or_try_init(|| async {
+                log::debug!("Creating etcd client for prefix '{}'", self.config.prefix);
+                let client = create_client(&self.config).await?;
+                Ok::<Mutex<Client>, ProxyError>(Mutex::new(client))
+            })
+            .await
+            .map_err(|e| ProxyError::etcd_error(e.to_string()))
     }
 
-    pub async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, EtcdError> {
-        let client_arc = self.ensure_connected().await?;
-        let mut client_guard = client_arc.lock().await;
-
-        let client = client_guard
-            .as_mut()
-            .ok_or(EtcdError::ClientNotInitialized)?;
+    pub async fn get(&self, key: &str) -> ProxyResult<Option<Vec<u8>>> {
+        let client_mutex = self.ensure_connected().await?;
+        let mut client = client_mutex.lock().await;
 
         let prefixed_key = self.with_prefix(key);
         client
             .get(prefixed_key.as_bytes(), None)
             .await
-            .map_err(|e| {
-                EtcdError::ListOperationFailed(format!("Failed to get key '{prefixed_key}': {e}"))
-            })
+            .map_err(|e| ProxyError::etcd_error(format!("Failed to get key '{prefixed_key}': {e}")))
             .map(|resp| resp.kvs().first().map(|kv| kv.value().to_vec()))
     }
 
-    pub async fn put(&self, key: &str, value: Vec<u8>) -> Result<(), EtcdError> {
-        let client_arc = self.ensure_connected().await?;
-        let mut client_guard = client_arc.lock().await;
-
-        let client = client_guard
-            .as_mut()
-            .ok_or(EtcdError::ClientNotInitialized)?;
+    pub async fn put(&self, key: &str, value: Vec<u8>) -> ProxyResult<()> {
+        let client_mutex = self.ensure_connected().await?;
+        let mut client = client_mutex.lock().await;
 
         let prefixed_key = self.with_prefix(key);
         client
             .put(prefixed_key.as_bytes(), value, None)
             .await
             .map_err(|e| {
-                EtcdError::Other(format!(
+                ProxyError::etcd_error(format!(
                     "Put operation for key '{prefixed_key}' failed: {e}"
                 ))
             })?;
         Ok(())
     }
 
-    pub async fn delete(&self, key: &str) -> Result<(), EtcdError> {
-        let client_arc = self.ensure_connected().await?;
-        let mut client_guard = client_arc.lock().await;
-
-        let client = client_guard
-            .as_mut()
-            .ok_or(EtcdError::ClientNotInitialized)?;
+    pub async fn delete(&self, key: &str) -> ProxyResult<()> {
+        let client_mutex = self.ensure_connected().await?;
+        let mut client = client_mutex.lock().await;
 
         let prefixed_key = self.with_prefix(key);
         client
             .delete(prefixed_key.as_bytes(), None)
             .await
             .map_err(|e| {
-                EtcdError::Other(format!(
+                ProxyError::etcd_error(format!(
                     "Delete operation for key '{prefixed_key}' failed: {e}"
                 ))
             })?;

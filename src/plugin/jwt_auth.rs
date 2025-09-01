@@ -4,31 +4,36 @@ use async_trait::async_trait;
 use base64::{engine::general_purpose, Engine as _};
 use http::StatusCode;
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
-use pingora_error::{ErrorType::ReadError, OrErr, Result};
+use pingora_error::Result;
 use pingora_proxy::Session;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
 use crate::{
-    core::{ProxyContext, ProxyPlugin},
+    core::{ProxyContext, ProxyError, ProxyPlugin, ProxyResult},
     utils::{request, response::ResponseBuilder},
 };
 
 pub const PLUGIN_NAME: &str = "jwt-auth";
 const PRIORITY: i32 = 2510;
-const DEFAULT_HEADER: &str = "authorization";
-const DEFAULT_QUERY: &str = "jwt";
-const DEFAULT_COOKIE: &str = "jwt";
+
+/// Key for storing JWT authentication payload in the proxy context
+const JWT_AUTH_PAYLOAD_KEY: &str = "jwt-auth-payload";
+/// Default authorization header name
+const DEFAULT_AUTH_HEADER: &str = "authorization";
+/// Default query parameter name for JWT token
+const DEFAULT_JWT_QUERY: &str = "jwt";
+/// Default cookie name for JWT token
+const DEFAULT_JWT_COOKIE: &str = "jwt";
 
 /// Creates a JWT Auth plugin instance with the given configuration.
 /// This plugin validates JWTs from HTTP headers, query parameters, or cookies, and optionally
 /// stores the JWT payload in the request context or hides credentials after validation.
-pub fn create_jwt_auth_plugin(cfg: JsonValue) -> Result<Arc<dyn ProxyPlugin>> {
-    let config: PluginConfig = serde_json::from_value(cfg)
-        .or_err_with(ReadError, || "Failed to parse JWT auth plugin config")?;
-    let decoding_key = config
-        .get_decoding_key()
-        .or_err_with(ReadError, || "Failed to create JWT decoding key")?;
+pub fn create_jwt_auth_plugin(cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyPlugin>> {
+    let config = PluginConfig::try_from(cfg)?;
+    let decoding_key = config.get_decoding_key().map_err(|e| {
+        ProxyError::Configuration(format!("Failed to create JWT decoding key: {e}"))
+    })?;
 
     // Pre-create validation object for better performance
     let mut validation = Validation::new(config.algorithm);
@@ -88,15 +93,15 @@ pub struct PluginConfig {
 
 impl PluginConfig {
     fn default_header() -> String {
-        DEFAULT_HEADER.to_string()
+        DEFAULT_AUTH_HEADER.to_string()
     }
 
     fn default_query() -> String {
-        DEFAULT_QUERY.to_string()
+        DEFAULT_JWT_QUERY.to_string()
     }
 
     fn default_cookie() -> String {
-        DEFAULT_COOKIE.to_string()
+        DEFAULT_JWT_COOKIE.to_string()
     }
 
     fn default_algorithm() -> Algorithm {
@@ -129,6 +134,16 @@ impl PluginConfig {
             }
             _ => Err(format!("Unsupported algorithm: {:?}", self.algorithm)),
         }
+    }
+}
+
+impl TryFrom<JsonValue> for PluginConfig {
+    type Error = ProxyError;
+
+    fn try_from(value: JsonValue) -> Result<Self, Self::Error> {
+        serde_json::from_value(value).map_err(|e| {
+            ProxyError::serialization_error("Failed to parse JWT auth plugin config", e)
+        })
     }
 }
 
@@ -212,7 +227,7 @@ impl ProxyPlugin for PluginJWTAuth {
 
         if self.config.store_in_ctx {
             // Store structured payload directly for downstream plugins to use without re-parsing
-            ctx.set("jwt-auth-payload", token_data.claims.extra.clone());
+            ctx.set(JWT_AUTH_PAYLOAD_KEY, token_data.claims.extra.clone());
         }
 
         Ok(false)

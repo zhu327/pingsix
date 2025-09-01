@@ -88,6 +88,16 @@ pub enum ProxyError {
     Plugin(String),
     Internal(String),
     Pingora(pingora_error::Error),
+    /// Validation errors (e.g., from validator crate)
+    Validation(String),
+    /// Serialization/deserialization errors
+    Serialization(String),
+    /// Etcd-related errors
+    Etcd(String),
+    /// Authentication/authorization errors
+    Auth(String),
+    /// Rate limiting errors
+    RateLimit(String),
     /// A generic error variant that can hold any error with context
     WithCause {
         message: String,
@@ -108,6 +118,11 @@ impl std::fmt::Display for ProxyError {
             ProxyError::Plugin(msg) => write!(f, "Plugin execution error: {msg}"),
             ProxyError::Internal(msg) => write!(f, "Internal error: {msg}"),
             ProxyError::Pingora(err) => write!(f, "Pingora error: {err}"),
+            ProxyError::Validation(msg) => write!(f, "Validation error: {msg}"),
+            ProxyError::Serialization(msg) => write!(f, "Serialization error: {msg}"),
+            ProxyError::Etcd(msg) => write!(f, "Etcd error: {msg}"),
+            ProxyError::Auth(msg) => write!(f, "Authentication error: {msg}"),
+            ProxyError::RateLimit(msg) => write!(f, "Rate limit error: {msg}"),
             ProxyError::WithCause { message, cause } => write!(f, "{message}: {cause}"),
         }
     }
@@ -133,6 +148,24 @@ impl From<std::io::Error> for ProxyError {
 impl From<pingora_error::Error> for ProxyError {
     fn from(err: pingora_error::Error) -> Self {
         ProxyError::Pingora(err)
+    }
+}
+
+impl From<serde_json::Error> for ProxyError {
+    fn from(err: serde_json::Error) -> Self {
+        ProxyError::Serialization(err.to_string())
+    }
+}
+
+impl From<validator::ValidationErrors> for ProxyError {
+    fn from(err: validator::ValidationErrors) -> Self {
+        ProxyError::Validation(err.to_string())
+    }
+}
+
+impl From<Box<pingora_error::Error>> for ProxyError {
+    fn from(err: Box<pingora_error::Error>) -> Self {
+        ProxyError::Pingora(*err)
     }
 }
 
@@ -174,6 +207,24 @@ impl From<ProxyError> for Box<pingora_error::Error> {
             ProxyError::Internal(msg) => {
                 Error::explain(ErrorType::InternalError, format!("Internal error: {msg}"))
             }
+            ProxyError::Validation(msg) => {
+                Error::explain(ErrorType::InternalError, format!("Validation error: {msg}"))
+            }
+            ProxyError::Serialization(msg) => Error::explain(
+                ErrorType::InternalError,
+                format!("Serialization error: {msg}"),
+            ),
+            ProxyError::Etcd(msg) => {
+                Error::explain(ErrorType::InternalError, format!("Etcd error: {msg}"))
+            }
+            ProxyError::Auth(msg) => Error::explain(
+                ErrorType::HTTPStatus(401),
+                format!("Authentication error: {msg}"),
+            ),
+            ProxyError::RateLimit(msg) => Error::explain(
+                ErrorType::HTTPStatus(429),
+                format!("Rate limit error: {msg}"),
+            ),
             ProxyError::WithCause { message, cause } => {
                 Error::because(ErrorType::InternalError, message, cause)
             }
@@ -214,6 +265,35 @@ impl ProxyError {
     {
         ProxyError::with_cause(format!("Plugin execution error: {}", message.into()), cause)
     }
+
+    /// Create a validation error
+    pub fn validation_error<S: Into<String>>(message: S) -> Self {
+        ProxyError::Validation(message.into())
+    }
+
+    /// Create a serialization error with cause
+    pub fn serialization_error<E, S>(message: S, cause: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+        S: Into<String>,
+    {
+        ProxyError::with_cause(format!("Serialization error: {}", message.into()), cause)
+    }
+
+    /// Create an etcd error
+    pub fn etcd_error<S: Into<String>>(message: S) -> Self {
+        ProxyError::Etcd(message.into())
+    }
+
+    /// Create an authentication error
+    pub fn auth_error<S: Into<String>>(message: S) -> Self {
+        ProxyError::Auth(message.into())
+    }
+
+    /// Create a rate limit error
+    pub fn rate_limit_error<S: Into<String>>(message: S) -> Self {
+        ProxyError::RateLimit(message.into())
+    }
 }
 
 /// Helper trait for converting errors with context
@@ -235,7 +315,7 @@ where
 // =============================================================================
 
 /// Type alias for plugin initialization functions
-pub type PluginCreateFn = fn(JsonValue) -> Result<Arc<dyn ProxyPlugin>>;
+pub type PluginCreateFn = fn(JsonValue) -> ProxyResult<Arc<dyn ProxyPlugin>>;
 
 /// The core plugin trait that defines the lifecycle hooks for proxy plugins.
 ///
@@ -482,7 +562,8 @@ impl ProxyPlugin for ProxyPluginExecutor {
 /// Request-scoped context shared across all plugin phases.
 ///
 /// Contains routing information, retry state, and plugin-specific data.
-/// The vars field enables plugins to share data across different execution phases.
+/// Common fields like request_start and request_id are directly accessible for better performance.
+/// The vars field enables plugins to share additional data across different execution phases.
 pub struct ProxyContext {
     /// The matched proxy route, if any.
     pub route: Option<Arc<dyn RouteContext>>,
@@ -494,23 +575,25 @@ pub struct ProxyContext {
     pub plugin: Arc<ProxyPluginExecutor>,
     /// Executor for global plugins.
     pub global_plugin: Arc<ProxyPluginExecutor>,
+    /// Request start timestamp for performance metrics and timeouts.
+    pub request_start: Instant,
+    /// Unique request identifier, set by request-id plugin if enabled.
+    pub request_id: Option<String>,
     /// Custom variables available to plugins (type-erased, thread-safe).
     pub vars: HashMap<String, Box<dyn Any + Send + Sync>>,
 }
 
 impl Default for ProxyContext {
     fn default() -> Self {
-        // Pre-populate with request timestamp for performance metrics
-        let mut vars: HashMap<String, Box<dyn Any + Send + Sync>> = HashMap::new();
-        vars.insert("request_start".to_string(), Box::new(Instant::now()));
-
         Self {
             route: None,
             route_params: None,
             tries: 0,
             plugin: ProxyPluginExecutor::default_shared(),
             global_plugin: ProxyPluginExecutor::default_shared(),
-            vars,
+            request_start: Instant::now(),
+            request_id: None,
+            vars: HashMap::new(),
         }
     }
 }
@@ -534,6 +617,26 @@ impl ProxyContext {
     /// Check if a key exists without retrieving the value.
     pub fn contains(&self, key: &str) -> bool {
         self.vars.contains_key(key)
+    }
+
+    /// Get the elapsed time since request start in milliseconds.
+    pub fn elapsed_ms(&self) -> u128 {
+        self.request_start.elapsed().as_millis()
+    }
+
+    /// Get the elapsed time since request start as f64 milliseconds (for metrics).
+    pub fn elapsed_ms_f64(&self) -> f64 {
+        self.request_start.elapsed().as_millis() as f64
+    }
+
+    /// Get the request ID if set.
+    pub fn request_id(&self) -> Option<&str> {
+        self.request_id.as_deref()
+    }
+
+    /// Set the request ID.
+    pub fn set_request_id(&mut self, id: String) {
+        self.request_id = Some(id);
     }
 }
 

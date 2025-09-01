@@ -150,7 +150,6 @@ fn add_listeners(
             // Enforce TLS 1.3 for security - older versions have known vulnerabilities
             tls_settings
                 .deref_mut()
-                .deref_mut()
                 .set_max_proto_version(Some(pingora::tls::ssl::SslVersion::TLS1_3))?;
 
             if list_cfg.offer_h2 {

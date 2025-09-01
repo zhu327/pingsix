@@ -1,9 +1,6 @@
 use async_trait::async_trait;
 use http::Uri;
-use pingora_error::{
-    ErrorType::{InternalError, ReadError},
-    OrErr, Result,
-};
+use pingora_error::Result;
 use pingora_http::RequestHeader;
 use pingora_proxy::Session;
 use regex::Regex;
@@ -12,18 +9,13 @@ use serde_json::Value as JsonValue;
 use std::sync::Arc;
 use validator::{Validate, ValidationError};
 
-use crate::core::{apply_regex_uri_template, ProxyContext, ProxyPlugin};
+use crate::core::{apply_regex_uri_template, ProxyContext, ProxyError, ProxyPlugin, ProxyResult};
 
 pub const PLUGIN_NAME: &str = "proxy-rewrite";
 const PRIORITY: i32 = 1008;
 
-pub fn create_proxy_rewrite_plugin(cfg: JsonValue) -> Result<Arc<dyn ProxyPlugin>> {
-    let config: PluginConfig =
-        serde_json::from_value(cfg).or_err(ReadError, "Invalid proxy rewrite plugin config")?;
-
-    config
-        .validate()
-        .or_err(ReadError, "Invalid proxy rewrite plugin config")?;
+pub fn create_proxy_rewrite_plugin(cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyPlugin>> {
+    let config = PluginConfig::try_from(cfg)?;
 
     // Precompile regex patterns for regex_uri to improve performance
     let mut regex_patterns = Vec::new();
@@ -88,6 +80,24 @@ impl PluginConfig {
     }
 }
 
+impl TryFrom<JsonValue> for PluginConfig {
+    type Error = ProxyError;
+
+    fn try_from(value: JsonValue) -> Result<Self, Self::Error> {
+        let config: PluginConfig = serde_json::from_value(value).map_err(|e| {
+            ProxyError::serialization_error("Invalid proxy rewrite plugin config", e)
+        })?;
+
+        config.validate().map_err(|e| {
+            ProxyError::validation_error(format!(
+                "Proxy rewrite plugin config validation failed: {e}"
+            ))
+        })?;
+
+        Ok(config)
+    }
+}
+
 pub struct PluginProxyRewrite {
     config: PluginConfig,
     regex_patterns: Vec<(Regex, String)>, // Precompiled regex and template pairs
@@ -120,14 +130,14 @@ impl ProxyPlugin for PluginProxyRewrite {
                 method
                     .as_bytes()
                     .try_into()
-                    .or_err(InternalError, "Invalid method")?,
+                    .map_err(|e| ProxyError::Internal(format!("Invalid method: {e}")))?,
             );
         }
 
         if let Some(ref host) = self.config.host {
             upstream_request
                 .insert_header(http::header::HOST, host)
-                .or_err(InternalError, "Invalid host")?;
+                .map_err(|e| ProxyError::Internal(format!("Invalid host: {e}")))?;
         }
 
         if let Some(ref headers) = self.config.headers {

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use http::{header, uri::Scheme, StatusCode, Uri};
-use pingora_error::{ErrorType::ReadError, OrErr, Result};
+use pingora_error::Result;
 use pingora_http::ResponseHeader;
 use pingora_proxy::Session;
 use regex::Regex;
@@ -11,20 +11,15 @@ use serde_json::Value as JsonValue;
 use validator::{Validate, ValidationError};
 
 use crate::{
-    core::{apply_regex_uri_template, ProxyContext, ProxyPlugin},
+    core::{apply_regex_uri_template, ProxyContext, ProxyError, ProxyPlugin, ProxyResult},
     utils::request::get_request_host,
 };
 
 pub const PLUGIN_NAME: &str = "redirect";
 const PRIORITY: i32 = 900;
 
-pub fn create_redirect_plugin(cfg: JsonValue) -> Result<Arc<dyn ProxyPlugin>> {
-    let config: PluginConfig =
-        serde_json::from_value(cfg).or_err(ReadError, "Invalid redirect plugin config")?;
-
-    config
-        .validate()
-        .or_err(ReadError, "Invalid redirect plugin config")?;
+pub fn create_redirect_plugin(cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyPlugin>> {
+    let config = PluginConfig::try_from(cfg)?;
 
     // Precompile regex patterns for regex_uri to improve performance
     let mut regex_patterns = Vec::new();
@@ -83,6 +78,21 @@ impl PluginConfig {
     }
 }
 
+impl TryFrom<JsonValue> for PluginConfig {
+    type Error = ProxyError;
+
+    fn try_from(value: JsonValue) -> Result<Self, Self::Error> {
+        let config: PluginConfig = serde_json::from_value(value)
+            .map_err(|e| ProxyError::serialization_error("Invalid redirect plugin config", e))?;
+
+        config.validate().map_err(|e| {
+            ProxyError::validation_error(format!("Redirect plugin config validation failed: {e}"))
+        })?;
+
+        Ok(config)
+    }
+}
+
 pub struct PluginRedirect {
     config: PluginConfig,
     regex_patterns: Vec<(Regex, String)>, // Precompiled regex and template pairs
@@ -115,14 +125,14 @@ impl PluginRedirect {
     async fn redirect_https(&self, session: &mut Session) -> Result<bool> {
         let current_uri = session.req_header().uri.clone();
         let host = get_request_host(session.req_header())
-            .ok_or_else(|| pingora_error::Error::new_str("Missing host"))?;
+            .ok_or_else(|| ProxyError::Internal("Missing host".to_string()))?;
 
         let new_uri = Uri::builder()
             .scheme(Scheme::HTTPS)
             .authority(host)
             .path_and_query(current_uri.path_and_query().unwrap().to_owned())
             .build()
-            .or_err(ReadError, "Failed to build HTTPS URI")?;
+            .map_err(|e| ProxyError::Internal(format!("Failed to build HTTPS URI: {e}")))?;
 
         self.send_redirect_response(session, new_uri).await
     }

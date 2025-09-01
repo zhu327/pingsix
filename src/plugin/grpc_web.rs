@@ -6,7 +6,7 @@ use pingora_error::Result;
 use pingora_proxy::Session;
 use serde_json::Value as JsonValue;
 
-use crate::core::{ProxyContext, ProxyPlugin};
+use crate::core::{ProxyContext, ProxyPlugin, ProxyResult};
 
 pub const PLUGIN_NAME: &str = "grpc-web";
 const PRIORITY: i32 = 505;
@@ -15,7 +15,7 @@ const PRIORITY: i32 = 505;
 /// This plugin enables support for the gRPC-Web protocol by initializing the `GrpcWebBridge` module
 /// for each request. The configuration is currently unused, but the `cfg` parameter is provided for
 /// future extensibility.
-pub fn create_grpc_web_plugin(_cfg: JsonValue) -> Result<Arc<dyn ProxyPlugin>> {
+pub fn create_grpc_web_plugin(_cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyPlugin>> {
     Ok(Arc::new(PluginGrpcWeb {}))
 }
 

@@ -2,21 +2,20 @@ use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use http::{header, StatusCode};
-use pingora_error::{ErrorType::ReadError, OrErr, Result};
+use pingora_error::Result;
 use pingora_http::ResponseHeader;
 use pingora_proxy::Session;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
-use crate::core::{ProxyContext, ProxyPlugin};
+use crate::core::{ProxyContext, ProxyError, ProxyPlugin, ProxyResult};
 
 pub const PLUGIN_NAME: &str = "echo";
 const PRIORITY: i32 = 412;
 
 /// Creates an Echo plugin instance with the given configuration.
-pub fn create_echo_plugin(cfg: JsonValue) -> Result<Arc<dyn ProxyPlugin>> {
-    let config: PluginConfig =
-        serde_json::from_value(cfg).or_err_with(ReadError, || "Invalid echo plugin config")?;
+pub fn create_echo_plugin(cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyPlugin>> {
+    let config = PluginConfig::try_from(cfg)?;
     Ok(Arc::new(PluginEcho { config }))
 }
 
@@ -30,6 +29,15 @@ struct PluginConfig {
     /// Keys are header names, and values are header values.
     #[serde(default)]
     headers: HashMap<String, String>,
+}
+
+impl TryFrom<JsonValue> for PluginConfig {
+    type Error = ProxyError;
+
+    fn try_from(value: JsonValue) -> Result<Self, Self::Error> {
+        serde_json::from_value(value)
+            .map_err(|e| ProxyError::serialization_error("Invalid echo plugin config", e))
+    }
 }
 
 /// Echo plugin implementation.
