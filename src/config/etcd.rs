@@ -62,7 +62,9 @@ impl EtcdConfigSync {
         let response = client
             .get(prefix.as_str(), Some(options))
             .await
-            .map_err(|e| ProxyError::etcd_error(format!("Failed to list key '{prefix}': {e}")))?;
+            .map_err(|e| {
+                ProxyError::etcd_error_with_cause(format!("Failed to list key '{prefix}'"), e)
+            })?;
 
         if let Some(header) = response.header() {
             self.revision = header.revision();
@@ -89,17 +91,19 @@ impl EtcdConfigSync {
         let (mut watcher, mut stream) = client
             .watch(prefix.as_str(), Some(options))
             .await
-            .map_err(|e| ProxyError::etcd_error(format!("Failed to watch key '{prefix}': {e}")))?;
+            .map_err(|e| {
+                ProxyError::etcd_error_with_cause(format!("Failed to watch key '{prefix}'"), e)
+            })?;
 
         watcher
             .request_progress()
             .await
-            .map_err(|e| ProxyError::etcd_error(format!("Failed to request progress: {e}")))?;
+            .map_err(|e| ProxyError::etcd_error_with_cause("Failed to request progress", e))?;
 
         while let Some(response) = stream
             .message()
             .await
-            .map_err(|e| ProxyError::etcd_error(format!("Failed to receive watch message: {e}")))?
+            .map_err(|e| ProxyError::etcd_error_with_cause("Failed to receive watch message", e))?
         {
             if response.canceled() {
                 log::debug!("Watch stream for prefix '{prefix}' was canceled");
@@ -206,7 +210,10 @@ async fn create_client(cfg: &Etcd) -> ProxyResult<Client> {
     Client::connect(cfg.host.clone(), Some(options))
         .await
         .map_err(|e| {
-            ProxyError::etcd_error(format!("Failed to connect to host '{:?}': {}", cfg.host, e))
+            ProxyError::etcd_error_with_cause(
+                format!("Failed to connect to host '{:?}'", cfg.host),
+                e,
+            )
         })
 }
 
@@ -242,7 +249,7 @@ impl EtcdClientWrapper {
                 Ok::<Mutex<Client>, ProxyError>(Mutex::new(client))
             })
             .await
-            .map_err(|e| ProxyError::etcd_error(e.to_string()))
+            .map_err(|e| ProxyError::etcd_error_with_cause("Failed to create etcd client", e))
     }
 
     pub async fn get(&self, key: &str) -> ProxyResult<Option<Vec<u8>>> {
@@ -253,7 +260,9 @@ impl EtcdClientWrapper {
         client
             .get(prefixed_key.as_bytes(), None)
             .await
-            .map_err(|e| ProxyError::etcd_error(format!("Failed to get key '{prefixed_key}': {e}")))
+            .map_err(|e| {
+                ProxyError::etcd_error_with_cause(format!("Failed to get key '{prefixed_key}'"), e)
+            })
             .map(|resp| resp.kvs().first().map(|kv| kv.value().to_vec()))
     }
 
@@ -266,9 +275,10 @@ impl EtcdClientWrapper {
             .put(prefixed_key.as_bytes(), value, None)
             .await
             .map_err(|e| {
-                ProxyError::etcd_error(format!(
-                    "Put operation for key '{prefixed_key}' failed: {e}"
-                ))
+                ProxyError::etcd_error_with_cause(
+                    format!("Put operation for key '{prefixed_key}' failed"),
+                    e,
+                )
             })?;
         Ok(())
     }
@@ -282,9 +292,10 @@ impl EtcdClientWrapper {
             .delete(prefixed_key.as_bytes(), None)
             .await
             .map_err(|e| {
-                ProxyError::etcd_error(format!(
-                    "Delete operation for key '{prefixed_key}' failed: {e}"
-                ))
+                ProxyError::etcd_error_with_cause(
+                    format!("Delete operation for key '{prefixed_key}' failed"),
+                    e,
+                )
             })?;
         Ok(())
     }

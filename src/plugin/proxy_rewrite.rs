@@ -88,11 +88,7 @@ impl TryFrom<JsonValue> for PluginConfig {
             ProxyError::serialization_error("Invalid proxy rewrite plugin config", e)
         })?;
 
-        config.validate().map_err(|e| {
-            ProxyError::validation_error(format!(
-                "Proxy rewrite plugin config validation failed: {e}"
-            ))
-        })?;
+        config.validate()?;
 
         Ok(config)
     }

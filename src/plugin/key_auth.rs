@@ -90,9 +90,7 @@ impl TryFrom<JsonValue> for PluginConfig {
             ProxyError::serialization_error("Failed to parse key auth plugin config", e)
         })?;
 
-        config.validate().map_err(|e| {
-            ProxyError::validation_error(format!("Key auth plugin config validation failed: {e}"))
-        })?;
+        config.validate()?;
 
         Ok(config)
     }

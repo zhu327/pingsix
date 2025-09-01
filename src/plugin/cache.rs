@@ -105,9 +105,7 @@ impl TryFrom<JsonValue> for PluginConfig {
             ProxyError::serialization_error("Failed to parse cache plugin config", e)
         })?;
 
-        config.validate().map_err(|e| {
-            ProxyError::validation_error(format!("Cache plugin config validation failed: {e}"))
-        })?;
+        config.validate()?;
 
         Ok(config)
     }
@@ -134,10 +132,8 @@ pub fn create_cache_plugin(cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyPlugin>> 
         .iter()
         .map(|s| {
             Regex::new(s).map_err(|e| -> Box<pingora_error::Error> {
-                ProxyError::validation_error(format!(
-                    "Invalid regex in no_cache_str '{s}': {e}"
-                ))
-                .into()
+                ProxyError::validation_error(format!("Invalid regex in no_cache_str '{s}': {e}"))
+                    .into()
             })
         })
         .collect::<Result<Vec<_>>>()?;

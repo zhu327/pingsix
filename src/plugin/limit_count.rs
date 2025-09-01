@@ -100,11 +100,7 @@ impl TryFrom<JsonValue> for PluginConfig {
         let config: PluginConfig = serde_json::from_value(value)
             .map_err(|e| ProxyError::serialization_error("Invalid limit count plugin config", e))?;
 
-        config.validate().map_err(|e| {
-            ProxyError::validation_error(format!(
-                "Limit count plugin config validation failed: {e}"
-            ))
-        })?;
+        config.validate()?;
 
         Ok(config)
     }

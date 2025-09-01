@@ -170,9 +170,7 @@ impl TryFrom<JsonValue> for PluginConfig {
             ProxyError::serialization_error("Failed to parse CORS plugin config", e)
         })?;
 
-        config.validate().map_err(|e| {
-            ProxyError::validation_error(format!("CORS plugin config validation failed: {e}"))
-        })?;
+        config.validate()?;
 
         Ok(config)
     }

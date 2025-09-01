@@ -90,6 +90,8 @@ pub enum ProxyError {
     Pingora(pingora_error::Error),
     /// Validation errors (e.g., from validator crate)
     Validation(String),
+    /// Structured validation errors preserving original ValidationErrors
+    ValidationStructured(validator::ValidationErrors),
     /// Serialization/deserialization errors
     Serialization(String),
     /// Etcd-related errors
@@ -119,6 +121,9 @@ impl std::fmt::Display for ProxyError {
             ProxyError::Internal(msg) => write!(f, "Internal error: {msg}"),
             ProxyError::Pingora(err) => write!(f, "Pingora error: {err}"),
             ProxyError::Validation(msg) => write!(f, "Validation error: {msg}"),
+            ProxyError::ValidationStructured(errors) => {
+                write!(f, "Validation error: {errors}")
+            }
             ProxyError::Serialization(msg) => write!(f, "Serialization error: {msg}"),
             ProxyError::Etcd(msg) => write!(f, "Etcd error: {msg}"),
             ProxyError::Auth(msg) => write!(f, "Authentication error: {msg}"),
@@ -133,6 +138,7 @@ impl std::error::Error for ProxyError {
         match self {
             ProxyError::Network(err) => Some(err),
             ProxyError::Pingora(err) => Some(err),
+            ProxyError::ValidationStructured(err) => Some(err),
             ProxyError::WithCause { cause, .. } => Some(cause.as_ref()),
             _ => None,
         }
@@ -159,6 +165,12 @@ impl From<serde_json::Error> for ProxyError {
 
 impl From<validator::ValidationErrors> for ProxyError {
     fn from(err: validator::ValidationErrors) -> Self {
+        ProxyError::ValidationStructured(err)
+    }
+}
+
+impl From<validator::ValidationError> for ProxyError {
+    fn from(err: validator::ValidationError) -> Self {
         ProxyError::Validation(err.to_string())
     }
 }
@@ -210,6 +222,10 @@ impl From<ProxyError> for Box<pingora_error::Error> {
             ProxyError::Validation(msg) => {
                 Error::explain(ErrorType::InternalError, format!("Validation error: {msg}"))
             }
+            ProxyError::ValidationStructured(validation_errors) => Error::explain(
+                ErrorType::InternalError,
+                format!("Validation error: {validation_errors}"),
+            ),
             ProxyError::Serialization(msg) => Error::explain(
                 ErrorType::InternalError,
                 format!("Serialization error: {msg}"),
@@ -266,9 +282,23 @@ impl ProxyError {
         ProxyError::with_cause(format!("Plugin execution error: {}", message.into()), cause)
     }
 
-    /// Create a validation error
+    /// Create a validation error (string-based, for backward compatibility)
     pub fn validation_error<S: Into<String>>(message: S) -> Self {
         ProxyError::Validation(message.into())
+    }
+
+    /// Create a structured validation error preserving ValidationErrors
+    pub fn validation_error_structured(errors: validator::ValidationErrors) -> Self {
+        ProxyError::ValidationStructured(errors)
+    }
+
+    /// Create a validation error with cause (uses WithCause for better error chaining)
+    pub fn validation_error_with_cause<E, S>(message: S, cause: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+        S: Into<String>,
+    {
+        ProxyError::with_cause(format!("Validation error: {}", message.into()), cause)
     }
 
     /// Create a serialization error with cause
@@ -280,9 +310,18 @@ impl ProxyError {
         ProxyError::with_cause(format!("Serialization error: {}", message.into()), cause)
     }
 
-    /// Create an etcd error
+    /// Create an etcd error (string-based, for backward compatibility)
     pub fn etcd_error<S: Into<String>>(message: S) -> Self {
         ProxyError::Etcd(message.into())
+    }
+
+    /// Create an etcd error with cause (preserves original etcd_client::Error)
+    pub fn etcd_error_with_cause<E, S>(message: S, cause: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+        S: Into<String>,
+    {
+        ProxyError::with_cause(format!("Etcd error: {}", message.into()), cause)
     }
 
     /// Create an authentication error

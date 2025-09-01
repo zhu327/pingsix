@@ -20,7 +20,7 @@ use crate::{
         etcd::{json_to_resource, EtcdClientWrapper},
         Admin, Identifiable, Pingsix,
     },
-    core::constant_time_eq,
+    core::{constant_time_eq, ProxyError},
     plugin::build_plugin,
     utils::response::{CommonErrors, ResponseBuilder},
 };
@@ -28,42 +28,87 @@ use crate::{
 #[derive(Debug)]
 enum ApiError {
     EtcdGetError(String),
-    EtcdPutError(String),
-    EtcdDeleteError(String),
     ValidationError(String),
     MissingParameter(String),
     InvalidRequest(String),
     RequestBodyReadError(String),
+    /// Preserves the original ProxyError with full context
+    ProxyError(ProxyError),
 }
 
 impl fmt::Display for ApiError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ApiError::EtcdGetError(msg) => write!(f, "Etcd get error: {msg}"),
-            ApiError::EtcdPutError(msg) => write!(f, "Etcd put error: {msg}"),
-            ApiError::EtcdDeleteError(msg) => write!(f, "Etcd delete error: {msg}"),
             ApiError::ValidationError(msg) => write!(f, "Validation error: {msg}"),
             ApiError::MissingParameter(msg) => write!(f, "Missing parameter: {msg}"),
             ApiError::InvalidRequest(msg) => write!(f, "Invalid request: {msg}"),
             ApiError::RequestBodyReadError(msg) => write!(f, "Request body read error: {msg}"),
+            ApiError::ProxyError(err) => write!(f, "{err}"),
         }
     }
 }
 
-impl Error for ApiError {}
+impl Error for ApiError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            ApiError::ProxyError(err) => Some(err),
+            _ => None,
+        }
+    }
+}
+
+impl From<ProxyError> for ApiError {
+    fn from(err: ProxyError) -> Self {
+        ApiError::ProxyError(err)
+    }
+}
 
 impl ApiError {
     fn into_response(self) -> ApiResponse {
         match self {
-            ApiError::EtcdGetError(_)
-            | ApiError::EtcdPutError(_)
-            | ApiError::EtcdDeleteError(_)
-            | ApiError::RequestBodyReadError(_) => {
+            ApiError::EtcdGetError(_) | ApiError::RequestBodyReadError(_) => {
                 CommonErrors::internal_server_error(&self.to_string())
             }
             ApiError::ValidationError(_)
             | ApiError::MissingParameter(_)
             | ApiError::InvalidRequest(_) => CommonErrors::bad_request(&self.to_string()),
+            ApiError::ProxyError(proxy_err) => {
+                // Handle different ProxyError types appropriately
+                match &proxy_err {
+                    ProxyError::ValidationStructured(validation_errors) => {
+                        // For structured validation errors, we can provide detailed field-level errors
+                        let detailed_errors: std::collections::HashMap<String, Vec<String>> =
+                            validation_errors
+                                .field_errors()
+                                .iter()
+                                .map(|(field, errors)| {
+                                    let error_messages: Vec<String> =
+                                        errors.iter().map(|e| e.to_string()).collect();
+                                    (field.to_string(), error_messages)
+                                })
+                                .collect();
+
+                        let response_body = serde_json::json!({
+                            "error": "Validation failed",
+                            "details": detailed_errors
+                        });
+
+                        Response::builder()
+                            .status(400)
+                            .header("Content-Type", "application/json")
+                            .body(response_body.to_string().into_bytes())
+                            .unwrap()
+                    }
+                    ProxyError::Validation(_) | ProxyError::Configuration(_) => {
+                        CommonErrors::bad_request(&proxy_err.to_string())
+                    }
+                    _ => {
+                        // For other errors, treat as internal server error
+                        CommonErrors::internal_server_error(&proxy_err.to_string())
+                    }
+                }
+            }
         }
     }
 }
@@ -84,13 +129,12 @@ trait AdminResource: DeserializeOwned + Validate + Identifiable + Send + Sync + 
     const RESOURCE_TYPE: &'static str;
 
     fn validate_resource(data: &[u8]) -> ApiResult<Self> {
-        let resource = json_to_resource::<Self>(data)
-            .map_err(|e| ApiError::InvalidRequest(format!("Invalid JSON data: {e}")))?;
+        let resource = json_to_resource::<Self>(data)?;
 
         // Basic field validation using the validator crate
-        resource.validate().map_err(|e| {
-            ApiError::ValidationError(format!("{} validation failed: {e}", Self::RESOURCE_TYPE))
-        })?;
+        resource
+            .validate()
+            .map_err(|e| ApiError::ProxyError(ProxyError::ValidationStructured(e)))?;
 
         // Additional plugin-specific validation if applicable
         Self::validate_plugins_if_supported(&resource)?;
@@ -203,9 +247,7 @@ impl<T: AdminResource> Handler for ResourceHandler<T> {
         // Use generic resource validation
         T::validate_resource(&body_data)?;
 
-        etcd.put(&key, body_data)
-            .await
-            .map_err(|e| ApiError::EtcdPutError(e.to_string()))?;
+        etcd.put(&key, body_data).await?;
 
         Ok(ResponseBuilder::success_http(Vec::new(), None))
     }
@@ -237,8 +279,13 @@ impl<T: AdminResource> Handler for GetHandler<T> {
         match etcd.get(&key).await {
             Err(e) => Err(ApiError::EtcdGetError(e.to_string())),
             Ok(Some(value)) => {
-                let json_value: serde_json::Value = serde_json::from_slice(&value)
-                    .map_err(|e| ApiError::InvalidRequest(format!("Invalid JSON data: {e}")))?;
+                let json_value: serde_json::Value =
+                    serde_json::from_slice(&value).map_err(|e| {
+                        ApiError::ProxyError(ProxyError::serialization_error(
+                            "Failed to parse JSON",
+                            e,
+                        ))
+                    })?;
                 let wrapper = ValueWrapper { value: json_value };
                 Ok(ResponseBuilder::success_json(&wrapper))
             }
@@ -270,9 +317,7 @@ impl<T: AdminResource> Handler for DeleteHandler<T> {
     ) -> ApiResult<ApiResponse> {
         let key = ResourceHandler::<T>::extract_key(&params)?;
 
-        etcd.delete(&key)
-            .await
-            .map_err(|e| ApiError::EtcdDeleteError(e.to_string()))?;
+        etcd.delete(&key).await?;
 
         Ok(ResponseBuilder::success_http(Vec::new(), None))
     }

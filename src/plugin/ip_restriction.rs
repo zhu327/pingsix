@@ -61,10 +61,8 @@ pub fn create_ip_restriction_plugin(cfg: JsonValue) -> ProxyResult<Arc<dyn Proxy
         .map(|s| {
             s.parse::<IpNetwork>()
                 .map_err(|e| -> Box<pingora_error::Error> {
-                    ProxyError::validation_error(format!(
-                        "Invalid whitelist IP network '{s}': {e}"
-                    ))
-                    .into()
+                    ProxyError::validation_error(format!("Invalid whitelist IP network '{s}': {e}"))
+                        .into()
                 })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -75,10 +73,8 @@ pub fn create_ip_restriction_plugin(cfg: JsonValue) -> ProxyResult<Arc<dyn Proxy
         .map(|s| {
             s.parse::<IpNetwork>()
                 .map_err(|e| -> Box<pingora_error::Error> {
-                    ProxyError::validation_error(format!(
-                        "Invalid blacklist IP network '{s}': {e}"
-                    ))
-                    .into()
+                    ProxyError::validation_error(format!("Invalid blacklist IP network '{s}': {e}"))
+                        .into()
                 })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -183,8 +179,7 @@ impl PluginIPRestriction {
             // Get the immediate client IP (could be a proxy)
             let immediate_client = get_client_ip(session).parse::<IpAddr>().map_err(
                 |e| -> Box<pingora_error::Error> {
-                    ProxyError::Internal(format!("Failed to parse immediate client IP: {e}"))
-                        .into()
+                    ProxyError::Internal(format!("Failed to parse immediate client IP: {e}")).into()
                 },
             )?;
 
