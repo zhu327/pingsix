@@ -42,7 +42,7 @@ where
         if let Some(entry) = self.get(id) {
             Some(entry.clone())
         } else {
-            log::debug!("Resource '{}' not found in cache", id);
+            log::debug!("Resource '{id}' not found in cache");
             None
         }
     }
@@ -62,14 +62,14 @@ where
         // Insert or update all resources
         for resource in resources {
             let key = resource.id().to_string();
-            log::debug!("Inserting or updating resource '{}'", key);
+            log::debug!("Inserting or updating resource '{key}'");
             self.insert(key, resource);
         }
     }
 
     fn insert_resource(&self, resource: Arc<T>) {
         let key = resource.id();
-        log::debug!("Inserting resource '{}'", key);
+        log::debug!("Inserting resource '{key}'");
         self.insert(key.to_string(), resource);
     }
 }

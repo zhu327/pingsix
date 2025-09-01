@@ -142,37 +142,37 @@ impl From<ProxyError> for Box<pingora_error::Error> {
             ProxyError::Pingora(pingora_err) => Box::new(pingora_err),
             ProxyError::Configuration(msg) => Error::explain(
                 ErrorType::InternalError,
-                format!("Configuration error: {}", msg),
+                format!("Configuration error: {msg}"),
             ),
             ProxyError::Network(io_err) => {
                 Error::because(ErrorType::ConnectError, "Network error", io_err)
             }
             ProxyError::DnsResolution(msg) => Error::explain(
                 ErrorType::ConnectNoRoute,
-                format!("DNS resolution failed: {}", msg),
+                format!("DNS resolution failed: {msg}"),
             ),
             ProxyError::HealthCheck(msg) => Error::explain(
                 ErrorType::InternalError,
-                format!("Health check failed: {}", msg),
+                format!("Health check failed: {msg}"),
             ),
             ProxyError::RouteMatching(msg) => Error::explain(
                 ErrorType::InternalError,
-                format!("Route matching failed: {}", msg),
+                format!("Route matching failed: {msg}"),
             ),
             ProxyError::UpstreamSelection(msg) => Error::explain(
                 ErrorType::InternalError,
-                format!("Upstream selection failed: {}", msg),
+                format!("Upstream selection failed: {msg}"),
             ),
             ProxyError::Ssl(msg) => Error::explain(
                 ErrorType::TLSHandshakeFailure,
-                format!("SSL/TLS error: {}", msg),
+                format!("SSL/TLS error: {msg}"),
             ),
             ProxyError::Plugin(msg) => Error::explain(
                 ErrorType::InternalError,
-                format!("Plugin execution error: {}", msg),
+                format!("Plugin execution error: {msg}"),
             ),
             ProxyError::Internal(msg) => {
-                Error::explain(ErrorType::InternalError, format!("Internal error: {}", msg))
+                Error::explain(ErrorType::InternalError, format!("Internal error: {msg}"))
             }
             ProxyError::WithCause { message, cause } => {
                 Error::because(ErrorType::InternalError, message, cause)

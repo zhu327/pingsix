@@ -30,13 +30,13 @@ impl ResponseBuilder {
                     builder = builder.header(header::CONTENT_TYPE, header_value);
                 }
                 Err(e) => {
-                    log::error!("Invalid content type '{}': {}", ct, e);
+                    log::error!("Invalid content type '{ct}': {e}");
                 }
             }
         }
 
         builder.body(body).unwrap_or_else(|e| {
-            log::error!("Failed to build success response: {}", e);
+            log::error!("Failed to build success response: {e}");
             Self::error_http(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error")
         })
     }
@@ -48,7 +48,7 @@ impl ResponseBuilder {
             .header(header::CONTENT_TYPE, content_type::TEXT_PLAIN)
             .body(message.as_bytes().to_vec())
             .unwrap_or_else(|e| {
-                log::error!("Failed to build error response: {}", e);
+                log::error!("Failed to build error response: {e}");
                 Response::builder()
                     .status(StatusCode::INTERNAL_SERVER_ERROR)
                     .body(b"Internal Server Error".to_vec())
@@ -61,7 +61,7 @@ impl ResponseBuilder {
         match serde_json::to_vec(data) {
             Ok(json_body) => Self::success_http(json_body, Some(content_type::APPLICATION_JSON)),
             Err(e) => {
-                log::error!("Failed to serialize JSON response: {}", e);
+                log::error!("Failed to serialize JSON response: {e}");
                 Self::error_http(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "JSON serialization failed",

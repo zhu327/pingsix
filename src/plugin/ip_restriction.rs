@@ -50,7 +50,7 @@ pub fn create_ip_restriction_plugin(cfg: JsonValue) -> Result<Arc<dyn ProxyPlugi
         .into_iter()
         .map(|s| {
             s.parse::<IpNetwork>()
-                .or_err_with(ReadError, || format!("Invalid whitelist IP network: {}", s))
+                .or_err_with(ReadError, || format!("Invalid whitelist IP network: {s}"))
         })
         .collect::<Result<Vec<_>>>()?;
 
@@ -59,7 +59,7 @@ pub fn create_ip_restriction_plugin(cfg: JsonValue) -> Result<Arc<dyn ProxyPlugi
         .into_iter()
         .map(|s| {
             s.parse::<IpNetwork>()
-                .or_err_with(ReadError, || format!("Invalid blacklist IP network: {}", s))
+                .or_err_with(ReadError, || format!("Invalid blacklist IP network: {s}"))
         })
         .collect::<Result<Vec<_>>>()?;
 
@@ -68,7 +68,7 @@ pub fn create_ip_restriction_plugin(cfg: JsonValue) -> Result<Arc<dyn ProxyPlugi
         .into_iter()
         .map(|s| {
             s.parse::<IpNetwork>().or_err_with(ReadError, || {
-                format!("Invalid trusted proxy IP network: {}", s)
+                format!("Invalid trusted proxy IP network: {s}")
             })
         })
         .collect::<Result<Vec<_>>>()?;

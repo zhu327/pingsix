@@ -118,14 +118,14 @@ impl Service for Logger {
                 },
                 _ = flush_interval.tick() => {
                     if let Err(e) = file.flush().await {
-                        log::error!("Failed to flush log file '{}': {}", log_file_path, e);
+                        log::error!("Failed to flush log file '{log_file_path}': {e}");
                     }
                 },
                 data = self.receiver.recv() => {
                     match data {
                         Some(data) => {
                             if let Err(e) = file.write_all(&data).await {
-                                log::error!("Failed to write to log file '{}': {}", log_file_path, e);
+                                log::error!("Failed to write to log file '{log_file_path}': {e}");
                             }
                         }
                         None => {
@@ -138,7 +138,7 @@ impl Service for Logger {
         }
 
         if let Err(e) = file.flush().await {
-            log::error!("Failed to flush log file '{}': {}", log_file_path, e);
+            log::error!("Failed to flush log file '{log_file_path}': {e}");
         }
     }
 

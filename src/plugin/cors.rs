@@ -127,7 +127,7 @@ impl PluginConfig {
                 .map(|re| {
                     Regex::new(re)
                         .map(Arc::new)
-                        .or_err_with(ReadError, || format!("Invalid regex pattern: {}", re))
+                        .or_err_with(ReadError, || format!("Invalid regex pattern: {re}"))
                 })
                 .collect::<Result<Vec<_>>>()?;
             Some(compiled)

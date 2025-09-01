@@ -113,7 +113,7 @@ impl PluginConfig {
                 let key: Vec<u8> = if self.base64_secret {
                     general_purpose::STANDARD
                         .decode(secret)
-                        .map_err(|e| format!("Failed to decode base64 secret: {}", e))?
+                        .map_err(|e| format!("Failed to decode base64 secret: {e}"))?
                 } else {
                     secret.as_bytes().to_vec()
                 };
@@ -125,7 +125,7 @@ impl PluginConfig {
                     .as_ref()
                     .ok_or("Public key is required for RSA/ECDSA algorithms (RS256, ES256)")?;
                 DecodingKey::from_rsa_pem(public_key.as_bytes())
-                    .map_err(|e| format!("Failed to parse RSA/ECDSA public key: {}", e))
+                    .map_err(|e| format!("Failed to parse RSA/ECDSA public key: {e}"))
             }
             _ => Err(format!("Unsupported algorithm: {:?}", self.algorithm)),
         }
@@ -226,7 +226,7 @@ impl ProxyPlugin for PluginJWTAuth {
     ) -> Result<()> {
         // Handle cookie clearing if needed
         if let Some(cookie_name) = ctx.get_str("jwt_auth_clear_cookie") {
-            let clear_cookie_header = format!("{}=; Max-Age=0; Path=/; HttpOnly", cookie_name);
+            let clear_cookie_header = format!("{cookie_name}=; Max-Age=0; Path=/; HttpOnly");
             upstream_response.insert_header("Set-Cookie", clear_cookie_header)?;
         }
         Ok(())

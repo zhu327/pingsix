@@ -118,7 +118,7 @@ impl EtcdConfigSync {
             EtcdError::WatchOperationFailed(format!("Failed to receive watch message: {e}"))
         })? {
             if response.canceled() {
-                log::debug!("Watch stream for prefix '{}' was canceled", prefix);
+                log::debug!("Watch stream for prefix '{prefix}' was canceled");
                 break;
             }
 

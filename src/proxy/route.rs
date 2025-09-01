@@ -211,7 +211,7 @@ impl MatchEntry {
                     // Convert "*.example.com" to "moc.elpmaxe.{*subdomain}"
                     // This allows matchit to match any subdomain suffix when reversed
                     let reversed_domain: String = domain_part.chars().rev().collect();
-                    format!("{}{{*subdomain}}", reversed_domain)
+                    format!("{reversed_domain}{{*subdomain}}")
                 } else {
                     // For exact hosts, just reverse normally
                     host.chars().rev().collect()

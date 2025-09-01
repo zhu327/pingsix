@@ -121,9 +121,7 @@ pub fn create_cache_plugin(cfg: JsonValue) -> Result<Arc<dyn ProxyPlugin>> {
         .no_cache_str
         .iter()
         .map(|s| {
-            Regex::new(s).or_err_with(ReadError, || {
-                format!("Invalid regex in no_cache_str: {}", s)
-            })
+            Regex::new(s).or_err_with(ReadError, || format!("Invalid regex in no_cache_str: {s}"))
         })
         .collect::<Result<Vec<_>>>()?;
 

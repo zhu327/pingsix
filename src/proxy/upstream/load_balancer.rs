@@ -31,7 +31,7 @@ pub fn upstream_fetch(id: &str) -> Option<Arc<ProxyUpstream>> {
     match UPSTREAM_MAP.get(id) {
         Some(upstream) => Some(upstream.value().clone()),
         None => {
-            log::debug!("Upstream '{}' not found in cache", id);
+            log::debug!("Upstream '{id}' not found in cache");
             None
         }
     }
@@ -367,6 +367,6 @@ pub fn load_static_upstreams(config: &config::Config) -> ProxyResult<()> {
     // Insert all ProxyUpstream instances into the global map.
     UPSTREAM_MAP.reload_resources(proxy_upstreams);
 
-    log::info!("Loaded {} upstreams", upstream_count);
+    log::info!("Loaded {upstream_count} upstreams");
     Ok(())
 }

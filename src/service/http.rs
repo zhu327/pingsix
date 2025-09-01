@@ -328,7 +328,7 @@ impl ProxyHttp for HttpService {
         Ok(resp_cacheable(
             final_cc.as_ref(),
             resp.clone(),
-            false,
+            true,
             &CACHE_DEFAULT,
         ))
     }
