@@ -51,7 +51,6 @@ pub trait UpstreamSelector: Send + Sync {
 // =============================================================================
 
 /// Trait for route behavior that can be used in proxy context
-#[async_trait]
 pub trait RouteContext: Send + Sync {
     /// Get the route identifier
     fn id(&self) -> &str;

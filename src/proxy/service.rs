@@ -5,7 +5,7 @@ use once_cell::sync::Lazy;
 
 use crate::{
     config::{self, Identifiable},
-    core::{ErrorContext, ProxyError, ProxyPlugin, ProxyResult},
+    core::{ErrorContext, ProxyError, ProxyPlugin, ProxyResult, UpstreamSelector},
     plugin::build_plugin,
 };
 
@@ -74,16 +74,16 @@ impl ProxyService {
     }
 
     /// Gets the upstream for the service.
-    pub fn resolve_upstream(&self) -> Option<Arc<dyn crate::core::UpstreamSelector>> {
+    pub fn resolve_upstream(&self) -> Option<Arc<dyn UpstreamSelector>> {
         self.upstream
             .clone()
-            .map(|u| u as Arc<dyn crate::core::UpstreamSelector>)
+            .map(|u| u as Arc<dyn UpstreamSelector>)
             .or_else(|| {
                 self.inner
                     .upstream_id
                     .as_deref()
                     .and_then(upstream_fetch)
-                    .map(|u| u as Arc<dyn crate::core::UpstreamSelector>)
+                    .map(|u| u as Arc<dyn UpstreamSelector>)
             })
     }
 }

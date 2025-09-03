@@ -2,7 +2,6 @@ use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use dashmap::DashMap;
-use log::{debug, info, warn};
 use once_cell::sync::Lazy;
 use pingora_core::{
     server::ShutdownWatch,
@@ -66,10 +65,10 @@ impl HealthCheckRegistry {
             .update_notifier
             .send(RegistryUpdate::Added(upstream_id.clone()))
         {
-            warn!("Failed to notify registry update: {e}");
+            log::warn!("Failed to notify registry update: {e}");
         }
 
-        info!("Registered upstream '{upstream_id}' for health check");
+        log::info!("Registered upstream '{upstream_id}' for health check");
         Ok(())
     }
 
@@ -78,7 +77,7 @@ impl HealthCheckRegistry {
         if let Some((_, registered)) = self.upstreams.remove(upstream_id) {
             // Send shutdown signal
             if let Err(e) = registered.shutdown_tx.send(true) {
-                warn!("Failed to send shutdown signal to upstream '{upstream_id}': {e}");
+                log::warn!("Failed to send shutdown signal to upstream '{upstream_id}': {e}");
             }
 
             // Notify executor
@@ -86,13 +85,13 @@ impl HealthCheckRegistry {
                 .update_notifier
                 .send(RegistryUpdate::Removed(upstream_id.to_string()))
             {
-                warn!("Failed to notify registry update: {e}");
+                log::warn!("Failed to notify registry update: {e}");
             }
 
-            info!("Unregistered upstream '{upstream_id}' from health check");
+            log::info!("Unregistered upstream '{upstream_id}' from health check");
             true
         } else {
-            warn!("Attempted to unregister non-existent upstream '{upstream_id}'");
+            log::warn!("Attempted to unregister non-existent upstream '{upstream_id}'");
             false
         }
     }
@@ -146,7 +145,7 @@ impl HealthCheckExecutor {
 
     /// 运行健康检查执行器 - 优化并发性能，移除RwLock
     pub async fn run(&self, registry: Arc<HealthCheckRegistry>, shutdown: ShutdownWatch) {
-        info!("Starting health check executor");
+        log::info!("Starting health check executor");
 
         // Get update receiver directly from registry, no lock needed
         let mut update_receiver = registry.subscribe_updates();
@@ -163,12 +162,12 @@ impl HealthCheckExecutor {
                 let task_id = upstream_id.clone();
 
                 let handle = tokio::spawn(async move {
-                    info!("Starting health check service for upstream '{task_upstream_id}'");
+                    log::info!("Starting health check service for upstream '{task_upstream_id}'");
 
                     // Call LoadBalancer's start method directly
                     load_balancer.start(shutdown_rx).await;
 
-                    info!("Health check service stopped for upstream '{task_upstream_id}'");
+                    log::info!("Health check service stopped for upstream '{task_upstream_id}'");
                 });
 
                 running_tasks.insert(task_id, handle);
@@ -178,10 +177,10 @@ impl HealthCheckExecutor {
         loop {
             // Check if shutdown is requested
             if *shutdown.borrow() {
-                info!("Health check executor received shutdown signal");
+                log::info!("Health check executor received shutdown signal");
                 // Cancel all running tasks
                 for (upstream_id, handle) in running_tasks {
-                    debug!("Cancelling health check task for upstream '{upstream_id}'");
+                    log::debug!("Cancelling health check task for upstream '{upstream_id}'");
                     handle.abort();
                 }
                 break;
@@ -191,7 +190,7 @@ impl HealthCheckExecutor {
             while let Ok(update) = update_receiver.try_recv() {
                 match update {
                     RegistryUpdate::Added(id) => {
-                        debug!("Health check executor: upstream '{id}' added");
+                        log::debug!("Health check executor: upstream '{id}' added");
                         // Start new health check task - direct registry access, no lock needed
                         if let Some((upstream_id, load_balancer, shutdown_rx)) =
                             registry.get_upstream_for_start(&id)
@@ -199,23 +198,27 @@ impl HealthCheckExecutor {
                             let task_id = upstream_id.clone();
 
                             let handle = tokio::spawn(async move {
-                                info!("Starting health check service for upstream '{upstream_id}'");
+                                log::info!(
+                                    "Starting health check service for upstream '{upstream_id}'"
+                                );
 
                                 // LoadBalancer::start runs in a loop until shutdown signal received
                                 // LoadBalancer handles all concurrency control and timing internally
                                 load_balancer.start(shutdown_rx).await;
 
-                                info!("Health check service stopped for upstream '{upstream_id}'");
+                                log::info!(
+                                    "Health check service stopped for upstream '{upstream_id}'"
+                                );
                             });
 
                             running_tasks.insert(task_id, handle);
                         }
                     }
                     RegistryUpdate::Removed(id) => {
-                        debug!("Health check executor: upstream '{id}' removed");
+                        log::debug!("Health check executor: upstream '{id}' removed");
                         // Stop corresponding health check task
                         if let Some(handle) = running_tasks.remove(&id) {
-                            debug!("Stopping health check task for upstream '{id}'");
+                            log::debug!("Stopping health check task for upstream '{id}'");
                             handle.abort();
                         }
                     }
@@ -225,7 +228,7 @@ impl HealthCheckExecutor {
             // Clean up completed tasks
             running_tasks.retain(|upstream_id, handle| {
                 if handle.is_finished() {
-                    debug!("Health check task for upstream '{upstream_id}' has finished");
+                    log::debug!("Health check task for upstream '{upstream_id}' has finished");
                     false
                 } else {
                     true
@@ -236,7 +239,7 @@ impl HealthCheckExecutor {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
-        info!("Health check executor stopped");
+        log::info!("Health check executor stopped");
     }
 }
 

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use dashmap::DashMap;
-use log::{debug, error};
+use log;
 use matchit::{InsertError, Router as MatchRouter};
 use once_cell::sync::Lazy;
 use pingora::listeners::TlsAccept;
@@ -105,10 +105,10 @@ pub fn reload_global_ssl_match() {
     let mut matcher = MatchEntry::default();
 
     for ssl in SSL_MAP.iter() {
-        debug!("Inserting SSL config: {}", ssl.value().inner.id);
+        log::debug!("Inserting SSL config: {}", ssl.value().inner.id);
         // Handle insertion errors gracefully instead of using unwrap()
         if let Err(e) = matcher.insert_ssl(ssl.value().clone()) {
-            error!(
+            log::error!(
                 "Failed to insert SSL config '{}' into matcher, SNIs might be invalid: {}",
                 ssl.value().inner.id,
                 e
@@ -132,11 +132,11 @@ pub fn load_static_ssls(config: &config::Config) -> Result<()> {
             match (&proxy_ssl.parsed_cert, &proxy_ssl.parsed_key) {
                 (Ok(_), Ok(_)) => Some(Ok(Arc::new(proxy_ssl))),
                 (Err(e), _) => {
-                    error!("{e}");
+                    log::error!("{e}");
                     None
                 }
                 (_, Err(e)) => {
-                    error!("{e}");
+                    log::error!("{e}");
                     None
                 }
             }

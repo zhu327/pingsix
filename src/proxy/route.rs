@@ -3,9 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
-use async_trait::async_trait;
 use dashmap::DashMap;
-use log::debug;
 use matchit::{InsertError, Router as MatchRouter};
 use once_cell::sync::Lazy;
 use pingora_core::upstreams::peer::HttpPeer;
@@ -14,7 +12,10 @@ use pingora_proxy::Session;
 
 use crate::{
     config::{self, Identifiable},
-    core::{ErrorContext, ProxyError, ProxyPlugin, ProxyPluginExecutor, ProxyResult, RouteContext},
+    core::{
+        ErrorContext, ProxyError, ProxyPlugin, ProxyPluginExecutor, ProxyResult, RouteContext,
+        UpstreamSelector,
+    },
     plugin::build_plugin,
     utils::request::get_request_host,
 };
@@ -93,7 +94,6 @@ impl ProxyRoute {
     }
 }
 
-#[async_trait]
 impl RouteContext for ProxyRoute {
     fn id(&self) -> &str {
         &self.inner.id
@@ -154,16 +154,16 @@ impl RouteContext for ProxyRoute {
             .clone()
     }
 
-    fn resolve_upstream(&self) -> Option<Arc<dyn crate::core::UpstreamSelector>> {
+    fn resolve_upstream(&self) -> Option<Arc<dyn UpstreamSelector>> {
         self.upstream
             .clone()
-            .map(|u| u as Arc<dyn crate::core::UpstreamSelector>)
+            .map(|u| u as Arc<dyn UpstreamSelector>)
             .or_else(|| {
                 self.inner
                     .upstream_id
                     .as_ref()
                     .and_then(|id| upstream_fetch(id.as_str()))
-                    .map(|u| u as Arc<dyn crate::core::UpstreamSelector>)
+                    .map(|u| u as Arc<dyn UpstreamSelector>)
             })
             .or_else(|| {
                 self.inner
@@ -349,7 +349,7 @@ pub fn reload_global_route_match() {
     let mut matcher = MatchEntry::default();
 
     for route in ROUTE_MAP.iter() {
-        debug!("Inserting route: {}", route.inner.id);
+        log::debug!("Inserting route: {}", route.inner.id);
         if let Err(e) = matcher.insert_route(route.clone()) {
             log::error!("Failed to insert route {}: {}", route.inner.id, e);
             // Continue with other routes to avoid partial failures stopping the process

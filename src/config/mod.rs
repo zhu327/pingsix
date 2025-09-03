@@ -7,7 +7,6 @@ use std::{
 };
 
 use http::Method;
-use log::{debug, trace};
 use once_cell::sync::Lazy;
 use pingora::server::configuration::{Opt, ServerConf};
 use pingora_error::{Error, ErrorType::*, OrErr, Result};
@@ -94,7 +93,7 @@ impl Config {
         let conf_str = fs::read_to_string(&path).or_err_with(ReadError, || {
             format!("Unable to read conf file from {path}")
         })?;
-        debug!("Conf file read from {path}");
+        log::debug!("Conf file read from {path}");
         Self::from_yaml(&conf_str)
     }
 
@@ -111,12 +110,12 @@ impl Config {
 
     /// Parses YAML configuration string with comprehensive validation.
     pub fn from_yaml(conf_str: &str) -> Result<Self> {
-        trace!("Read conf file: {conf_str}");
+        log::trace!("Read conf file: {conf_str}");
         let conf: Config = serde_yaml::from_str(conf_str).or_err_with(ReadError, || {
             format!("Unable to parse yaml conf {conf_str}")
         })?;
 
-        trace!("Loaded conf: {conf:?}");
+        log::trace!("Loaded conf: {conf:?}");
 
         // Validate configuration structure and constraints
         conf.validate()
