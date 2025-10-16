@@ -61,7 +61,7 @@ impl PluginConfig {
     }
 
     fn validate_regex_uri(regex_uri: &[String]) -> Result<(), ValidationError> {
-        if regex_uri.len() % 2 != 0 {
+        if !regex_uri.len().is_multiple_of(2) {
             return Err(ValidationError::new("regex_uri_length"));
         }
 
