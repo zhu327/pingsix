@@ -219,7 +219,7 @@ where
         let mut upstreams = LoadBalancer::<BS>::from_backends(Backends::new(Box::new(discovery)));
 
         if let Some(check) = upstream.checks {
-            let health_check: Box<(dyn HealthCheckTrait + Send + Sync + 'static)> =
+            let health_check: Box<dyn HealthCheckTrait + Send + Sync + 'static> =
                 check.clone().into();
             upstreams.set_health_check(health_check);
 
@@ -242,7 +242,7 @@ where
     }
 }
 
-impl From<config::HealthCheck> for Box<(dyn HealthCheckTrait + Send + Sync + 'static)> {
+impl From<config::HealthCheck> for Box<dyn HealthCheckTrait + Send + Sync + 'static> {
     fn from(value: config::HealthCheck) -> Self {
         match value.active.r#type {
             config::ActiveCheckType::TCP => {
