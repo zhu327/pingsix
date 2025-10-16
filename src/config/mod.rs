@@ -203,6 +203,9 @@ pub struct Pingsix {
     pub admin: Option<Admin>,
 
     #[validate(nested)]
+    pub status: Option<Status>,
+
+    #[validate(nested)]
     pub prometheus: Option<Prometheus>,
 
     #[validate(nested)]
@@ -248,6 +251,11 @@ pub struct Etcd {
 pub struct Admin {
     pub address: SocketAddr,
     pub api_key: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Validate)]
+pub struct Status {
+    pub address: SocketAddr,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Validate)]

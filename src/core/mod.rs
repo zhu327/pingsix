@@ -5,6 +5,9 @@
 //! - Plugin system infrastructure
 //! - Request context management
 //! - Plugin execution framework
+//! - Service readiness tracking
+
+pub mod status;
 
 use std::{
     any::Any,

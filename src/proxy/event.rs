@@ -2,9 +2,12 @@ use std::sync::Arc;
 
 use etcd_client::{Event, GetResponse};
 
-use crate::config::{
-    etcd::{json_to_resource, EtcdEventHandler},
-    GlobalRule, Identifiable, Route, Service, Upstream, SSL,
+use crate::{
+    config::{
+        etcd::{json_to_resource, EtcdEventHandler},
+        GlobalRule, Identifiable, Route, Service, Upstream, SSL,
+    },
+    core::status,
 };
 
 use super::{
@@ -342,6 +345,9 @@ impl EtcdEventHandler for ProxyEventHandler {
         self.handle_services(response);
         self.handle_global_rules(response);
         self.handle_routes(response);
+
+        // Mark service as ready after successfully loading all configurations from etcd
+        status::mark_ready(status::ConfigSource::Etcd);
     }
 }
 

@@ -30,7 +30,7 @@ use proxy::{
     ssl::{load_static_ssls, DynamicCert},
     upstream::{load_static_upstreams, SHARED_HEALTH_CHECK_SERVICE},
 };
-use service::http::HttpService;
+use service::{http::HttpService, status::StatusHttpApp};
 
 // Service name constants
 const PINGSIX_SERVICE: &str = "pingsix";
@@ -69,26 +69,13 @@ fn main() {
         ))
     } else {
         log::debug!("Loading static configurations from config file");
-        if let Err(e) = load_static_ssls(&config) {
-            log::error!("Failed to load static SSLs: {e}");
+        if let Err(e) = load_static_configurations(&config) {
+            log::error!("Failed to load static configurations: {e}");
             std::process::exit(1);
         }
-        if let Err(e) = load_static_upstreams(&config) {
-            log::error!("Failed to load static upstreams: {e}");
-            std::process::exit(1);
-        }
-        if let Err(e) = load_static_services(&config) {
-            log::error!("Failed to load static services: {e}");
-            std::process::exit(1);
-        }
-        if let Err(e) = load_static_global_rules(&config) {
-            log::error!("Failed to load static global rules: {e}");
-            std::process::exit(1);
-        }
-        if let Err(e) = load_static_routes(&config) {
-            log::error!("Failed to load static routes: {e}");
-            std::process::exit(1);
-        }
+
+        // Mark service as ready after all static configurations are loaded
+        core::status::mark_ready(core::status::ConfigSource::Yaml);
         None
     };
 
@@ -172,6 +159,21 @@ fn add_listeners(
     Ok(())
 }
 
+/// Loads all static configurations from YAML config file.
+///
+/// This includes SSLs, upstreams, services, global rules, and routes.
+/// All configurations must load successfully or the function returns an error.
+fn load_static_configurations(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
+    load_static_ssls(config)?;
+    load_static_upstreams(config)?;
+    load_static_services(config)?;
+    load_static_global_rules(config)?;
+    load_static_routes(config)?;
+
+    log::info!("All static configurations loaded successfully");
+    Ok(())
+}
+
 /// Conditionally enables monitoring and admin services based on configuration.
 ///
 /// Sentry integration requires valid DSN to prevent silent failures in production.
@@ -203,6 +205,14 @@ fn add_optional_services(server: &mut Server, cfg: &config::Pingsix) {
         let admin_service_http = AdminHttpApp::admin_http_service(cfg);
         server.add_service(admin_service_http);
         log::info!("Admin HTTP interface enabled");
+    }
+
+    // Status/health check endpoint - independent of admin API
+    if let Some(status_cfg) = &cfg.status {
+        log::debug!("Configuring status HTTP endpoint on {}", status_cfg.address);
+        let status_service_http = StatusHttpApp::status_http_service(status_cfg);
+        server.add_service(status_service_http);
+        log::info!("Status HTTP endpoint enabled on {}", status_cfg.address);
     }
 
     if let Some(prometheus_cfg) = &cfg.prometheus {

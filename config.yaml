@@ -26,6 +26,11 @@ pingsix:
   #   address: "0.0.0.0:9181"
   #   api_key: pingsix
 
+  # Status/health check endpoint (independent of admin API)
+  # Useful for Kubernetes readiness probes and load balancer health checks
+  status:
+    address: "127.0.0.1:7085"
+
   prometheus:
     address: 0.0.0.0:9091
 
