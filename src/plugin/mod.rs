@@ -2,6 +2,7 @@ pub mod brotli;
 pub mod cache;
 pub mod cors;
 pub mod echo;
+pub mod fault_injection;
 pub mod file_logger;
 pub mod grpc_web;
 pub mod gzip;
@@ -49,6 +50,10 @@ static PLUGIN_BUILDER_REGISTRY: Lazy<HashMap<&'static str, PluginCreateFn>> = La
             proxy_rewrite::create_proxy_rewrite_plugin,
         ), // 1008
         (cache::PLUGIN_NAME, cache::create_cache_plugin), // 1085
+        (
+            fault_injection::PLUGIN_NAME,
+            fault_injection::create_fault_injection_plugin,
+        ), // 11000
         (
             request_id::PLUGIN_NAME,
             request_id::create_request_id_plugin,

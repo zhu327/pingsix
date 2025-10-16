@@ -29,13 +29,11 @@ use super::{
 /// Proxy route with upstream and plugin configuration.
 ///
 /// Routes are compiled at startup and cached for high-performance request matching.
-/// Plugin executors are pre-built to avoid per-request overhead.
+/// Plugin executors are dynamically built to ensure configuration changes take effect immediately.
 pub struct ProxyRoute {
     pub inner: config::Route,
     pub upstream: Option<Arc<ProxyUpstream>>,
     pub plugins: Vec<Arc<dyn ProxyPlugin>>,
-    /// Pre-built plugin executor to avoid repeated construction during request processing
-    cached_plugin_executor: once_cell::sync::OnceCell<Arc<ProxyPluginExecutor>>,
 }
 
 impl Identifiable for ProxyRoute {
@@ -54,7 +52,6 @@ impl ProxyRoute {
             inner: route.clone(),
             upstream: None,
             plugins: Vec::with_capacity(route.plugins.len()),
-            cached_plugin_executor: once_cell::sync::OnceCell::new(),
         };
 
         // Configure upstream
@@ -125,33 +122,31 @@ impl RouteContext for ProxyRoute {
     }
 
     fn build_plugin_executor(&self) -> Arc<ProxyPluginExecutor> {
-        self.cached_plugin_executor
-            .get_or_init(|| {
-                let mut plugin_map: HashMap<String, Arc<dyn ProxyPlugin>> = HashMap::new();
+        let mut plugin_map: HashMap<String, Arc<dyn ProxyPlugin>> = HashMap::new();
 
-                // Merge route and service plugins
-                let service_plugins = self
-                    .inner
-                    .service_id
-                    .as_deref()
-                    .and_then(service_fetch)
-                    .map_or_else(Vec::new, |service| service.plugins.clone());
+        // Merge route and service plugins
+        // Service plugins are fetched dynamically to ensure configuration changes take effect
+        let service_plugins = self
+            .inner
+            .service_id
+            .as_deref()
+            .and_then(service_fetch)
+            .map_or_else(Vec::new, |service| service.plugins.clone());
 
-                for plugin in self.plugins.iter().chain(service_plugins.iter()) {
-                    plugin_map
-                        .entry(plugin.name().to_string())
-                        .or_insert_with(|| plugin.clone());
-                }
+        // Route plugins take precedence over service plugins (first inserted wins)
+        for plugin in self.plugins.iter().chain(service_plugins.iter()) {
+            plugin_map
+                .entry(plugin.name().to_string())
+                .or_insert_with(|| plugin.clone());
+        }
 
-                // Sort by priority in descending order
-                let mut merged_plugins: Vec<_> = plugin_map.into_values().collect();
-                merged_plugins.sort_by_key(|b| std::cmp::Reverse(b.priority()));
+        // Sort by priority in descending order
+        let mut merged_plugins: Vec<_> = plugin_map.into_values().collect();
+        merged_plugins.sort_by_key(|b| std::cmp::Reverse(b.priority()));
 
-                Arc::new(ProxyPluginExecutor {
-                    plugins: merged_plugins,
-                })
-            })
-            .clone()
+        Arc::new(ProxyPluginExecutor {
+            plugins: merged_plugins,
+        })
     }
 
     fn resolve_upstream(&self) -> Option<Arc<dyn UpstreamSelector>> {
