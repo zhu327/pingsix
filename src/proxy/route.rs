@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,6 +25,9 @@ use super::{
     upstream::{upstream_fetch, ProxyUpstream},
     MapOperations,
 };
+
+/// Type alias for route match result: (params, route)
+type RouteMatchResult = Option<(Vec<(String, String)>, Arc<ProxyRoute>)>;
 
 /// Proxy route with upstream and plugin configuration.
 ///
@@ -277,10 +280,7 @@ impl MatchEntry {
     }
 
     /// Matches a request to a route.
-    pub fn match_request(
-        &self,
-        session: &mut Session,
-    ) -> Option<(BTreeMap<String, String>, Arc<ProxyRoute>)> {
+    pub fn match_request(&self, session: &mut Session) -> RouteMatchResult {
         let host = get_request_host(session.req_header());
         let uri = session.req_header().uri.path();
         let method = session.req_header().method.as_str();
@@ -308,9 +308,10 @@ impl MatchEntry {
         match_router: &MatchRouter<Vec<Arc<ProxyRoute>>>,
         uri: &str,
         method: &str,
-    ) -> Option<(BTreeMap<String, String>, Arc<ProxyRoute>)> {
+    ) -> RouteMatchResult {
         if let Ok(v) = match_router.at(uri) {
-            let params: BTreeMap<String, String> = v
+            // Convert params to Vec - more efficient for small number of params (typical case)
+            let params: Vec<(String, String)> = v
                 .params
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))

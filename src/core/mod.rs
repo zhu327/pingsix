@@ -9,12 +9,7 @@
 
 pub mod status;
 
-use std::{
-    any::Any,
-    collections::{BTreeMap, HashMap},
-    sync::Arc,
-    time::Instant,
-};
+use std::{any::Any, collections::HashMap, sync::Arc, time::Instant};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -609,7 +604,8 @@ pub struct ProxyContext {
     /// The matched proxy route, if any.
     pub route: Option<Arc<dyn RouteContext>>,
     /// Parameters extracted from the route pattern.
-    pub route_params: Option<BTreeMap<String, String>>,
+    /// Stored as Vec for better performance with small number of params (typical case).
+    pub route_params: Option<Vec<(String, String)>>,
     /// Number of retry attempts so far.
     pub tries: usize,
     /// Executor for route-specific plugins.
@@ -640,6 +636,48 @@ impl Default for ProxyContext {
 }
 
 impl ProxyContext {
+    /// Get a route parameter by key.
+    /// Returns None if no params exist or the key is not found.
+    ///
+    /// # Example
+    /// ```ignore
+    /// if let Some(user_id) = ctx.get_param("id") {
+    ///     println!("User ID: {}", user_id);
+    /// }
+    /// ```
+    pub fn get_param(&self, key: &str) -> Option<&str> {
+        self.route_params
+            .as_ref()?
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// Get all route parameters as an iterator of (key, value) pairs.
+    ///
+    /// # Example
+    /// ```ignore
+    /// for (key, value) in ctx.params() {
+    ///     println!("{} = {}", key, value);
+    /// }
+    /// ```
+    pub fn params(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.route_params
+            .iter()
+            .flat_map(|params| params.iter())
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+    }
+
+    /// Check if a specific route parameter exists.
+    pub fn has_param(&self, key: &str) -> bool {
+        self.get_param(key).is_some()
+    }
+
+    /// Get the number of route parameters.
+    pub fn params_len(&self) -> usize {
+        self.route_params.as_ref().map_or(0, |p| p.len())
+    }
+
     /// Store a typed value into the context for inter-plugin communication.
     pub fn set<T: Any + Send + Sync>(&mut self, key: impl Into<String>, value: T) {
         self.vars.insert(key.into(), Box::new(value));
