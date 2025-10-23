@@ -635,6 +635,7 @@ impl Default for ProxyContext {
     }
 }
 
+#[allow(dead_code)]
 impl ProxyContext {
     /// Get a route parameter by key.
     /// Returns None if no params exist or the key is not found.
