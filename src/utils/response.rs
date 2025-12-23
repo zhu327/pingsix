@@ -52,7 +52,7 @@ impl ResponseBuilder {
                 Response::builder()
                     .status(StatusCode::INTERNAL_SERVER_ERROR)
                     .body(b"Internal Server Error".to_vec())
-                    .unwrap()
+                    .expect("Failed to build fallback error response")
             })
     }
 

@@ -119,10 +119,12 @@ impl ProxyHttp for HttpService {
         session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
-        let peer = ctx
-            .route
-            .as_ref()
-            .unwrap()
+        let route = ctx.route.as_ref().ok_or_else(|| {
+            pingora_error::Error::new(pingora_error::ErrorType::InternalError)
+                .more_context("Route not found in context")
+        })?;
+
+        let peer = route
             .select_http_peer(session)
             .map_err(|e: ProxyError| -> Box<pingora_error::Error> { e.into() })?;
         ctx.set("upstream", peer._address.to_string());

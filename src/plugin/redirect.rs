@@ -26,8 +26,8 @@ pub fn create_redirect_plugin(cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyPlugin
     for i in (0..config.regex_uri.len()).step_by(2) {
         let pattern = &config.regex_uri[i];
         let template = &config.regex_uri[i + 1];
-        // Validation ensures regex is valid, so unwrap is safe
-        let re = Regex::new(pattern).unwrap();
+        // Validation ensures regex is valid, so expect is safe
+        let re = Regex::new(pattern).expect("Regex validation should ensure this pattern is valid");
         regex_patterns.push((re, template.clone()));
     }
 
@@ -125,10 +125,15 @@ impl PluginRedirect {
         let host = get_request_host(session.req_header())
             .ok_or_else(|| ProxyError::Internal("Missing host".to_string()))?;
 
+        let path_and_query = current_uri
+            .path_and_query()
+            .ok_or_else(|| ProxyError::Internal("Missing path and query in URI".to_string()))?
+            .to_owned();
+
         let new_uri = Uri::builder()
             .scheme(Scheme::HTTPS)
             .authority(host)
-            .path_and_query(current_uri.path_and_query().unwrap().to_owned())
+            .path_and_query(path_and_query)
             .build()
             .map_err(|e| ProxyError::Internal(format!("Failed to build HTTPS URI: {e}")))?;
 

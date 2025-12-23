@@ -169,9 +169,9 @@ impl UpstreamSelector for ProxyUpstream {
     fn upstream_host_rewrite(&self, upstream_request: &mut RequestHeader) {
         if self.inner.pass_host == config::UpstreamPassHost::REWRITE {
             if let Some(host) = &self.inner.upstream_host {
-                upstream_request
-                    .insert_header(http::header::HOST, host)
-                    .unwrap();
+                if let Err(e) = upstream_request.insert_header(http::header::HOST, host) {
+                    log::error!("Failed to rewrite upstream host header: {e}");
+                }
             }
         }
     }

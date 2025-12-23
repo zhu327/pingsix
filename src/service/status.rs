@@ -79,12 +79,12 @@ fn json_response<T: Serialize>(status: StatusCode, body: &T) -> Response<Vec<u8>
         .status(status)
         .header("Content-Type", "application/json")
         .body(json_body)
-        .unwrap()
+        .expect("Failed to build HTTP response")
 }
 
 fn not_found_response() -> Response<Vec<u8>> {
     Response::builder()
         .status(StatusCode::NOT_FOUND)
         .body(b"Not Found".to_vec())
-        .unwrap()
+        .expect("Failed to build HTTP response")
 }

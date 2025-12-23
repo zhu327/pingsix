@@ -40,7 +40,7 @@ static REQUESTS: Lazy<IntCounter> = Lazy::new(|| {
         "http_requests_total",
         "The total number of client requests since pingsix started"
     )
-    .unwrap()
+    .expect("Failed to register prometheus metric: http_requests_total")
 });
 
 // Counter for HTTP status codes with normalized URI paths
@@ -57,7 +57,7 @@ static STATUS: Lazy<IntCounterVec> = Lazy::new(|| {
             "node",          // Node ID
         ]
     )
-    .unwrap()
+    .expect("Failed to register prometheus metric: http_status")
 });
 
 // Histogram for request latency
@@ -67,7 +67,8 @@ static LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
         "HTTP request latency in milliseconds per service in pingsix",
     )
     .buckets(DEFAULT_BUCKETS.to_vec());
-    register_histogram_vec!(opts, &["type", "route", "service", "node"]).unwrap()
+    register_histogram_vec!(opts, &["type", "route", "service", "node"])
+        .expect("Failed to register prometheus metric: http_latency")
 });
 
 // Bandwidth counter
@@ -82,7 +83,7 @@ static BANDWIDTH: Lazy<IntCounterVec> = Lazy::new(|| {
             "node",    // Node ID
         ]
     )
-    .unwrap()
+    .expect("Failed to register prometheus metric: bandwidth")
 });
 
 // Request size histogram
@@ -91,7 +92,8 @@ static REQUEST_SIZE: Lazy<HistogramVec> = Lazy::new(|| {
         HistogramOpts::new("http_request_size_bytes", "HTTP request size in bytes").buckets(vec![
             100.0, 1000.0, 10000.0, 100000.0, 1000000.0, 10000000.0,
         ]);
-    register_histogram_vec!(opts, &["route", "service"]).unwrap()
+    register_histogram_vec!(opts, &["route", "service"])
+        .expect("Failed to register prometheus metric: http_request_size_bytes")
 });
 
 // Response size histogram
@@ -100,7 +102,8 @@ static RESPONSE_SIZE: Lazy<HistogramVec> = Lazy::new(|| {
         .buckets(vec![
             100.0, 1000.0, 10000.0, 100000.0, 1000000.0, 10000000.0,
         ]);
-    register_histogram_vec!(opts, &["route", "service"]).unwrap()
+    register_histogram_vec!(opts, &["route", "service"])
+        .expect("Failed to register prometheus metric: http_response_size_bytes")
 });
 
 pub const PLUGIN_NAME: &str = "prometheus";

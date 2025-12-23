@@ -227,10 +227,12 @@ impl ProxyEventHandler {
         P: Identifiable + InnerComparable<T>,
         F: Fn(T) -> pingora_error::Result<P>,
     {
-        let key = event.kv().unwrap().key();
+        // Safe to unwrap here because handle_event already checks kv().is_none()
+        let kv = event.kv().expect("Event should contain key-value pair");
+        let key = kv.key();
         match parse_key(key) {
             Ok((id, parsed_key_type)) if parsed_key_type == key_type => {
-                match json_to_resource::<T>(event.kv().unwrap().value()) {
+                match json_to_resource::<T>(kv.value()) {
                     Ok(resource) => {
                         log::info!("Handling {key_type}: {id}");
                         if let Ok(proxy) = create_proxy(resource) {
@@ -288,14 +290,17 @@ impl ProxyEventHandler {
 // ! For the creation failure of critical resources, more complex handling strategies may be required (for example, retry, mark as invalid, or stop the service if the failure has a large impact, etc.).
 impl EtcdEventHandler for ProxyEventHandler {
     fn handle_event(&self, event: &Event) {
-        if event.kv().is_none() {
-            log::warn!("Event does not contain a key-value pair");
-            return;
-        }
+        let kv = match event.kv() {
+            Some(kv) => kv,
+            None => {
+                log::warn!("Event does not contain a key-value pair");
+                return;
+            }
+        };
 
-        let key = String::from_utf8_lossy(event.kv().unwrap().key());
+        let key = String::from_utf8_lossy(kv.key());
         match event.event_type() {
-            etcd_client::EventType::Put => match parse_key(event.kv().unwrap().key()) {
+            etcd_client::EventType::Put => match parse_key(kv.key()) {
                 Ok((_, key_type)) => {
                     log::info!("Processing PUT event for key: {key}");
                     match key_type.as_str() {
@@ -309,7 +314,7 @@ impl EtcdEventHandler for ProxyEventHandler {
                 }
                 Err(e) => log::error!("Failed to parse key during PUT event: {key}: {e}"),
             },
-            etcd_client::EventType::Delete => match parse_key(event.kv().unwrap().key()) {
+            etcd_client::EventType::Delete => match parse_key(kv.key()) {
                 Ok((id, key_type)) => {
                     log::info!("Processing DELETE event for {key_type}: {id}");
                     match key_type.as_str() {

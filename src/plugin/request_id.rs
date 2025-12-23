@@ -124,9 +124,21 @@ impl PluginRequestID {
             &self.config.range_id.char_set
         };
         let chars: Vec<char> = char_set.chars().collect();
+
+        // If char_set is empty, fallback to UUID
+        if chars.is_empty() {
+            log::warn!("Empty character set for range_id, falling back to UUID");
+            return Uuid::new_v4().to_string();
+        }
+
         let mut rng = rand::rng();
         (0..self.config.range_id.length)
-            .map(|_| *chars.choose(&mut rng).unwrap())
+            .map(|_| {
+                chars
+                    .choose(&mut rng)
+                    .copied()
+                    .expect("chars is non-empty, choose should succeed")
+            })
             .collect()
     }
 }

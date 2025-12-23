@@ -23,7 +23,13 @@ static GLOBAL_RESOLVER: OnceCell<Arc<TokioResolver>> = OnceCell::new();
 
 fn get_global_resolver() -> Arc<TokioResolver> {
     GLOBAL_RESOLVER
-        .get_or_init(|| Arc::new(TokioResolver::builder_tokio().unwrap().build()))
+        .get_or_init(|| {
+            Arc::new(
+                TokioResolver::builder_tokio()
+                    .expect("Failed to create DNS resolver builder")
+                    .build(),
+            )
+        })
         .clone()
 }
 
@@ -77,11 +83,17 @@ impl ServiceDiscovery for DnsDiscovery {
                 )
             })?
             .iter()
-            .map(|ip| {
+            .filter_map(|ip| {
                 let addr = SocketAddr::new(ip, self.port as _).to_string();
 
                 // Creating backend
-                let mut backend = Backend::new_with_weight(&addr, self.weight as _).unwrap();
+                let mut backend = match Backend::new_with_weight(&addr, self.weight as _) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        log::error!("Failed to create backend for {addr}: {e}");
+                        return None;
+                    }
+                };
 
                 // Determine if TLS is needed
                 let tls = matches!(self.scheme, UpstreamScheme::HTTPS | UpstreamScheme::GRPCS);
@@ -95,7 +107,7 @@ impl ServiceDiscovery for DnsDiscovery {
                 // Insert HttpPeer into the backend
                 assert!(backend.ext.insert::<HttpPeer>(peer).is_none());
 
-                backend
+                Some(backend)
             })
             .collect();
 
@@ -153,17 +165,13 @@ impl TryFrom<Upstream> for HybridDiscovery {
                 _ => 80,
             });
 
-            if host.parse::<IpAddr>().is_err() {
-                // It's a domain name
-                // Handle DNS discovery for domain names
-                let resolver = get_global_resolver();
-                let discovery = DnsDiscovery::new(host, port, upstream.scheme, *weight, resolver);
-                this.discoveries.push(Box::new(discovery));
-            } else {
+            if let Ok(ip_addr) = host.parse::<IpAddr>() {
                 // It's an IP address
                 // Handle backend creation for IP addresses
-                let addr = &SocketAddr::new(host.parse::<IpAddr>().unwrap(), port as _).to_string();
-                let mut backend = Backend::new_with_weight(addr, *weight as _).unwrap();
+                let addr = &SocketAddr::new(ip_addr, port as _).to_string();
+                let mut backend = Backend::new_with_weight(addr, *weight as _).map_err(|e| {
+                    ProxyError::Configuration(format!("Failed to create backend for {addr}: {e}"))
+                })?;
 
                 let tls = matches!(
                     upstream.scheme,
@@ -188,6 +196,12 @@ impl TryFrom<Upstream> for HybridDiscovery {
                 assert!(backend.ext.insert::<HttpPeer>(peer).is_none());
 
                 backends.insert(backend);
+            } else {
+                // It's a domain name
+                // Handle DNS discovery for domain names
+                let resolver = get_global_resolver();
+                let discovery = DnsDiscovery::new(host, port, upstream.scheme, *weight, resolver);
+                this.discoveries.push(Box::new(discovery));
             }
         }
 
@@ -200,8 +214,9 @@ impl TryFrom<Upstream> for HybridDiscovery {
 }
 
 /// Regular expression for parsing host and port from an address string.
-static HOST_PORT_REGEX: once_cell::sync::Lazy<Regex> =
-    once_cell::sync::Lazy::new(|| Regex::new(r"^(?:\[(.+?)\]|([^:]+))(?::(\d+))?$").unwrap());
+static HOST_PORT_REGEX: once_cell::sync::Lazy<Regex> = once_cell::sync::Lazy::new(|| {
+    Regex::new(r"^(?:\[(.+?)\]|([^:]+))(?::(\d+))?$").expect("Invalid HOST_PORT_REGEX pattern")
+});
 
 /// Parses a host and port from a string.
 ///
@@ -212,7 +227,13 @@ fn parse_host_and_port(addr: &str) -> ProxyResult<(String, Option<u32>)> {
         .captures(addr)
         .ok_or_else(|| ProxyError::Configuration("Invalid address format".to_string()))?;
 
-    let host = caps.get(1).or(caps.get(2)).unwrap().as_str();
+    let host = caps
+        .get(1)
+        .or(caps.get(2))
+        .ok_or_else(|| {
+            ProxyError::Configuration("Failed to extract host from address".to_string())
+        })?
+        .as_str();
 
     let port = if let Some(port_str) = caps.get(3).map(|p| p.as_str()) {
         Some(

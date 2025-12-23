@@ -478,7 +478,9 @@ pub fn apply_regex_uri_template(uri: &str, regex_patterns: &[(Regex, String)]) -
                 .enumerate()
                 .fold(redirect_template.to_string(), |acc, (i, capture)| {
                     // Replace $1, $2, ... with actual capture group values
-                    acc.replace(&format!("${}", i + 1), capture.unwrap().as_str())
+                    // Use empty string if capture group didn't match (optional groups)
+                    let capture_str = capture.map(|c| c.as_str()).unwrap_or("");
+                    acc.replace(&format!("${}", i + 1), capture_str)
                 });
             return redirect_uri;
         }

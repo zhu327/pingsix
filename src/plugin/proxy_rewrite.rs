@@ -22,8 +22,8 @@ pub fn create_proxy_rewrite_plugin(cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyP
     for i in (0..config.regex_uri.len()).step_by(2) {
         let pattern = &config.regex_uri[i];
         let template = &config.regex_uri[i + 1];
-        // Validation ensures regex is valid, so unwrap is safe
-        let re = Regex::new(pattern).unwrap();
+        // Validation ensures regex is valid, so expect is safe
+        let re = Regex::new(pattern).expect("Regex validation should ensure this pattern is valid");
         regex_patterns.push((re, template.clone()));
     }
 

@@ -98,7 +98,7 @@ impl ApiError {
                             .status(400)
                             .header("Content-Type", "application/json")
                             .body(response_body.to_string().into_bytes())
-                            .unwrap()
+                            .expect("Failed to build HTTP error response")
                     }
                     ProxyError::Validation(_) | ProxyError::Configuration(_) => {
                         CommonErrors::bad_request(&proxy_err.to_string())
