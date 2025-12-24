@@ -24,6 +24,7 @@ struct WeightedUpstream {
 
 #[derive(Debug, Serialize, Deserialize, Validate)]
 struct MatchRule {
+    #[serde(default)]
     pub vars: Vec<Vec<String>>, // 格式如 [["arg_name", "==", "val"], ["header_x", "~=", "reg"]]
     #[validate(nested)]
     pub weighted_upstreams: Vec<WeightedUpstream>,
