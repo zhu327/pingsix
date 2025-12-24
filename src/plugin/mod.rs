@@ -14,6 +14,7 @@ pub mod prometheus;
 pub mod proxy_rewrite;
 pub mod redirect;
 pub mod request_id;
+pub mod traffic_split;
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -43,6 +44,10 @@ static PLUGIN_BUILDER_REGISTRY: Lazy<HashMap<&'static str, PluginCreateFn>> = La
         ), // 503
         (grpc_web::PLUGIN_NAME, grpc_web::create_grpc_web_plugin), // 505
         (redirect::PLUGIN_NAME, redirect::create_redirect_plugin), // 900
+        (
+            traffic_split::PLUGIN_NAME,
+            traffic_split::create_traffic_split_plugin,
+        ), // 966
         (gzip::PLUGIN_NAME, gzip::create_gzip_plugin), // 995
         (brotli::PLUGIN_NAME, brotli::create_brotli_plugin), // 996
         (

@@ -1,4 +1,7 @@
-FROM rust:1.88-slim as builder
+FROM --platform=$BUILDPLATFORM rust:1.88-slim AS builder
+
+ARG TARGETPLATFORM
+ARG BUILDPLATFORM
 
 RUN apt-get update && apt-get install -y \
     pkg-config \
@@ -13,7 +16,7 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml ./
 
 RUN mkdir src && \
     echo "fn main() {}" > src/main.rs && \

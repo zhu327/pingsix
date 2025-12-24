@@ -119,14 +119,23 @@ impl ProxyHttp for HttpService {
         session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
-        let route = ctx.route.as_ref().ok_or_else(|| {
-            pingora_error::Error::new(pingora_error::ErrorType::InternalError)
-                .more_context("Route not found in context")
-        })?;
+        let peer = if let Some(ups_override) = ctx.upstream_override.as_ref() {
+            let mut backend = ups_override.select_backend(session).ok_or_else(|| {
+                ProxyError::UpstreamSelection("Traffic-split selected no backend".to_string())
+            })?;
 
-        let peer = route
-            .select_http_peer(session)
-            .map_err(|e: ProxyError| -> Box<pingora_error::Error> { e.into() })?;
+            backend
+                .ext
+                .get_mut::<HttpPeer>()
+                .ok_or_else(|| ProxyError::Internal("Peer missing".into()))
+                .map(|p| Box::new(p.clone()))?
+        } else {
+            ctx.route
+                .as_ref()
+                .ok_or_else(|| ProxyError::Internal("Route not found".into()))
+                .and_then(|r| r.select_http_peer(session))?
+        };
+
         ctx.set("upstream", peer._address.to_string());
         Ok(peer)
     }
