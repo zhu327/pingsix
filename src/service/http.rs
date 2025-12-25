@@ -25,7 +25,10 @@ use pingora_proxy::{ProxyHttp, Session};
 use crate::{
     config,
     core::{ProxyContext, ProxyError, ProxyPlugin, RouteContext},
-    plugin::cache::{CacheSettings, CTX_KEY_CACHE_SETTINGS},
+    plugin::{
+        cache::{CacheSettings, CTX_KEY_CACHE_SETTINGS},
+        traffic_split::CTX_KEY_UPSTREAM_OVERRIDE,
+    },
     proxy::{global_rule::global_plugin_fetch, route::global_route_match_fetch},
 };
 
@@ -120,7 +123,9 @@ impl ProxyHttp for HttpService {
         session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
-        let peer = if let Some(ups_override) = ctx.upstream_override.as_ref() {
+        let peer = if let Some(ups_override) =
+            ctx.get::<Arc<dyn crate::core::UpstreamSelector>>(CTX_KEY_UPSTREAM_OVERRIDE)
+        {
             let mut backend = ups_override.select_backend(session).ok_or_else(|| {
                 ProxyError::UpstreamSelection("Traffic-split selected no backend".to_string())
             })?;
