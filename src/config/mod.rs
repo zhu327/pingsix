@@ -537,6 +537,7 @@ pub enum UpstreamPassHost {
     #[default]
     PASS,
     REWRITE,
+    NODE,
 }
 
 #[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]

@@ -23,6 +23,7 @@ use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_proxy::{ProxyHttp, Session};
 
 use crate::{
+    config,
     core::{ProxyContext, ProxyError, ProxyPlugin, RouteContext},
     plugin::cache::{CacheSettings, CTX_KEY_CACHE_SETTINGS},
     proxy::{global_rule::global_plugin_fetch, route::global_route_match_fetch},
@@ -136,7 +137,7 @@ impl ProxyHttp for HttpService {
                 .and_then(|r| r.select_http_peer(session))?
         };
 
-        ctx.set("upstream", peer._address.to_string());
+        ctx.peer = Some(peer.clone());
         Ok(peer)
     }
 
@@ -161,7 +162,23 @@ impl ProxyHttp for HttpService {
 
         // Rewrite host header
         if let Some(upstream) = ctx.route.as_ref().and_then(|r| r.resolve_upstream()) {
-            upstream.upstream_host_rewrite(upstream_request);
+            match upstream.get_pass_host() {
+                config::UpstreamPassHost::PASS => {
+                    // Do nothing, preserve original host
+                }
+                config::UpstreamPassHost::REWRITE => {
+                    upstream.upstream_host_rewrite(upstream_request);
+                }
+                config::UpstreamPassHost::NODE => {
+                    if let Some(peer) = ctx.peer.as_ref() {
+                        if let Err(e) =
+                            upstream_request.insert_header(http::header::HOST, peer.sni.as_str())
+                        {
+                            log::error!("Failed to rewrite upstream host header: {e}");
+                        }
+                    }
+                }
+            }
         }
         Ok(())
     }

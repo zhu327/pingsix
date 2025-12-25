@@ -22,6 +22,8 @@ use pingora_proxy::Session;
 use regex::Regex;
 use serde_json::Value as JsonValue;
 
+use crate::config;
+
 // =============================================================================
 // UPSTREAM ABSTRACTION
 // =============================================================================
@@ -39,6 +41,9 @@ pub trait UpstreamSelector: Send + Sync {
 
     /// Get the retry timeout configured for this upstream
     fn get_retry_timeout(&self) -> Option<u64>;
+
+    /// Get the pass host configuration for this upstream
+    fn get_pass_host(&self) -> &config::UpstreamPassHost;
 
     /// Rewrite the upstream host in the request header if needed
     fn upstream_host_rewrite(&self, upstream_request: &mut RequestHeader);
@@ -610,6 +615,8 @@ pub struct ProxyContext {
     pub route_params: Option<Vec<(String, String)>>,
     // Override upstream selector for traffic splitting and similar use cases.
     pub upstream_override: Option<Arc<dyn UpstreamSelector>>,
+    // Selected HTTP peer for the upstream request.
+    pub peer: Option<Box<HttpPeer>>,
     /// Number of retry attempts so far.
     pub tries: usize,
     /// Executor for route-specific plugins.
@@ -630,6 +637,7 @@ impl Default for ProxyContext {
             route: None,
             route_params: None,
             upstream_override: None,
+            peer: None,
             tries: 0,
             plugin: ProxyPluginExecutor::default_shared(),
             global_plugin: ProxyPluginExecutor::default_shared(),

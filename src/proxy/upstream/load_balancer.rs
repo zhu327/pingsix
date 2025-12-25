@@ -166,6 +166,10 @@ impl UpstreamSelector for ProxyUpstream {
         self.inner.retry_timeout
     }
 
+    fn get_pass_host(&self) -> &config::UpstreamPassHost {
+        &self.inner.pass_host
+    }
+
     fn upstream_host_rewrite(&self, upstream_request: &mut RequestHeader) {
         if self.inner.pass_host == config::UpstreamPassHost::REWRITE {
             if let Some(host) = &self.inner.upstream_host {

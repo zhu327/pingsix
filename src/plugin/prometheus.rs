@@ -153,26 +153,29 @@ impl ProxyPlugin for PluginPrometheus {
             .map_or_else(|| "unknown", |r| r.service_id().unwrap_or("unknown"));
 
         // Extract node from context variables (assumes HttpService::upstream_peer sets ctx["upstream"]) as String
-        let node = ctx.get_str("upstream").unwrap_or("");
+        let node = ctx
+            .peer
+            .as_ref()
+            .map_or_else(|| "".to_string(), |p| p._address.to_string());
 
         // Update Prometheus metrics with normalized path template
         STATUS
-            .with_label_values(&[code, route_id, &path_template, host, service, node])
+            .with_label_values(&[code, route_id, &path_template, host, service, &node])
             .inc();
 
         // Record request latency
         let elapsed_ms = ctx.elapsed_ms_f64();
         LATENCY
-            .with_label_values(&["request", route_id, service, node])
+            .with_label_values(&["request", route_id, service, &node])
             .observe(elapsed_ms);
 
         // Record bandwidth metrics
         BANDWIDTH
-            .with_label_values(&["ingress", route_id, service, node])
+            .with_label_values(&["ingress", route_id, service, &node])
             .inc_by(session.body_bytes_read() as _);
 
         BANDWIDTH
-            .with_label_values(&["egress", route_id, service, node])
+            .with_label_values(&["egress", route_id, service, &node])
             .inc_by(session.body_bytes_sent() as _);
 
         // Record request and response sizes
