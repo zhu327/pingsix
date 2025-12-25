@@ -57,7 +57,13 @@ impl Identifiable for ProxyUpstream {
 
 impl ProxyUpstream {
     /// Creates a ProxyUpstream that uses the shared health check service
-    pub fn new_with_shared_health_check(upstream: config::Upstream) -> ProxyResult<Self> {
+    pub fn new_with_shared_health_check(mut upstream: config::Upstream) -> ProxyResult<Self> {
+        // Auto-generate upstream ID if empty (for inline upstreams in route, service, traffic-split)
+        if upstream.id.is_empty() {
+            upstream.id = format!("inline_{}", uuid::Uuid::new_v4());
+            log::debug!("Generated ID for inline upstream: {}", upstream.id);
+        }
+
         let lb = SelectionLB::try_from(upstream.clone()).map_err(|e| {
             ProxyError::Configuration(format!("Failed to create load balancer: {e}"))
         })?;
