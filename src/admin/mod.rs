@@ -21,7 +21,7 @@ use crate::{
         Admin, Identifiable, Pingsix,
     },
     core::{constant_time_eq, ProxyError},
-    plugin::build_plugin,
+    plugins::build_plugin,
     utils::response::{CommonErrors, ResponseBuilder},
 };
 

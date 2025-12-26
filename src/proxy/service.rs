@@ -6,7 +6,7 @@ use once_cell::sync::Lazy;
 use crate::{
     config::{self, Identifiable},
     core::{ErrorContext, ProxyError, ProxyPlugin, ProxyResult, UpstreamSelector},
-    plugin::build_plugin,
+    plugins::build_plugin,
 };
 
 use super::{

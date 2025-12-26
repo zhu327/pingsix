@@ -3,7 +3,7 @@ mod admin;
 mod config;
 mod core;
 mod logging;
-mod plugin;
+mod plugins;
 mod proxy;
 mod service;
 mod utils;

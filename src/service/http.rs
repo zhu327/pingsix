@@ -25,7 +25,7 @@ use pingora_proxy::{ProxyHttp, Session};
 use crate::{
     config,
     core::{ProxyContext, ProxyError, ProxyPlugin, RouteContext},
-    plugin::{
+    plugins::{
         cache::{CacheSettings, CTX_KEY_CACHE_SETTINGS},
         traffic_split::CTX_KEY_UPSTREAM_OVERRIDE,
     },

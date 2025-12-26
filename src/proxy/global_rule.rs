@@ -7,7 +7,7 @@ use once_cell::sync::Lazy;
 use crate::{
     config::{self, Identifiable},
     core::{ProxyError, ProxyPlugin, ProxyPluginExecutor, ProxyResult},
-    plugin::build_plugin,
+    plugins::build_plugin,
 };
 
 use super::MapOperations;

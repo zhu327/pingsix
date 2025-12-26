@@ -6,7 +6,7 @@ pub mod admin;
 pub mod config;
 pub mod core;
 pub mod logging;
-pub mod plugin;
+pub mod plugins;
 pub mod proxy;
 pub mod service;
 pub(crate) mod utils;

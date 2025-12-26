@@ -16,7 +16,7 @@ use crate::{
         ErrorContext, ProxyError, ProxyPlugin, ProxyPluginExecutor, ProxyResult, RouteContext,
         UpstreamSelector,
     },
-    plugin::build_plugin,
+    plugins::build_plugin,
     utils::request::get_request_host,
 };
 
