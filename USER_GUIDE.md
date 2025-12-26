@@ -27,7 +27,7 @@ PingSIX is a high-performance API gateway built with Rust, designed for modern c
 - **High Performance**: Built with Rust and Tokio for exceptional throughput and low latency
 - **Dynamic Configuration**: Real-time configuration updates via etcd integration
 - **Flexible Routing**: Advanced request matching based on host, path, methods, and priorities
-- **Rich Plugin Ecosystem**: 15+ built-in plugins for authentication, rate limiting, compression, and more
+- **Rich Plugin Ecosystem**: 16+ built-in plugins for authentication, rate limiting, compression, and more
 - **Health Checking**: Active health checks for upstream services
 - **Observability**: Built-in Prometheus metrics and Sentry integration
 - **Admin API**: RESTful API for dynamic configuration management
@@ -539,9 +539,14 @@ upstreams:
   - id: "host-rewrite-example"
     nodes:
       "internal-api.local:8080": 1
-    pass_host: rewrite              # Options: pass, rewrite
+    pass_host: rewrite              # Options: pass, rewrite, node
     upstream_host: internal-api.local  # Required when pass_host is rewrite
 ```
+
+**Pass Host Options:**
+- **`pass`** (default): Pass the client's original Host header to the upstream
+- **`rewrite`**: Replace the Host header with the value specified in `upstream_host`
+- **`node`**: Use the upstream node's hostname as the Host header
 
 ## Services
 
@@ -589,7 +594,7 @@ global_rules:
 
 ## Plugins
 
-PingSIX includes 15+ built-in plugins for various functionalities:
+PingSIX includes 16+ built-in plugins for various functionalities:
 
 ### Authentication Plugins
 
@@ -678,6 +683,44 @@ plugins:
 ```
 
 ### Traffic Management
+
+#### Traffic Split (A/B Testing & Canary Deployment)
+```yaml
+plugins:
+  traffic-split:
+    rules:
+      - vars:                                  # Match conditions (optional)
+          - ["arg_version", "==", "v2"]        # Query parameter match
+          - ["header_x-user-type", "==", "beta"] # Header match
+        weighted_upstreams:
+          - upstream_id: "backend-v2"          # Reference to existing upstream
+            weight: 50                         # 50% traffic
+          - upstream:                          # Or inline upstream definition
+              nodes:
+                "canary-server:8080": 1
+              type: roundrobin
+            weight: 50                         # 50% traffic
+      
+      - vars: []                               # Default rule (matches all)
+        weighted_upstreams:
+          - upstream_id: "stable-backend"
+            weight: 90                         # 90% to stable
+          - upstream_id: "canary-backend"
+            weight: 10                         # 10% to canary
+```
+
+**Traffic Split Features:**
+- **Weighted Distribution**: Distribute traffic across multiple upstreams based on weights
+- **Conditional Routing**: Match requests based on query parameters, headers, or cookies
+- **Variable Matching**: Support for `==` (equals) and `!=` (not equals) operators
+- **Inline or Referenced Upstreams**: Use `upstream_id` to reference existing upstreams or define inline
+- **Default Fallback**: If weight doesn't specify an upstream, falls back to route's default upstream
+
+**Common Use Cases:**
+- A/B testing different backend versions
+- Canary deployments with gradual traffic shifting
+- Blue-green deployments
+- Feature flag-based routing
 
 #### Request/Response Modification
 ```yaml
@@ -1326,6 +1369,105 @@ global_rules:
       prometheus: {}
       file-logger:
         log_format: '$remote_addr - [$time_local] "$request" $status $body_bytes_sent $request_time'
+```
+
+### Example 5: Canary Deployment with Traffic Split
+
+```yaml
+pingora:
+  version: 1
+  threads: 4
+
+pingsix:
+  listeners:
+    - address: 0.0.0.0:8080
+  
+  prometheus:
+    address: 0.0.0.0:9091
+
+upstreams:
+  - id: "production-v1"
+    nodes:
+      "prod-v1-1.example.com:8080": 1
+      "prod-v1-2.example.com:8080": 1
+    type: roundrobin
+    pass_host: pass
+    checks:
+      active:
+        type: http
+        http_path: /health
+        healthy:
+          interval: 10
+          successes: 2
+        unhealthy:
+          http_failures: 3
+  
+  - id: "canary-v2"
+    nodes:
+      "canary-v2-1.example.com:8080": 1
+    type: roundrobin
+    pass_host: node                    # Use node hostname as Host header
+    checks:
+      active:
+        type: http
+        http_path: /health
+        healthy:
+          interval: 10
+          successes: 2
+        unhealthy:
+          http_failures: 3
+
+routes:
+  # Beta users get 100% canary traffic
+  - id: "api-beta"
+    uri: /api/{*path}
+    host: api.example.com
+    priority: 100
+    upstream_id: "production-v1"
+    plugins:
+      traffic-split:
+        rules:
+          - vars:
+              - ["header_x-user-type", "==", "beta"]
+            weighted_upstreams:
+              - upstream_id: "canary-v2"
+                weight: 100              # 100% to canary for beta users
+      
+      limit-count:
+        key_type: vars
+        key: remote_addr
+        time_window: 60
+        count: 1000
+  
+  # General users get 90/10 split
+  - id: "api-general"
+    uri: /api/{*path}
+    host: api.example.com
+    upstream_id: "production-v1"
+    plugins:
+      traffic-split:
+        rules:
+          - vars: []                     # Match all requests
+            weighted_upstreams:
+              - upstream_id: "production-v1"
+                weight: 90               # 90% to stable
+              - upstream_id: "canary-v2"
+                weight: 10               # 10% to canary
+      
+      request-id:
+        header_name: X-Request-ID
+        include_in_response: true
+      
+      limit-count:
+        key_type: vars
+        key: remote_addr
+        time_window: 60
+        count: 1000
+
+global_rules:
+  - id: "monitoring"
+    plugins:
+      prometheus: {}
 ```
 
 ## Troubleshooting
