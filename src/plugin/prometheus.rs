@@ -12,7 +12,7 @@ use regex::Regex;
 use serde_json::Value as JsonValue;
 
 use crate::{
-    core::{ProxyContext, ProxyPlugin, ProxyResult},
+    core::{ProxyContext, ProxyError, ProxyPlugin, ProxyResult},
     utils::request::get_request_host,
 };
 
@@ -109,11 +109,61 @@ static RESPONSE_SIZE: Lazy<HistogramVec> = Lazy::new(|| {
 pub const PLUGIN_NAME: &str = "prometheus";
 const PRIORITY: i32 = 500;
 
-pub fn create_prometheus_plugin(_cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyPlugin>> {
-    Ok(Arc::new(PluginPrometheus {}))
+/// Configuration for the Prometheus plugin
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct PrometheusConfig {
+    /// Maximum length for path template labels to prevent cardinality explosion
+    /// Default: 100 characters
+    #[serde(default = "PrometheusConfig::default_max_label_length")]
+    pub max_label_length: usize,
+
+    /// Maximum number of unique path segments to track
+    /// If exceeded, paths will be collapsed to "/..." pattern
+    /// Default: 1000
+    #[serde(default = "PrometheusConfig::default_max_unique_paths")]
+    pub max_unique_paths: usize,
 }
 
-pub struct PluginPrometheus;
+impl PrometheusConfig {
+    fn default_max_label_length() -> usize {
+        100
+    }
+
+    fn default_max_unique_paths() -> usize {
+        1000
+    }
+}
+
+impl Default for PrometheusConfig {
+    fn default() -> Self {
+        Self {
+            max_label_length: Self::default_max_label_length(),
+            max_unique_paths: Self::default_max_unique_paths(),
+        }
+    }
+}
+
+pub fn create_prometheus_plugin(cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyPlugin>> {
+    let config = if cfg.is_null() {
+        PrometheusConfig::default()
+    } else {
+        serde_json::from_value(cfg).map_err(|e| {
+            ProxyError::serialization_error("Failed to parse prometheus plugin config", e)
+        })?
+    };
+
+    Ok(Arc::new(PluginPrometheus {
+        config,
+        path_counter: std::sync::atomic::AtomicUsize::new(0),
+    }))
+}
+
+pub struct PluginPrometheus {
+    config: PrometheusConfig,
+    /// Counter to track the number of unique paths seen
+    /// Used to implement max_unique_paths limit
+    path_counter: std::sync::atomic::AtomicUsize,
+}
 
 #[async_trait]
 impl ProxyPlugin for PluginPrometheus {
@@ -202,7 +252,15 @@ impl PluginPrometheus {
     }
 
     /// Apply basic path normalization to reduce metric cardinality
+    /// Implements max_label_length limit and path convergence strategy
     fn normalize_path(&self, path: &str) -> String {
+        // First, check current path counter against limit
+        let current_count = self.path_counter.load(std::sync::atomic::Ordering::Relaxed);
+        if current_count > self.config.max_unique_paths {
+            // If we've exceeded the limit, collapse all paths to a generic pattern
+            return "/...".to_string();
+        }
+
         // Replace numeric IDs with placeholders using pre-compiled regex
         let path = NUMERIC_ID_REGEX.replace_all(path, "/{id}");
 
@@ -212,11 +270,24 @@ impl PluginPrometheus {
         // Replace other common patterns using pre-compiled regex
         let path = HASH_REGEX.replace_all(&path, "/{hash}");
 
-        // Limit path length to prevent extremely long paths
-        if path.len() > 100 {
-            format!("{}...", &path[..97])
+        // Limit path segment count to prevent deep hierarchies
+        let segments: Vec<&str> = path.split('/').collect();
+        let path = if segments.len() > 8 {
+            // Keep first 7 segments and append "..."
+            format!("{}/...", segments[..7].join("/"))
         } else {
             path.to_string()
+        };
+
+        // Enforce maximum label length to prevent memory issues
+        if path.len() > self.config.max_label_length {
+            let truncate_at = self.config.max_label_length.saturating_sub(3);
+            format!("{}...", &path[..truncate_at])
+        } else {
+            // Increment counter for unique paths (approximate, race conditions acceptable)
+            self.path_counter
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            path
         }
     }
 }

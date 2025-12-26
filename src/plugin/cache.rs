@@ -30,6 +30,10 @@ pub struct CacheSettings {
     pub vary: Arc<Vec<String>>,
     pub hide_cache_headers: bool,
     pub max_file_size_bytes: usize,
+    /// Enable Stale-While-Revalidate: serve stale content while fetching fresh content in background
+    pub stale_while_revalidate: Option<Duration>,
+    /// Enable s-maxage support: respect Cache-Control s-maxage directive for shared caches
+    pub respect_s_maxage: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
@@ -59,6 +63,18 @@ pub struct PluginConfig {
     /// Used to prevent memory exhaustion from caching large responses.
     #[serde(default)]
     pub max_file_size_bytes: usize,
+
+    /// Stale-While-Revalidate duration in seconds.
+    /// When set, stale cached responses can be served while a background revalidation occurs.
+    /// This improves performance by reducing wait times for fresh content.
+    #[serde(default)]
+    pub stale_while_revalidate_secs: Option<u64>,
+
+    /// Respect Cache-Control s-maxage directive for shared caches.
+    /// When enabled, s-maxage overrides the configured TTL for shared cache scenarios.
+    /// Default: true (recommended for CDN/proxy scenarios)
+    #[serde(default = "PluginConfig::default_respect_s_maxage")]
+    pub respect_s_maxage: bool,
 }
 
 impl PluginConfig {
@@ -67,6 +83,9 @@ impl PluginConfig {
     }
     fn default_cache_http_statuses() -> Vec<u16> {
         vec![200]
+    }
+    fn default_respect_s_maxage() -> bool {
+        true
     }
 }
 
@@ -145,6 +164,8 @@ pub fn create_cache_plugin(cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyPlugin>> 
         vary: Arc::new(config.vary.clone()),
         hide_cache_headers: config.hide_cache_headers,
         max_file_size_bytes: config.max_file_size_bytes,
+        stale_while_revalidate: config.stale_while_revalidate_secs.map(Duration::from_secs),
+        respect_s_maxage: config.respect_s_maxage,
     });
 
     Ok(Arc::new(PluginCache {

@@ -397,37 +397,67 @@ impl ProxyHttp for HttpService {
     }
 }
 
-/// Ensures CacheControl has max-age set, adding default TTL if missing
+/// Ensures CacheControl has max-age set, adding default TTL if missing.
+/// Also handles s-maxage and stale-while-revalidate directives based on settings.
 fn ensure_max_age(cc: Option<CacheControl>, settings: &CacheSettings) -> Option<CacheControl> {
     match cc {
         Some(existing_cc) => {
-            // Check if max-age is already present
-            if existing_cc.max_age().unwrap_or(None).is_some() {
-                return Some(existing_cc);
-            }
+            let mut directives = DirectiveMap::with_capacity(existing_cc.directives.len() + 3);
+            let mut has_max_age = false;
 
-            // Need to add max-age, copy existing directives
-            let mut directives = DirectiveMap::with_capacity(existing_cc.directives.len() + 1);
-
-            // Copy existing directives (excluding max-age)
+            // Copy existing directives and check for max-age
             for (key, value) in &existing_cc.directives {
-                if key != "max-age" {
+                // If respect_s_maxage is enabled and s-maxage is present, use it as max-age for shared cache
+                if settings.respect_s_maxage && key == "s-maxage" {
+                    if let Some(s_maxage_value) = value {
+                        // Use s-maxage value as max-age for shared cache scenario
+                        let max_age_from_s_maxage = DirectiveValue(s_maxage_value.0.clone());
+                        directives.insert("max-age".to_string(), Some(max_age_from_s_maxage));
+                        has_max_age = true;
+                    }
+                    // Also keep the original s-maxage
+                    let cloned_value = value.as_ref().map(|val| DirectiveValue(val.0.clone()));
+                    directives.insert(key.clone(), cloned_value);
+                } else if key == "max-age" {
+                    has_max_age = true;
+                    let cloned_value = value.as_ref().map(|val| DirectiveValue(val.0.clone()));
+                    directives.insert(key.clone(), cloned_value);
+                } else {
                     let cloned_value = value.as_ref().map(|val| DirectiveValue(val.0.clone()));
                     directives.insert(key.clone(), cloned_value);
                 }
             }
 
-            // Add max-age directive
-            let max_age_value = DirectiveValue(settings.ttl.as_secs().to_string().into_bytes());
-            directives.insert("max-age".to_string(), Some(max_age_value));
+            // Add max-age if not present (and not set from s-maxage)
+            if !has_max_age {
+                let max_age_value = DirectiveValue(settings.ttl.as_secs().to_string().into_bytes());
+                directives.insert("max-age".to_string(), Some(max_age_value));
+            }
+
+            // Add stale-while-revalidate if configured and not already present
+            if let Some(swr_duration) = settings.stale_while_revalidate {
+                if !directives.contains_key("stale-while-revalidate") {
+                    let swr_value = DirectiveValue(swr_duration.as_secs().to_string().into_bytes());
+                    directives.insert("stale-while-revalidate".to_string(), Some(swr_value));
+                }
+            }
 
             Some(CacheControl { directives })
         }
         None => {
-            // No Cache-Control header, create new instance with max-age only
-            let mut directives = DirectiveMap::with_capacity(1);
+            // No Cache-Control header, create new instance
+            let capacity = 1 + settings.stale_while_revalidate.is_some() as usize;
+            let mut directives = DirectiveMap::with_capacity(capacity);
+
+            // Add max-age directive
             let max_age_value = DirectiveValue(settings.ttl.as_secs().to_string().into_bytes());
             directives.insert("max-age".to_string(), Some(max_age_value));
+
+            // Add stale-while-revalidate if configured
+            if let Some(swr_duration) = settings.stale_while_revalidate {
+                let swr_value = DirectiveValue(swr_duration.as_secs().to_string().into_bytes());
+                directives.insert("stale-while-revalidate".to_string(), Some(swr_value));
+            }
 
             Some(CacheControl { directives })
         }
