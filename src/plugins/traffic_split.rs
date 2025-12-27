@@ -28,7 +28,7 @@ struct WeightedUpstream {
 #[derive(Debug, Serialize, Deserialize, Validate)]
 struct MatchRule {
     #[serde(default)]
-    pub vars: Vec<Vec<String>>, // 格式如 [["arg_name", "==", "val"], ["header_x", "~=", "reg"]]
+    pub vars: Vec<Vec<String>>, // 格式如 [["arg_name", "==", "val"], ["http_x", "!=", "reg"]]
     #[validate(nested)]
     pub weighted_upstreams: Vec<WeightedUpstream>,
 }
@@ -84,7 +84,12 @@ impl PluginTrafficSplit {
             let val = &v[2];
 
             // 借助 PingSIX 现有的变量提取逻辑
-            let actual_val = request_selector_key(session, &UpstreamHashOn::VARS, var_name);
+            // 如果 var_name 以 http_ 开头，则使用 HEAD 获取请求头，否则使用 VARS 获取变量
+            let actual_val = if let Some(header_name) = var_name.strip_prefix("http_") {
+                request_selector_key(session, &UpstreamHashOn::HEAD, header_name)
+            } else {
+                request_selector_key(session, &UpstreamHashOn::VARS, var_name)
+            };
 
             match op.as_str() {
                 "==" => {

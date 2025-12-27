@@ -691,7 +691,7 @@ plugins:
     rules:
       - vars:                                  # Match conditions (optional)
           - ["arg_version", "==", "v2"]        # Query parameter match
-          - ["header_x-user-type", "==", "beta"] # Header match
+          - ["http_x-user-type", "==", "beta"] # Header match
         weighted_upstreams:
           - upstream_id: "backend-v2"          # Reference to existing upstream
             weight: 50                         # 50% traffic
@@ -1428,7 +1428,7 @@ routes:
       traffic-split:
         rules:
           - vars:
-              - ["header_x-user-type", "==", "beta"]
+              - ["http_x-user-type", "==", "beta"]
             weighted_upstreams:
               - upstream_id: "canary-v2"
                 weight: 100              # 100% to canary for beta users

@@ -235,7 +235,7 @@ cargo run -- -c config.yaml
 
 ```rust
 use async_trait::async_trait;
-use crate::plugin::ProxyPlugin;
+use crate::plugins::ProxyPlugin;
 
 pub struct MyCustomPlugin {
     config: MyPluginConfig,
