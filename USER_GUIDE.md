@@ -756,6 +756,59 @@ plugins:
       - "/new/$1"
 ```
 
+#### Fault Injection (Testing & Chaos Engineering)
+```yaml
+plugins:
+  fault-injection:
+    delay:                        # Inject latency into requests
+      duration: 2.5               # Delay in seconds (supports decimals)
+      percentage: 50              # Apply to 50% of requests (optional, omit for all)
+    
+    abort:                        # Return error response
+      http_status: 503            # HTTP status code to return
+      body: "Service Unavailable" # Optional response body
+      percentage: 10              # Apply to 10% of requests (optional, omit for all)
+      headers:                    # Optional custom headers
+        X-Fault-Injected: "true"
+        Retry-After: "60"
+```
+
+**Fault Injection Features:**
+- **Delay Injection**: Inject artificial latency to test timeout handling and performance under degraded conditions
+- **Abort Injection**: Return error responses to simulate service failures
+- **Percentage-Based**: Apply faults to a percentage of requests for realistic testing
+- **Combined Faults**: Can use both delay and abort together
+- **Custom Responses**: Define response status, body, and headers for abort responses
+
+**Common Use Cases:**
+- Chaos engineering and resilience testing
+- Testing timeout handling and retry logic
+- Load testing under failure scenarios
+- Circuit breaker and fallback validation
+- SLA compliance testing
+
+**Configuration Examples:**
+```yaml
+# Delay only - add 1 second latency to 20% of requests
+delay:
+  duration: 1.0
+  percentage: 20
+
+# Abort only - return 500 error for 5% of requests
+abort:
+  http_status: 500
+  percentage: 5
+
+# Combined - both delay and abort
+delay:
+  duration: 3.0
+  percentage: 10
+abort:
+  http_status: 503
+  body: "Gateway Timeout"
+  percentage: 5
+```
+
 ### Compression
 
 #### Gzip Compression
