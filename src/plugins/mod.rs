@@ -1,6 +1,8 @@
+pub mod basic_auth;
 pub mod brotli;
 pub mod cache;
 pub mod cors;
+pub mod csrf;
 pub mod echo;
 pub mod fault_injection;
 pub mod file_logger;
@@ -14,6 +16,7 @@ pub mod prometheus;
 pub mod proxy_rewrite;
 pub mod redirect;
 pub mod request_id;
+pub mod response_rewrite;
 pub mod traffic_split;
 
 use std::{collections::HashMap, sync::Arc};
@@ -43,6 +46,10 @@ static PLUGIN_BUILDER_REGISTRY: Lazy<HashMap<&'static str, PluginCreateFn>> = La
             limit_count::create_limit_count_plugin,
         ), // 503
         (grpc_web::PLUGIN_NAME, grpc_web::create_grpc_web_plugin), // 505
+        (
+            response_rewrite::PLUGIN_NAME,
+            response_rewrite::create_response_rewrite_plugin,
+        ), // 899
         (redirect::PLUGIN_NAME, redirect::create_redirect_plugin), // 900
         (
             traffic_split::PLUGIN_NAME,
@@ -64,7 +71,12 @@ static PLUGIN_BUILDER_REGISTRY: Lazy<HashMap<&'static str, PluginCreateFn>> = La
             request_id::create_request_id_plugin,
         ), // 12015
         (key_auth::PLUGIN_NAME, key_auth::create_key_auth_plugin), // 2500
+        (
+            basic_auth::PLUGIN_NAME,
+            basic_auth::create_basic_auth_plugin,
+        ), // 2520
         (jwt_auth::PLUGIN_NAME, jwt_auth::create_jwt_auth_plugin), // 2510
+        (csrf::PLUGIN_NAME, csrf::create_csrf_plugin), // 2980
         (
             ip_restriction::PLUGIN_NAME,
             ip_restriction::create_ip_restriction_plugin,
