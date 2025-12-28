@@ -634,6 +634,27 @@ plugins:
     hide_credentials: false        # Keep credentials in request
 ```
 
+#### Basic Authentication
+```yaml
+plugins:
+  basic-auth:
+    username: "admin"              # Username for authentication
+    password: "secret"             # Password for authentication
+    hide_credentials: true         # Remove Authorization header from upstream request
+```
+
+**Basic Authentication Features:**
+- **Simple Credentials**: Username and password-based authentication
+- **HTTP 401 Response**: Returns 401 Unauthorized with `WWW-Authenticate: Basic realm="pingsix"` header on invalid credentials
+- **Constant-Time Comparison**: Uses constant-time string comparison to prevent timing attacks
+- **Credential Hiding**: Optionally removes Authorization header before forwarding to upstream services
+- **Standard Compliance**: Follows RFC 7617 HTTP Basic Authentication specification
+
+**Common Use Cases:**
+- Protecting development or staging environments
+- Internal service authentication
+- Simple API access control
+
 ### Security Plugins
 
 #### IP Restriction
@@ -665,6 +686,37 @@ plugins:
     allow_origins_by_regex:        # Regex patterns for origins
       - "https://.*\\.example\\.com"
 ```
+
+#### CSRF (Cross-Site Request Forgery Protection)
+```yaml
+plugins:
+  csrf:
+    key: "your-csrf-secret-key"    # Secret key for token generation and validation
+    expires: 7200                  # Token expiration time in seconds (default: 7200)
+    name: "pingsix-csrf-token"     # Cookie/header name for CSRF token (default: pingsix-csrf-token)
+```
+
+**CSRF Protection Features:**
+- **Double Submit Cookie Pattern**: Validates that token in header matches token in cookie
+- **Token Expiration**: Automatically expires tokens based on configured TTL
+- **Signature Validation**: Uses SHA256 to sign tokens with configurable secret key
+- **Safe Methods**: Skips validation for GET, HEAD, and OPTIONS requests
+- **Automatic Token Generation**: Generates and distributes tokens in response cookies
+- **SameSite Cookie**: Sets SameSite=Lax for enhanced security
+
+**Token Validation Flow:**
+1. Client receives token in response cookie and header
+2. For state-changing requests (POST, PUT, DELETE, PATCH), client must include token in request header
+3. Server validates:
+   - Token is present in both cookie and header
+   - Cookie and header tokens match
+   - Token signature is valid
+   - Token has not expired
+
+**Common Use Cases:**
+- Protecting form submissions from CSRF attacks
+- Securing API endpoints that modify data
+- Web application security in traditional request-response patterns
 
 ### Rate Limiting
 
@@ -722,7 +774,7 @@ plugins:
 - Blue-green deployments
 - Feature flag-based routing
 
-#### Request/Response Modification
+#### Request Modification (Proxy Rewrite)
 ```yaml
 plugins:
   proxy-rewrite:
@@ -742,6 +794,46 @@ plugins:
       - "^/old/(.*)"              # Pattern
       - "/new/$1"                 # Replacement
 ```
+
+#### Response Modification (Response Rewrite)
+```yaml
+plugins:
+  response-rewrite:
+    status_code: 200              # Rewrite response status code
+    headers:                      # Modify response headers (simple mode)
+      X-Custom-Header: "value"
+      X-Another-Header: "value2"
+    # OR structured mode for add/set/remove
+    headers:
+      set:
+        X-Response-Header: "new-value"
+        X-Client-IP: "$remote_addr"  # Variables supported: $remote_addr, $upstream_addr, $request_id
+      add:
+        - "X-Added-Header: appended-value"
+      remove:
+        - "X-Remove-This-Header"
+    vars:                         # Conditional rewrite based on request matching
+      - ["arg_version", "==", "v2"]    # Query parameter match
+      - ["http_x-user-type", "==", "premium"]  # Header match
+```
+
+**Response Rewrite Features:**
+- **Status Code Modification**: Change response HTTP status codes conditionally
+- **Header Manipulation**: Set, add, or remove response headers
+- **Variable Substitution**: Support for variables like `$remote_addr`, `$upstream_addr`, `$request_id` in header values
+- **Conditional Rewriting**: Apply rewrites only when request conditions match
+- **Flexible Configuration**: Both simple (key-value) and structured (add/set/remove) header modes
+
+**Variable Placeholders:**
+- `$remote_addr` - Client IP address
+- `$upstream_addr` - Upstream server address
+- `$request_id` - Request tracking ID (if request-id plugin is enabled)
+
+**Common Use Cases:**
+- Adding security headers (X-Content-Type-Options, X-Frame-Options)
+- Injecting custom headers for downstream processing
+- Rewriting status codes based on request type
+- Adding request tracing headers
 
 #### Redirect
 ```yaml

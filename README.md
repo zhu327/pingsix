@@ -85,11 +85,13 @@ curl http://localhost:8080/get
 
 ## 🔌 Plugin Ecosystem
 
-PingSIX includes 17+ built-in plugins organized by category:
+PingSIX includes 20+ built-in plugins organized by category:
 
 ### 🔐 Authentication & Security
 - **`jwt-auth`** - JWT token validation with multiple algorithms
 - **`key-auth`** - API key authentication with rotation support
+- **`basic-auth`** - HTTP Basic Authentication with constant-time comparison
+- **`csrf`** - CSRF protection using double-submit cookie pattern
 - **`ip-restriction`** - IP allowlist/blocklist with CIDR support
 - **`cors`** - Cross-Origin Resource Sharing with regex patterns
 
@@ -109,8 +111,9 @@ PingSIX includes 17+ built-in plugins organized by category:
 - **`gzip`** / **`brotli`** - Response compression
 - **`grpc-web`** - gRPC-Web protocol support
 
-### 🛠️ Utilities
+### 🛠️ Utilities & Testing
 - **`echo`** - Testing and debugging responses
+- **`fault-injection`** - Chaos engineering with delay and abort injection
 
 > 📖 For detailed plugin configuration, see the [Plugin Documentation](USER_GUIDE.md#plugins)
 
