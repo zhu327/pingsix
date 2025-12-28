@@ -323,6 +323,58 @@ impl<T: AdminResource> Handler for DeleteHandler<T> {
     }
 }
 
+// LIST handler
+struct ListHandler<T: AdminResource> {
+    _phantom: PhantomData<T>,
+}
+
+impl<T: AdminResource> ListHandler<T> {
+    fn new() -> Self {
+        Self {
+            _phantom: PhantomData,
+        }
+    }
+}
+
+#[async_trait]
+impl<T: AdminResource> Handler for ListHandler<T> {
+    async fn handle(
+        &self,
+        etcd: &EtcdClientWrapper,
+        _http_session: &mut ServerSession,
+        _params: RequestParams,
+    ) -> ApiResult<ApiResponse> {
+        let response = etcd.list(T::RESOURCE_TYPE).await?;
+
+        let mut list_items = Vec::new();
+        for kv in response.kvs() {
+            let key = String::from_utf8_lossy(kv.key()).to_string();
+            let value: serde_json::Value = serde_json::from_slice(kv.value()).map_err(|e| {
+                ApiError::ProxyError(ProxyError::serialization_error(
+                    "Failed to parse resource JSON",
+                    e,
+                ))
+            })?;
+
+            let item = serde_json::json!({
+                "key": key,
+                "value": value,
+                "createdIndex": kv.create_revision(),
+                "modifiedIndex": kv.mod_revision(),
+            });
+
+            list_items.push(item);
+        }
+
+        let result = serde_json::json!({
+            "total": list_items.len(),
+            "list": list_items,
+        });
+
+        Ok(ResponseBuilder::success_json(&result))
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 struct ValueWrapper<T> {
     value: T,
@@ -356,10 +408,12 @@ impl AdminHttpApp {
 
     fn register_resource_routes<T: AdminResource>(&mut self) -> &mut Self {
         let path = format!("/apisix/admin/{}/{{id}}", T::RESOURCE_TYPE);
+        let list_path = format!("/apisix/admin/{}", T::RESOURCE_TYPE);
 
         self.route(&path, Method::PUT, Box::new(ResourceHandler::<T>::new()))
             .route(&path, Method::GET, Box::new(GetHandler::<T>::new()))
-            .route(&path, Method::DELETE, Box::new(DeleteHandler::<T>::new()));
+            .route(&path, Method::DELETE, Box::new(DeleteHandler::<T>::new()))
+            .route(&list_path, Method::GET, Box::new(ListHandler::<T>::new()));
 
         self
     }

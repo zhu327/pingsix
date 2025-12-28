@@ -300,6 +300,23 @@ impl EtcdClientWrapper {
         Ok(())
     }
 
+    pub async fn list(&self, key: &str) -> ProxyResult<etcd_client::GetResponse> {
+        let client_mutex = self.ensure_connected().await?;
+        let mut client = client_mutex.lock().await;
+
+        let prefixed_key = self.with_prefix(key);
+        let options = GetOptions::new().with_prefix();
+        client
+            .get(prefixed_key.as_bytes(), Some(options))
+            .await
+            .map_err(|e| {
+                ProxyError::etcd_error_with_cause(
+                    format!("List operation for key '{prefixed_key}' failed"),
+                    e,
+                )
+            })
+    }
+
     fn with_prefix(&self, key: &str) -> String {
         format!("{}/{}", self.config.prefix, key)
     }
