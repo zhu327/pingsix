@@ -13,7 +13,7 @@ PingSIX is a modern API gateway designed for cloud-native environments, offering
 - 🚀 **High Performance**: Built with Rust and Tokio for exceptional throughput and low latency
 - 🔄 **Dynamic Configuration**: Real-time configuration updates via etcd integration
 - 🛣️ **Advanced Routing**: Flexible request matching based on host, path, methods, and priorities
-- 🔌 **Rich Plugin Ecosystem**: 17+ built-in plugins with easy extensibility
+- 🔌 **Rich Plugin Ecosystem**: 20+ built-in plugins with easy extensibility
 - 📊 **Observability**: Built-in Prometheus metrics and Sentry integration
 - 🔒 **Security**: JWT/API key authentication, IP restrictions, CORS support
 - ⚡ **Load Balancing**: Multiple algorithms with active health checking
@@ -98,7 +98,8 @@ PingSIX includes 20+ built-in plugins organized by category:
 ### 🚦 Traffic Management
 - **`limit-count`** - Request rate limiting with flexible keys
 - **`traffic-split`** - A/B testing and canary deployments with weighted traffic distribution
-- **`proxy-rewrite`** - Request/response modification
+- **`proxy-rewrite`** - Request modification
+- **`response-rewrite`** - Response headers modification
 - **`redirect`** - HTTP redirects with regex support
 - **`cache`** - Response caching with TTL and conditions
 

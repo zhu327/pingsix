@@ -7,16 +7,17 @@
 3. [Core Concepts](#core-concepts)
 4. [Configuration](#configuration)
 5. [Docker Deployment](#docker-deployment)
-6. [Routing](#routing)
-7. [Upstreams](#upstreams)
-8. [Services](#services)
-9. [Global Rules](#global-rules)
-10. [Plugins](#plugins)
-11. [Admin API](#admin-api)
-12. [SSL/TLS Configuration](#ssltls-configuration)
-13. [Monitoring and Observability](#monitoring-and-observability)
-14. [Examples](#examples)
-15. [Troubleshooting](#troubleshooting)
+6. [Kubernetes Deployment](#kubernetes-deployment)
+7. [Routing](#routing)
+8. [Upstreams](#upstreams)
+9. [Services](#services)
+10. [Global Rules](#global-rules)
+11. [Plugins](#plugins)
+12. [Admin API](#admin-api)
+13. [SSL/TLS Configuration](#ssltls-configuration)
+14. [Monitoring and Observability](#monitoring-and-observability)
+15. [Examples](#examples)
+16. [Troubleshooting](#troubleshooting)
 
 ## Introduction
 
@@ -320,6 +321,503 @@ volumes:
 ```bash
 # Logging level
 RUST_LOG=info
+```
+
+## Kubernetes Deployment
+
+PingSIX provides Helm charts for easy deployment in Kubernetes environments. The Helm chart supports three deployment modes to fit different use cases:
+
+1. **Ingress Controller Mode**: Full Kubernetes Ingress controller with dynamic configuration
+2. **etcd Mode**: Standalone gateway with etcd for dynamic configuration management
+3. **Static Configuration Mode**: Standalone gateway with static YAML configuration
+
+### Prerequisites
+
+- Kubernetes cluster (v1.19+)
+- Helm 3.x installed
+- kubectl configured to access your cluster
+
+### Installation
+
+First, clone the PingSIX Helm chart repository:
+
+```bash
+git clone https://github.com/zhu327/pingsix-helm-chart.git
+cd pingsix-helm-chart/charts
+```
+
+### Deployment Mode 1: Ingress Controller Mode
+
+This mode enables PingSIX to work as a Kubernetes Ingress controller, automatically synchronizing Ingress, Gateway API, and custom resources (ApisixRoute, ApisixUpstream, etc.) to configure routes dynamically.
+
+**Features:**
+- Full Kubernetes Ingress controller functionality
+- Support for Gateway API, Ingress, and APISIX custom resources
+- Automatic configuration synchronization from Kubernetes resources
+- No etcd required (uses in-memory configuration)
+
+**Installation:**
+
+```bash
+helm install apisix \
+  --namespace ingress-apisix \
+  --create-namespace \
+  --set etcd.enabled=false \
+  --set ingress-controller.enabled=true \
+  --set ingress-controller.gatewayProxy.createDefault=true \
+  ./apisix
+```
+
+**Configuration:**
+
+When using Ingress controller mode, you manage routes through Kubernetes resources instead of YAML configuration files.
+
+#### Using Gateway API
+
+First, configure the GatewayClass and Gateway resources:
+
+```yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  namespace: ingress-apisix
+  name: apisix
+spec:
+  controllerName: apisix.apache.org/apisix-ingress-controller
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  namespace: ingress-apisix
+  name: apisix
+spec:
+  gatewayClassName: apisix
+  listeners:
+  - name: http
+    protocol: HTTP
+    port: 80
+  infrastructure:
+    parametersRef:
+      group: apisix.apache.org
+      kind: GatewayProxy
+      name: apisix-config
+```
+
+Then create an HTTPRoute to configure routing:
+
+```yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  namespace: ingress-apisix
+  name: httpbin-route
+spec:
+  parentRefs:
+  - name: apisix
+  rules:
+  - matches:
+    - path:
+        type: Exact
+        value: /ip
+    backendRefs:
+    - name: httpbin
+      port: 80
+```
+
+#### Using Kubernetes Ingress
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  namespace: ingress-apisix
+  name: httpbin-ingress
+spec:
+  ingressClassName: apisix
+  rules:
+    - http:
+        paths:
+          - backend:
+              service:
+                name: httpbin
+                port:
+                  number: 80
+            path: /ip
+            pathType: Exact
+```
+
+#### Using APISIX Custom Resources
+
+```yaml
+apiVersion: apisix.apache.org/v2
+kind: ApisixRoute
+metadata:
+  namespace: ingress-apisix
+  name: httpbin-route
+spec:
+  ingressClassName: apisix
+  http:
+    - name: getting-started-ip
+      match:
+        paths:
+          - /ip
+      backends:
+        - serviceName: httpbin
+          servicePort: 80
+      plugins:
+        - name: limit-count
+          enable: true
+          config:
+            key_type: vars
+            key: remote_addr
+            time_window: 60
+            count: 100
+```
+
+**More Examples:**
+
+For detailed Ingress controller examples and configuration, refer to the official Apache APISIX Ingress Controller documentation:
+- [Configure Routes](https://apisix.apache.org/zh/docs/ingress-controller/getting-started/configure-routes/)
+- [Load Balancing](https://apisix.apache.org/docs/ingress-controller/tutorials/load-balancing)
+- [Authentication](https://apisix.apache.org/docs/ingress-controller/tutorials/authentication)
+
+### Deployment Mode 2: etcd Mode
+
+This mode deploys PingSIX with etcd for dynamic configuration management via the Admin API.
+
+**Features:**
+- Dynamic configuration updates via Admin API
+- etcd-based configuration persistence
+- Suitable for traditional API gateway deployments
+
+**Installation:**
+
+```bash
+helm install apisix \
+  --namespace pingsix \
+  --create-namespace \
+  --set etcd.enabled=true \
+  --set ingress-controller.enabled=false \
+  --set pingsix.admin.enabled=true \
+  --set pingsix.admin.apiKey="your-secure-api-key" \
+  ./apisix
+```
+
+**Configuration via Admin API:**
+
+After installation, you can manage routes dynamically using the Admin API:
+
+```bash
+# Port forward to access Admin API
+kubectl port-forward -n pingsix svc/apisix-admin 9181:9181
+
+# Create a route
+curl -X PUT http://127.0.0.1:9181/apisix/admin/routes/1 \
+  -H "X-API-KEY: your-secure-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "uri": "/api/*",
+    "upstream": {
+      "type": "roundrobin",
+      "nodes": {
+        "backend-service.default.svc.cluster.local:8080": 1
+      }
+    }
+  }'
+```
+
+**Custom Values:**
+
+Create a `values-etcd.yaml` file:
+
+```yaml
+etcd:
+  enabled: true
+  auth:
+    rbac:
+      create: true
+      rootPassword: "your-etcd-password"
+
+pingsix:
+  admin:
+    enabled: true
+    apiKey: "your-secure-api-key"
+    address: "0.0.0.0:9181"
+  
+  prometheus:
+    enabled: true
+    address: "0.0.0.0:9091"
+
+  listeners:
+    - address: "0.0.0.0:8080"
+      offerH2c: false
+```
+
+Install with custom values:
+
+```bash
+helm install apisix \
+  --namespace pingsix \
+  --create-namespace \
+  -f values-etcd.yaml \
+  ./apisix
+```
+
+### Deployment Mode 3: Static Configuration Mode
+
+This mode deploys PingSIX with static YAML configuration, suitable for simple deployments or when etcd is managed externally.
+
+**Features:**
+- Simple deployment with static configuration
+- No etcd dependency (use external etcd or static config)
+- Configuration updates require pod restart
+
+**Installation with Static Configuration:**
+
+Create a `values-static.yaml` file:
+
+```yaml
+etcd:
+  enabled: false
+
+ingress-controller:
+  enabled: false
+
+pingsix:
+  listeners:
+    - address: "0.0.0.0:8080"
+      offerH2c: false
+
+routes:
+  - id: "1"
+    uri: /api/{*path}
+    upstream:
+      nodes:
+        "backend-service.default.svc.cluster.local:8080": 1
+      type: roundrobin
+    plugins:
+      limit-count:
+        key_type: vars
+        key: remote_addr
+        time_window: 60
+        count: 100
+
+globalRules:
+  - id: "1"
+    plugins:
+      prometheus: {}
+```
+
+Install with static configuration:
+
+```bash
+helm install apisix \
+  --namespace pingsix \
+  --create-namespace \
+  -f values-static.yaml \
+  ./apisix
+```
+
+**Installation with External etcd:**
+
+If you have an external etcd cluster:
+
+```yaml
+etcd:
+  enabled: false
+
+externalEtcd:
+  host:
+    - "http://etcd-cluster.etcd.svc.cluster.local:2379"
+  user: "root"
+  password: "your-password"
+
+pingsix:
+  admin:
+    enabled: true
+    apiKey: "your-secure-api-key"
+```
+
+### Common Helm Configuration Options
+
+#### Scaling and Resources
+
+```yaml
+# Use DaemonSet for node-level deployment
+useDaemonSet: true
+
+# Or use Deployment with replicas
+useDaemonSet: false
+replicaCount: 3
+
+# Enable autoscaling
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+
+# Resource requests and limits
+resources:
+  limits:
+    cpu: 1000m
+    memory: 512Mi
+  requests:
+    cpu: 200m
+    memory: 256Mi
+```
+
+#### Service Configuration
+
+```yaml
+service:
+  type: LoadBalancer  # Options: ClusterIP, NodePort, LoadBalancer
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: nlb
+  externalTrafficPolicy: Local  # Preserve client source IP
+```
+
+#### TLS/SSL Configuration
+
+```yaml
+pingsix:
+  listeners:
+    - address: "0.0.0.0:8080"
+    - address: "0.0.0.0:8443"
+      tls:
+        # Use Kubernetes Secret for certificates
+        secretName: pingsix-tls
+        # Or use custom filenames in secret
+        certFilename: tls.crt
+        keyFilename: tls.key
+      offerH2: true
+```
+
+Create the TLS secret:
+
+```bash
+kubectl create secret tls pingsix-tls \
+  --cert=server.crt \
+  --key=server.key \
+  -n pingsix
+```
+
+#### Monitoring and Observability
+
+```yaml
+pingsix:
+  prometheus:
+    enabled: true
+    address: "0.0.0.0:9091"
+
+metrics:
+  serviceMonitor:
+    enabled: true
+    interval: 15s
+    labels:
+      release: prometheus
+
+pingsix:
+  sentry:
+    enabled: true
+    dsn: "https://your-dsn@sentry.io/project-id"
+```
+
+### Accessing PingSIX
+
+#### Port Forward
+
+```bash
+# Access gateway
+kubectl port-forward -n pingsix svc/apisix-gateway 8080:80
+
+# Access Admin API (if enabled)
+kubectl port-forward -n pingsix svc/apisix-admin 9181:9181
+
+# Access Prometheus metrics (if enabled)
+kubectl port-forward -n pingsix svc/apisix-gateway 9091:9091
+```
+
+#### Using Ingress
+
+```yaml
+ingress:
+  enabled: true
+  annotations:
+    kubernetes.io/ingress.class: nginx
+  hosts:
+    - host: pingsix.example.com
+      paths:
+        - /
+  tls:
+    - secretName: pingsix-ingress-tls
+      hosts:
+        - pingsix.example.com
+```
+
+### Upgrading
+
+```bash
+# Update chart repository
+cd pingsix-helm-chart
+git pull
+
+# Upgrade with new configuration
+helm upgrade apisix \
+  --namespace pingsix \
+  -f values.yaml \
+  ./charts/apisix
+
+# Check upgrade status
+helm history apisix -n pingsix
+```
+
+### Uninstalling
+
+```bash
+# Uninstall PingSIX
+helm uninstall apisix -n pingsix
+
+# Delete namespace (optional)
+kubectl delete namespace pingsix
+```
+
+### Troubleshooting Kubernetes Deployment
+
+#### Check Pod Status
+
+```bash
+kubectl get pods -n pingsix
+kubectl describe pod <pod-name> -n pingsix
+kubectl logs <pod-name> -n pingsix
+```
+
+#### Check Configuration
+
+```bash
+# View ConfigMap
+kubectl get configmap -n pingsix
+kubectl describe configmap apisix -n pingsix
+
+# View generated config
+kubectl get configmap apisix -n pingsix -o yaml
+```
+
+#### Debug Connection Issues
+
+```bash
+# Test internal connectivity
+kubectl run -n pingsix test-pod --image=curlimages/curl --rm -it -- sh
+
+# Inside the pod
+curl http://apisix-gateway:80/health
+```
+
+#### Check Service Endpoints
+
+```bash
+kubectl get endpoints -n pingsix
+kubectl get svc -n pingsix
 ```
 
 ## Routing
@@ -926,23 +1424,63 @@ plugins:
 plugins:
   cache:
     ttl: 3600                     # Cache TTL in seconds
-    cache_http_methods: ["GET", "HEAD"]
-    cache_http_statuses: [200, 301, 404]
+    cache_http_methods: ["GET", "HEAD"]  # Default: ["GET", "HEAD"]
+    cache_http_statuses: [200, 301, 404] # Default: [200]
     no_cache_str:                 # Regex patterns to skip caching
       - ".*private.*"
       - ".*no-cache.*"
     vary: ["Accept-Encoding"]     # Vary headers for cache keys
-    hide_cache_headers: false     # Hide cache-related headers
-    max_file_size_bytes: 1048576  # Max cacheable response size
+    hide_cache_headers: false     # Hide cache-related headers (default: false)
+    max_file_size_bytes: 1048576  # Max cacheable response size (bytes, 0 = no limit)
+    stale_while_revalidate_secs: 60  # Serve stale content while revalidating (optional)
+    respect_s_maxage: true        # Respect Cache-Control s-maxage directive (default: true)
 ```
+
+**Cache Plugin Features:**
+- **TTL Management**: Configure cache expiration with `ttl` parameter
+- **Stale-While-Revalidate**: Serve stale cached content while fetching fresh content in the background, improving perceived performance
+- **s-maxage Support**: When enabled (default), respects `Cache-Control: s-maxage` directive from origin, overriding configured TTL for shared cache scenarios
+- **Selective Caching**: Control which HTTP methods and status codes are cacheable
+- **Pattern-Based Exclusion**: Use regex patterns to exclude specific URIs from caching
+- **Size Limits**: Prevent memory exhaustion by limiting cacheable response size
+- **Vary Support**: Generate cache keys based on specified request headers
+
+**Common Use Cases:**
+- CDN-like caching for static assets
+- API response caching with TTL
+- Serving stale content during origin failures
+- Respecting origin cache control policies
 
 ### Observability
 
 #### Prometheus Metrics
 ```yaml
 plugins:
-  prometheus: {}                  # Zero-configuration, enable to start metric collection
+  prometheus:
+    max_label_length: 100         # Maximum path label length (default: 100)
+    max_unique_paths: 1000        # Maximum unique paths tracked (default: 1000)
+  # OR zero-configuration
+  prometheus: {}                  # Use defaults: max_label_length=100, max_unique_paths=1000
 ```
+
+**Prometheus Plugin Features:**
+- **Cardinality Control**: Limits metric cardinality by normalizing URI paths and enforcing label length limits
+- **Path Normalization**: Automatically replaces numeric IDs, UUIDs, and hashes with placeholders (e.g., `/users/123` becomes `/users/{id}`)
+- **Label Length Limit**: Truncates long path labels to prevent memory issues
+- **Path Tracking Limit**: Collapses paths to `/...` after exceeding unique path threshold
+
+**Collected Metrics:**
+- `http_requests_total` - Total number of requests
+- `http_status` - Status codes per route/service/node with normalized paths
+- `http_latency` - Request latency histogram
+- `bandwidth` - Ingress/egress bandwidth per route/service
+- `http_request_size_bytes` - Request size distribution
+- `http_response_size_bytes` - Response size distribution
+
+**Configuration Best Practices:**
+- Keep `max_label_length` under 200 to avoid Prometheus issues
+- Set `max_unique_paths` based on your API diversity (1000-10000 typical)
+- Monitor metric cardinality in Prometheus to tune these values
 
 #### File Logging
 ```yaml
@@ -1010,6 +1548,19 @@ curl -H "X-API-KEY: your-secure-api-key" \
      http://127.0.0.1:9181/apisix/admin/routes/1
 ```
 
+**Available Operations:**
+- **PUT** `/apisix/admin/{resource_type}/{id}` - Create or update a resource
+- **GET** `/apisix/admin/{resource_type}/{id}` - Get a specific resource
+- **DELETE** `/apisix/admin/{resource_type}/{id}` - Delete a resource
+- **GET** `/apisix/admin/{resource_type}` - List all resources of a type
+
+**Supported Resource Types:**
+- `routes` - Route configurations
+- `upstreams` - Upstream server pools
+- `services` - Service definitions
+- `global_rules` - Global plugin rules
+- `ssls` - SSL certificates
+
 #### Routes Management
 
 **Create/Update Route**:
@@ -1042,6 +1593,33 @@ curl -X PUT http://127.0.0.1:9181/apisix/admin/routes/1 \
 ```bash
 curl -X GET http://127.0.0.1:9181/apisix/admin/routes/1 \
   -H "X-API-KEY: your-api-key"
+```
+
+**List All Routes**:
+```bash
+curl -X GET http://127.0.0.1:9181/apisix/admin/routes \
+  -H "X-API-KEY: your-api-key"
+```
+
+Response format:
+```json
+{
+  "total": 2,
+  "list": [
+    {
+      "key": "routes/1",
+      "value": { /* route configuration */ },
+      "createdIndex": 10,
+      "modifiedIndex": 15
+    },
+    {
+      "key": "routes/2",
+      "value": { /* route configuration */ },
+      "createdIndex": 20,
+      "modifiedIndex": 20
+    }
+  ]
+}
 ```
 
 **Delete Route**:
@@ -1079,6 +1657,12 @@ curl -X PUT http://127.0.0.1:9181/apisix/admin/upstreams/1 \
   }'
 ```
 
+**List All Upstreams**:
+```bash
+curl -X GET http://127.0.0.1:9181/apisix/admin/upstreams \
+  -H "X-API-KEY: your-api-key"
+```
+
 #### Services Management
 
 **Create/Update Service**:
@@ -1094,6 +1678,12 @@ curl -X PUT http://127.0.0.1:9181/apisix/admin/services/1 \
       }
     }
   }'
+```
+
+**List All Services**:
+```bash
+curl -X GET http://127.0.0.1:9181/apisix/admin/services \
+  -H "X-API-KEY: your-api-key"
 ```
 
 #### Global Rules Management
@@ -1114,6 +1704,12 @@ curl -X PUT http://127.0.0.1:9181/apisix/admin/global_rules/1 \
   }'
 ```
 
+**List All Global Rules**:
+```bash
+curl -X GET http://127.0.0.1:9181/apisix/admin/global_rules \
+  -H "X-API-KEY: your-api-key"
+```
+
 #### SSL Certificates Management
 
 **Create/Update SSL Certificate**:
@@ -1126,6 +1722,12 @@ curl -X PUT http://127.0.0.1:9181/apisix/admin/ssls/1 \
     "key": "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----",
     "snis": ["example.com", "www.example.com"]
   }'
+```
+
+**List All SSL Certificates**:
+```bash
+curl -X GET http://127.0.0.1:9181/apisix/admin/ssls \
+  -H "X-API-KEY: your-api-key"
 ```
 
 ## SSL/TLS Configuration
@@ -1188,15 +1790,32 @@ pingsix:
 global_rules:
   - id: "metrics"
     plugins:
-      prometheus: {}
+      prometheus:
+        max_label_length: 100      # Optional: Max path label length (default: 100)
+        max_unique_paths: 1000     # Optional: Max unique paths (default: 1000)
 ```
 
 Available metrics include:
-- Request count by route, status code, method
-- Request duration histograms
-- Upstream response times
-- Active connections
-- Bandwidth usage
+- `http_requests_total` - Total number of requests
+- `http_status{code, route, path_template, matched_host, service, node}` - Request count by status and normalized path
+- `http_latency{type, route, service, node}` - Request duration histograms in milliseconds
+- `bandwidth{type, route, service, node}` - Ingress/egress bandwidth in bytes
+- `http_request_size_bytes{route, service}` - Request size distribution
+- `http_response_size_bytes{route, service}` - Response size distribution
+
+**Metric Labels:**
+- `path_template` - Normalized URI path to avoid high cardinality (e.g., `/users/{id}` instead of `/users/123`)
+- `route` - Route ID
+- `service` - Service ID
+- `node` - Upstream node address
+- `matched_host` - Matched host from route configuration
+
+**Path Normalization:**
+The Prometheus plugin automatically normalizes paths to prevent metric cardinality explosion:
+- Numeric IDs: `/users/123` → `/users/{id}`
+- UUIDs: `/items/550e8400-e29b-41d4-a716-446655440000` → `/items/{uuid}`
+- Hashes: `/files/a1b2c3d4e5f6...` → `/files/{hash}`
+- Deep paths: Limits to 8 segments, truncates to `/segment1/.../segment7/...`
 
 ### Sentry Integration
 
@@ -1382,6 +2001,9 @@ routes:
         cache_http_methods: ["GET", "HEAD"]
         cache_http_statuses: [200, 301, 404]
         vary: ["Accept-Encoding"]
+        max_file_size_bytes: 10485760  # 10MB limit
+        stale_while_revalidate_secs: 300  # Serve stale for 5 min while revalidating
+        respect_s_maxage: true
       gzip:
         comp_level: 6
   
@@ -1393,6 +2015,7 @@ routes:
         ttl: 300  # 5 minutes
         cache_http_methods: ["GET"]
         cache_http_statuses: [200]
+        stale_while_revalidate_secs: 60
       limit-count:
         key_type: vars
         key: remote_addr
@@ -1402,7 +2025,9 @@ routes:
 global_rules:
   - id: "observability"
     plugins:
-      prometheus: {}
+      prometheus:
+        max_label_length: 150
+        max_unique_paths: 2000
       request-id:
         header_name: X-Request-ID
         include_in_response: true
@@ -1612,7 +2237,9 @@ routes:
 global_rules:
   - id: "monitoring"
     plugins:
-      prometheus: {}
+      prometheus:
+        max_label_length: 100
+        max_unique_paths: 1000
 ```
 
 ## Troubleshooting
