@@ -153,26 +153,26 @@ impl Config {
     }
 
     fn validate_resource_id(&self) -> Result<(), ValidationError> {
-        if self.upstreams.iter().any(|upstream| upstream.id.is_empty()) {
-            return Err(ValidationError::new("upstream_id_required"));
-        }
+        Self::validate_non_empty_ids(&self.upstreams, "upstream")?;
+        Self::validate_non_empty_ids(&self.routes, "route")?;
+        Self::validate_non_empty_ids(&self.services, "service")?;
+        Self::validate_non_empty_ids(&self.global_rules, "global_rule")?;
+        Self::validate_non_empty_ids(&self.ssls, "ssl")?;
+        Ok(())
+    }
 
-        if self.routes.iter().any(|route| route.id.is_empty()) {
-            return Err(ValidationError::new("route_id_required"));
+    /// Validates that all resources in the slice have non-empty IDs.
+    ///
+    /// Uses generic constraint on `Identifiable` trait to work with any resource type.
+    fn validate_non_empty_ids<T: Identifiable>(
+        items: &[T],
+        resource_name: &str,
+    ) -> Result<(), ValidationError> {
+        if items.iter().any(|item| item.id().is_empty()) {
+            let mut err = ValidationError::new("id_required");
+            err.add_param("resource".into(), &resource_name);
+            return Err(err);
         }
-
-        if self.services.iter().any(|service| service.id.is_empty()) {
-            return Err(ValidationError::new("service_id_required"));
-        }
-
-        if self.global_rules.iter().any(|rule| rule.id.is_empty()) {
-            return Err(ValidationError::new("global_rule_id_required"));
-        }
-
-        if self.ssls.iter().any(|ssl| ssl.id.is_empty()) {
-            return Err(ValidationError::new("ssl_id_required"));
-        }
-
         Ok(())
     }
 
