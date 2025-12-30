@@ -163,15 +163,6 @@ pub fn create_traffic_split_plugin(cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyP
                 "Rule {idx} must have total weight greater than 0"
             )));
         }
-
-        // Validate that each weighted upstream has either upstream_id or inline upstream
-        for (wu_idx, wu) in rule.weighted_upstreams.iter().enumerate() {
-            if wu.upstream_id.is_none() && wu.upstream.is_none() {
-                return Err(ProxyError::Plugin(format!(
-                    "Rule {idx} weighted_upstream {wu_idx} must have either upstream_id or upstream defined"
-                )));
-            }
-        }
     }
 
     let mut rule_upstreams = Vec::new();
