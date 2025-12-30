@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
@@ -6,7 +6,9 @@ use once_cell::sync::Lazy;
 
 use crate::{
     config::{self, Identifiable},
-    core::{ProxyError, ProxyPlugin, ProxyPluginExecutor, ProxyResult},
+    core::{
+        sort_plugins_by_priority_desc, ProxyError, ProxyPlugin, ProxyPluginExecutor, ProxyResult,
+    },
     plugins::build_plugin,
 };
 
@@ -47,6 +49,9 @@ impl ProxyGlobalRule {
             proxy_global_rule.plugins.push(plugin);
         }
 
+        // Ensure deterministic order for plugins inside a single global rule.
+        sort_plugins_by_priority_desc(proxy_global_rule.plugins.as_mut_slice());
+
         Ok(proxy_global_rule)
     }
 }
@@ -60,28 +65,40 @@ pub fn global_plugin_fetch() -> Arc<ProxyPluginExecutor> {
     GLOBAL_PLUGIN.load().clone()
 }
 
-/// Reloads ProxyPluginExecutor with deduplicated plugins sorted by priority.
+/// Reloads global plugin executor from all GlobalRules (Scheme B).
+///
+/// Semantics:
+/// - Do NOT deduplicate by plugin name: multiple GlobalRules may contribute the same plugin type.
+/// - Produce a deterministic execution order independent of DashMap iteration order:
+///   sort by (priority desc, plugin name asc, global_rule_id asc).
 pub fn reload_global_plugin() {
-    // Use a HashMap to deduplicate plugins by name
-    let mut unique_plugins: HashMap<String, Arc<dyn ProxyPlugin>> = HashMap::new();
+    // Collect all rules first, then sort deterministically by id (DashMap iteration is not stable).
+    let mut rules: Vec<Arc<ProxyGlobalRule>> =
+        GLOBAL_RULE_MAP.iter().map(|e| e.value().clone()).collect();
+    rules.sort_by(|a, b| a.inner.id.cmp(&b.inner.id));
 
-    // Iterate through all ProxyGlobalRule in GLOBAL_RULE_MAP
-    for rule in GLOBAL_RULE_MAP.iter() {
+    // Flatten plugins while keeping the originating rule id for deterministic tie-breaking.
+    let mut plugins_with_rule: Vec<(String, Arc<dyn ProxyPlugin>)> = Vec::new();
+    for rule in rules {
+        let rule_id = rule.inner.id.clone();
         for plugin in &rule.plugins {
-            // Deduplicate by plugin name; only one instance of each plugin is kept
-            // (the last encountered instance from any GlobalRule is retained)
-            let plugin_name = plugin.name();
-            unique_plugins.insert(plugin_name.to_string(), plugin.clone());
+            plugins_with_rule.push((rule_id.clone(), plugin.clone()));
         }
     }
 
-    // Collect deduplicated plugins and sort by priority
-    let mut plugins: Vec<_> = unique_plugins.into_values().collect();
+    plugins_with_rule.sort_by(|(rule_a, plugin_a), (rule_b, plugin_b)| {
+        plugin_b
+            .priority()
+            .cmp(&plugin_a.priority())
+            .then_with(|| plugin_a.name().cmp(plugin_b.name()))
+            .then_with(|| rule_a.cmp(rule_b))
+    });
 
-    // Sort plugins by priority (higher priority first)
-    plugins.sort_by_key(|b| std::cmp::Reverse(b.priority()));
+    let plugins: Vec<Arc<dyn ProxyPlugin>> = plugins_with_rule
+        .into_iter()
+        .map(|(_, plugin)| plugin)
+        .collect();
 
-    // Update GLOBAL_PLUGIN with new executor
     GLOBAL_PLUGIN.store(Arc::new(ProxyPluginExecutor { plugins }));
 }
 

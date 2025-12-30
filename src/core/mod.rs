@@ -442,6 +442,17 @@ pub trait ProxyPlugin: Send + Sync {
     async fn logging(&self, _session: &mut Session, _e: Option<&Error>, _ctx: &mut ProxyContext) {}
 }
 
+/// Sort proxy plugins deterministically by:
+/// - higher priority first
+/// - for ties, sort by plugin name
+pub(crate) fn sort_plugins_by_priority_desc(plugins: &mut [Arc<dyn ProxyPlugin>]) {
+    plugins.sort_by(|a, b| {
+        b.priority()
+            .cmp(&a.priority())
+            .then_with(|| a.name().cmp(b.name()))
+    });
+}
+
 /// Constant-time string comparison to prevent timing attacks.
 ///
 /// Used primarily for secret/token comparison in authentication plugins.

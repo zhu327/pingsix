@@ -52,15 +52,23 @@ pub fn reset() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // These tests touch global process-wide state (CONFIG_LOADED).
+    // Rust runs tests in parallel by default, so we must serialize this module's tests
+    // to avoid racy failures where another test flips the readiness flag mid-assertion.
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_initial_state_not_ready() {
+        let _guard = TEST_LOCK.lock().unwrap();
         reset();
         assert!(!is_ready());
     }
 
     #[test]
     fn test_mark_ready_yaml() {
+        let _guard = TEST_LOCK.lock().unwrap();
         reset();
         assert!(!is_ready());
         mark_ready(ConfigSource::Yaml);
@@ -69,6 +77,7 @@ mod tests {
 
     #[test]
     fn test_mark_ready_etcd() {
+        let _guard = TEST_LOCK.lock().unwrap();
         reset();
         assert!(!is_ready());
         mark_ready(ConfigSource::Etcd);
@@ -77,6 +86,7 @@ mod tests {
 
     #[test]
     fn test_multiple_marks_stay_ready() {
+        let _guard = TEST_LOCK.lock().unwrap();
         reset();
         mark_ready(ConfigSource::Yaml);
         assert!(is_ready());

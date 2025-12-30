@@ -5,7 +5,10 @@ use once_cell::sync::Lazy;
 
 use crate::{
     config::{self, Identifiable},
-    core::{ErrorContext, ProxyError, ProxyPlugin, ProxyResult, UpstreamSelector},
+    core::{
+        sort_plugins_by_priority_desc, ErrorContext, ProxyError, ProxyPlugin, ProxyResult,
+        UpstreamSelector,
+    },
     plugins::build_plugin,
 };
 
@@ -71,14 +74,7 @@ impl ProxyService {
         }
 
         // Pre-sort plugins once at build-time to avoid per-request sorting in route+service merges.
-        // Deterministic ordering:
-        // - higher priority first
-        // - for ties, sort by plugin name to keep stable behavior across hash map iteration order
-        proxy_service.plugins.sort_by(|a, b| {
-            b.priority()
-                .cmp(&a.priority())
-                .then_with(|| a.name().cmp(b.name()))
-        });
+        sort_plugins_by_priority_desc(proxy_service.plugins.as_mut_slice());
 
         Ok(proxy_service)
     }

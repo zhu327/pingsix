@@ -12,8 +12,8 @@ use pingora_proxy::Session;
 use crate::{
     config::{self, Identifiable},
     core::{
-        ErrorContext, ProxyError, ProxyPlugin, ProxyPluginExecutor, ProxyResult, RouteContext,
-        UpstreamSelector,
+        sort_plugins_by_priority_desc, ErrorContext, ProxyError, ProxyPlugin, ProxyPluginExecutor,
+        ProxyResult, RouteContext, UpstreamSelector,
     },
     plugins::build_plugin,
     utils::request::get_request_host,
@@ -24,17 +24,6 @@ use super::{
     upstream::{upstream_fetch, ProxyUpstream},
     MapOperations,
 };
-
-fn sort_plugins_by_priority_desc(plugins: &mut Vec<Arc<dyn ProxyPlugin>>) {
-    // Deterministic ordering:
-    // - higher priority first
-    // - for ties, sort by plugin name to keep stable behavior across hash map iteration order
-    plugins.sort_by(|a, b| {
-        b.priority()
-            .cmp(&a.priority())
-            .then_with(|| a.name().cmp(b.name()))
-    });
-}
 
 fn build_plugin_name_index(plugins: &[Arc<dyn ProxyPlugin>]) -> Vec<String> {
     let mut names: Vec<String> = plugins.iter().map(|p| p.name().to_string()).collect();
@@ -157,7 +146,7 @@ impl ProxyRoute {
         }
 
         // Pre-sort plugins once at build-time to avoid per-request sorting.
-        sort_plugins_by_priority_desc(&mut proxy_route.plugins);
+        sort_plugins_by_priority_desc(proxy_route.plugins.as_mut_slice());
         proxy_route.plugin_name_index = build_plugin_name_index(&proxy_route.plugins);
 
         // Optimization: Pre-build executor for routes without service_id (static plugins).
