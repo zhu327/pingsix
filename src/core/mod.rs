@@ -613,6 +613,8 @@ pub struct ProxyContext {
     /// Parameters extracted from the route pattern.
     /// Stored as Vec for better performance with small number of params (typical case).
     pub route_params: Option<Vec<(String, String)>>,
+    /// The upstream override selected by the traffic-split plugin.
+    pub upstream_override: Option<Arc<dyn UpstreamSelector>>,
     // Selected HTTP peer for the upstream request.
     pub peer: Option<Box<HttpPeer>>,
     /// Number of retry attempts so far.
@@ -634,6 +636,7 @@ impl Default for ProxyContext {
         Self {
             route: None,
             route_params: None,
+            upstream_override: None,
             peer: None,
             tries: 0,
             plugin: ProxyPluginExecutor::default_shared(),

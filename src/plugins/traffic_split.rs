@@ -14,9 +14,6 @@ use crate::utils::request::request_selector_key;
 pub const PLUGIN_NAME: &str = "traffic-split";
 const PRIORITY: i32 = 966;
 
-// Context key for sharing upstream override between plugin and HttpService
-pub const CTX_KEY_UPSTREAM_OVERRIDE: &str = "pingsix_upstream_override";
-
 #[derive(Debug, Serialize, Deserialize, Validate)]
 struct WeightedUpstream {
     pub upstream_id: Option<String>,
@@ -59,7 +56,7 @@ impl ProxyPlugin for PluginTrafficSplit {
             if self.match_vars(session, &rule.vars) {
                 // Rule matched; run weighted upstream selection
                 if let Some(selected_ups) = self.pick_upstream(rule_idx, &rule.weighted_upstreams) {
-                    ctx.set(CTX_KEY_UPSTREAM_OVERRIDE, selected_ups);
+                    ctx.upstream_override = Some(selected_ups);
                 }
                 return Ok(false); // Stop at the first matching rule
             }

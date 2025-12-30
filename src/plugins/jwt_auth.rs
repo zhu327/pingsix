@@ -124,13 +124,21 @@ impl PluginConfig {
                 };
                 Ok(DecodingKey::from_secret(&key))
             }
-            Algorithm::RS256 | Algorithm::ES256 => {
+            Algorithm::RS256 | Algorithm::RS384 | Algorithm::RS512 => {
                 let public_key = self
                     .public_key
                     .as_ref()
-                    .ok_or("Public key is required for RSA/ECDSA algorithms (RS256, ES256)")?;
+                    .ok_or("Public key is required for RSA algorithms (RS256, RS384, RS512)")?;
                 DecodingKey::from_rsa_pem(public_key.as_bytes())
-                    .map_err(|e| format!("Failed to parse RSA/ECDSA public key: {e}"))
+                    .map_err(|e| format!("Failed to parse RSA public key: {e}"))
+            }
+            Algorithm::ES256 | Algorithm::ES384 => {
+                let public_key = self
+                    .public_key
+                    .as_ref()
+                    .ok_or("Public key is required for ECDSA algorithms (ES256, ES384)")?;
+                DecodingKey::from_ec_pem(public_key.as_bytes())
+                    .map_err(|e| format!("Failed to parse ECDSA public key: {e}"))
             }
             _ => Err(format!("Unsupported algorithm: {:?}", self.algorithm)),
         }

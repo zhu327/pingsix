@@ -139,7 +139,11 @@ fn add_listeners(
             })?;
             let mut tls_settings = TlsSettings::with_callbacks(dynamic_cert)?;
 
-            // Enforce TLS 1.3 for security - older versions have known vulnerabilities
+            // Enforce TLS 1.2+ for security - older versions have known vulnerabilities
+            // Set both minimum and maximum to prevent negotiation of TLS 1.0/1.1
+            tls_settings
+                .deref_mut()
+                .set_min_proto_version(Some(pingora::tls::ssl::SslVersion::TLS1_2))?;
             tls_settings
                 .deref_mut()
                 .set_max_proto_version(Some(pingora::tls::ssl::SslVersion::TLS1_3))?;

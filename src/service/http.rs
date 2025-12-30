@@ -25,10 +25,7 @@ use pingora_proxy::{ProxyHttp, Session};
 use crate::{
     config,
     core::{ProxyContext, ProxyError, ProxyPlugin, RouteContext},
-    plugins::{
-        cache::{CacheSettings, CTX_KEY_CACHE_SETTINGS},
-        traffic_split::CTX_KEY_UPSTREAM_OVERRIDE,
-    },
+    plugins::cache::{CacheSettings, CTX_KEY_CACHE_SETTINGS},
     proxy::{global_rule::global_plugin_fetch, route::global_route_match_fetch},
 };
 
@@ -123,9 +120,7 @@ impl ProxyHttp for HttpService {
         session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
-        let peer = if let Some(ups_override) =
-            ctx.get::<Arc<dyn crate::core::UpstreamSelector>>(CTX_KEY_UPSTREAM_OVERRIDE)
-        {
+        let peer = if let Some(ups_override) = ctx.upstream_override.as_ref() {
             let mut backend = ups_override.select_backend(session).ok_or_else(|| {
                 ProxyError::UpstreamSelection("Traffic-split selected no backend".to_string())
             })?;
@@ -166,7 +161,14 @@ impl ProxyHttp for HttpService {
             .await?;
 
         // Rewrite host header
-        if let Some(upstream) = ctx.route.as_ref().and_then(|r| r.resolve_upstream()) {
+        // Priority: upstream_override > route upstream
+        let upstream = ctx
+            .upstream_override
+            .as_ref()
+            .map(|u| u.clone() as Arc<dyn crate::core::UpstreamSelector>)
+            .or_else(|| ctx.route.as_ref().and_then(|r| r.resolve_upstream()));
+
+        if let Some(upstream) = upstream {
             match upstream.get_pass_host() {
                 config::UpstreamPassHost::PASS => {
                     // Do nothing, preserve original host
