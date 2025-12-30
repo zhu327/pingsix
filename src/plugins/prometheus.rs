@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use pingora_core::Error;
 use pingora_proxy::Session;
@@ -154,15 +155,15 @@ pub fn create_prometheus_plugin(cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyPlug
 
     Ok(Arc::new(PluginPrometheus {
         config,
-        path_counter: std::sync::atomic::AtomicUsize::new(0),
+        seen_paths: Arc::new(DashMap::new()),
     }))
 }
 
 pub struct PluginPrometheus {
     config: PrometheusConfig,
-    /// Counter to track the number of unique paths seen
-    /// Used to implement max_unique_paths limit
-    path_counter: std::sync::atomic::AtomicUsize,
+    /// Set of unique normalized paths seen so far
+    /// Used to implement max_unique_paths limit correctly
+    seen_paths: Arc<DashMap<String, ()>>,
 }
 
 #[async_trait]
@@ -253,14 +254,8 @@ impl PluginPrometheus {
 
     /// Apply basic path normalization to reduce metric cardinality
     /// Implements max_label_length limit and path convergence strategy
+    /// Correctly tracks unique paths (not total request count)
     fn normalize_path(&self, path: &str) -> String {
-        // First, check current path counter against limit
-        let current_count = self.path_counter.load(std::sync::atomic::Ordering::Relaxed);
-        if current_count > self.config.max_unique_paths {
-            // If we've exceeded the limit, collapse all paths to a generic pattern
-            return "/...".to_string();
-        }
-
         // Replace numeric IDs with placeholders using pre-compiled regex
         let path = NUMERIC_ID_REGEX.replace_all(path, "/{id}");
 
@@ -280,14 +275,26 @@ impl PluginPrometheus {
         };
 
         // Enforce maximum label length to prevent memory issues
-        if path.len() > self.config.max_label_length {
+        let normalized = if path.len() > self.config.max_label_length {
             let truncate_at = self.config.max_label_length.saturating_sub(3);
             format!("{}...", &path[..truncate_at])
         } else {
-            // Increment counter for unique paths (approximate, race conditions acceptable)
-            self.path_counter
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             path
+        };
+
+        // Check if this normalized path has been seen before
+        if self.seen_paths.contains_key(&normalized) {
+            return normalized;
         }
+
+        // New path: check if we've reached the limit
+        if self.seen_paths.len() >= self.config.max_unique_paths {
+            // Return generic pattern for new paths after limit is reached
+            return "/...".to_string();
+        }
+
+        // Record this new path
+        self.seen_paths.insert(normalized.clone(), ());
+        normalized
     }
 }

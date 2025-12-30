@@ -73,18 +73,30 @@ fn handle_ready_endpoint() -> Response<Vec<u8>> {
 }
 
 fn json_response<T: Serialize>(status: StatusCode, body: &T) -> Response<Vec<u8>> {
-    let json_body = serde_json::to_vec(body).unwrap_or_else(|_| b"{}".to_vec());
+    let json_body = serde_json::to_vec(body).unwrap_or_else(|e| {
+        log::error!("Failed to serialize status response: {e}");
+        b"{}".to_vec()
+    });
 
     Response::builder()
         .status(status)
         .header("Content-Type", "application/json")
         .body(json_body)
-        .expect("Failed to build HTTP response")
+        .unwrap_or_else(|e| {
+            log::error!("Failed to build status HTTP response: {e}");
+            Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(b"Internal Server Error".to_vec())
+                .unwrap()
+        })
 }
 
 fn not_found_response() -> Response<Vec<u8>> {
     Response::builder()
         .status(StatusCode::NOT_FOUND)
         .body(b"Not Found".to_vec())
-        .expect("Failed to build HTTP response")
+        .unwrap_or_else(|e| {
+            log::error!("Failed to build 404 response: {e}");
+            Response::new(b"Not Found".to_vec())
+        })
 }

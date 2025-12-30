@@ -81,20 +81,28 @@ impl Service for Logger {
 
         if let Some(parent) = std::path::Path::new(log_file_path).parent() {
             if metadata(parent).await.is_err() {
-                create_dir_all(parent)
-                    .await
-                    .expect("Failed to create log path");
+                if let Err(e) = create_dir_all(parent).await {
+                    let parent_path = parent.display();
+                    log::error!("Failed to create log directory '{parent_path}': {e}");
+                    return;
+                }
             }
         }
 
-        let file = OpenOptions::new()
+        let file = match OpenOptions::new()
             .write(true)
             .append(true)
             .create(true)
             .mode(0o644)
             .open(log_file_path)
             .await
-            .expect("Failed to open or create log file");
+        {
+            Ok(f) => f,
+            Err(e) => {
+                log::error!("Failed to open or create log file '{log_file_path}': {e}");
+                return;
+            }
+        };
 
         let mut file = BufWriter::with_capacity(4096, file);
 

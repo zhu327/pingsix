@@ -13,7 +13,10 @@ use pingora::tls::ssl::{NameType, SslRef};
 use pingora::tls::x509::X509;
 use pingora_error::Result;
 
-use crate::config::{self, Identifiable};
+use crate::{
+    config::{self, Identifiable},
+    core::ProxyError,
+};
 
 use super::MapOperations;
 
@@ -65,14 +68,24 @@ pub struct MatchEntry {
 
 impl MatchEntry {
     /// Inserts an SSL into the match entry.
+    /// Supports wildcard SNI patterns (e.g., "*.example.com") by converting them to matchit format.
     fn insert_ssl(&mut self, proxy_ssl: Arc<ProxySSL>) -> Result<(), InsertError> {
         let snis = proxy_ssl.get_snis();
 
-        // Insert for host URIs
+        // Insert for host URIs with wildcard support
         for sni in snis.iter() {
-            // Reverse SNI to support wildcard matching (e.g., "*.example.com" matches subdomains)
-            let reversed_sni = sni.chars().rev().collect::<String>();
-            self.snis.insert(reversed_sni, proxy_ssl.clone())?;
+            // Process SNI for wildcard matching (similar to route host matching)
+            let processed_sni = if let Some(domain_part) = sni.strip_prefix("*") {
+                // Wildcard: "*.example.com" -> "moc.elpmaxe.{*subdomain}"
+                // This allows matchit to match any subdomain suffix when reversed
+                let reversed_domain: String = domain_part.chars().rev().collect();
+                format!("{reversed_domain}{{*subdomain}}")
+            } else {
+                // Exact domain: just reverse normally
+                sni.chars().rev().collect()
+            };
+
+            self.snis.insert(processed_sni, proxy_ssl.clone())?;
         }
 
         Ok(())
@@ -155,29 +168,48 @@ pub struct DynamicCert {
 }
 
 impl DynamicCert {
-    pub fn new(tls: &config::Tls) -> Box<Self> {
-        let cert_bytes =
-            std::fs::read(tls.cert_path.clone()).expect("Failed to read TLS certificate file");
-        let key_bytes =
-            std::fs::read(tls.key_path.clone()).expect("Failed to read TLS private key file");
+    pub fn new(tls: &config::Tls) -> Result<Box<Self>, ProxyError> {
+        let cert_bytes = std::fs::read(&tls.cert_path).map_err(|e| {
+            ProxyError::Configuration(format!(
+                "Failed to read TLS certificate file '{}': {}",
+                tls.cert_path, e
+            ))
+        })?;
+
+        let key_bytes = std::fs::read(&tls.key_path).map_err(|e| {
+            ProxyError::Configuration(format!(
+                "Failed to read TLS private key file '{}': {}",
+                tls.key_path, e
+            ))
+        })?;
 
         let ssl_config = config::SSL {
             id: String::new(),
-            cert: String::from_utf8(cert_bytes)
-                .expect("Failed to convert certificate bytes to UTF-8 string"),
-            key: String::from_utf8(key_bytes)
-                .expect("Failed to convert private key bytes to UTF-8 string"),
+            cert: String::from_utf8(cert_bytes).map_err(|e| {
+                ProxyError::Configuration(format!(
+                    "Failed to convert certificate bytes to UTF-8 string: {e}"
+                ))
+            })?,
+            key: String::from_utf8(key_bytes).map_err(|e| {
+                ProxyError::Configuration(format!(
+                    "Failed to convert private key bytes to UTF-8 string: {e}"
+                ))
+            })?,
             snis: Vec::new(),
         };
 
         let proxy_ssl = ProxySSL::from(ssl_config);
         // Ensure default SSL has valid cert and key
         match (&proxy_ssl.parsed_cert, &proxy_ssl.parsed_key) {
-            (Ok(_), Ok(_)) => Box::new(Self {
+            (Ok(_), Ok(_)) => Ok(Box::new(Self {
                 default: Arc::new(proxy_ssl),
-            }),
-            (Err(e), _) => panic!("Default SSL certificate parsing failed: {e}"),
-            (_, Err(e)) => panic!("Default SSL key parsing failed: {e}"),
+            })),
+            (Err(e), _) => Err(ProxyError::Configuration(format!(
+                "Default SSL certificate parsing failed: {e}"
+            ))),
+            (_, Err(e)) => Err(ProxyError::Configuration(format!(
+                "Default SSL key parsing failed: {e}"
+            ))),
         }
     }
 }

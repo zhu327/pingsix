@@ -131,7 +131,12 @@ fn add_listeners(
 ) -> Result<(), Box<dyn std::error::Error>> {
     for list_cfg in cfg.listeners.iter() {
         if let Some(tls) = &list_cfg.tls {
-            let dynamic_cert = DynamicCert::new(tls);
+            let dynamic_cert = DynamicCert::new(tls).map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("Failed to initialize TLS certificate: {e}"),
+                )
+            })?;
             let mut tls_settings = TlsSettings::with_callbacks(dynamic_cert)?;
 
             // Enforce TLS 1.3 for security - older versions have known vulnerabilities

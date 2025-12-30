@@ -1514,24 +1514,51 @@ plugins:
   prometheus: {}                  # Use defaults: max_label_length=100, max_unique_paths=1000
 ```
 
+**Prometheus Plugin Configuration:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `max_label_length` | integer | 100 | Maximum length for path template labels. Paths exceeding this length will be truncated with "..." suffix to prevent memory issues and Prometheus label size limits. |
+| `max_unique_paths` | integer | 1000 | Maximum number of unique normalized path templates to track. Once this limit is reached, new paths will be collapsed to `/...` pattern to prevent metric cardinality explosion. |
+
 **Prometheus Plugin Features:**
 - **Cardinality Control**: Limits metric cardinality by normalizing URI paths and enforcing label length limits
-- **Path Normalization**: Automatically replaces numeric IDs, UUIDs, and hashes with placeholders (e.g., `/users/123` becomes `/users/{id}`)
-- **Label Length Limit**: Truncates long path labels to prevent memory issues
-- **Path Tracking Limit**: Collapses paths to `/...` after exceeding unique path threshold
+- **Path Normalization**: Automatically replaces dynamic path segments with placeholders:
+  - Numeric IDs: `/users/123` → `/users/{id}`
+  - UUIDs: `/items/550e8400-e29b-41d4-a716-446655440000` → `/items/{uuid}`
+  - Hash values: `/files/a1b2c3d4e5f6...` → `/files/{hash}`
+  - Deep paths: Limits to 8 segments, e.g., `/a/b/c/d/e/f/g/h/i` → `/a/b/c/d/e/f/g/...`
+- **Label Length Limit**: Truncates long path labels to `max_label_length` characters (with "..." suffix) to prevent memory issues
+- **Path Tracking Limit**: After tracking `max_unique_paths` unique normalized paths, new paths are collapsed to `/...` to prevent unbounded metric growth
+- **Efficient Tracking**: Uses DashMap for thread-safe path deduplication with minimal overhead
 
 **Collected Metrics:**
-- `http_requests_total` - Total number of requests
-- `http_status` - Status codes per route/service/node with normalized paths
-- `http_latency` - Request latency histogram
-- `bandwidth` - Ingress/egress bandwidth per route/service
-- `http_request_size_bytes` - Request size distribution
-- `http_response_size_bytes` - Response size distribution
+- `http_requests_total` (Counter) - Total number of client requests since PingSIX started
+- `http_status` (Counter) - HTTP status codes with labels: `code`, `route`, `path_template`, `matched_host`, `service`, `node`
+- `http_latency` (Histogram) - HTTP request latency in milliseconds with labels: `type`, `route`, `service`, `node`
+  - Default buckets (ms): 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 30000, 60000
+- `bandwidth` (Counter) - Total bandwidth in bytes with labels: `type` (ingress/egress), `route`, `service`, `node`
+- `http_request_size_bytes` (Histogram) - HTTP request size distribution with labels: `route`, `service`
+  - Buckets (bytes): 100, 1000, 10000, 100000, 1000000, 10000000
+- `http_response_size_bytes` (Histogram) - HTTP response size distribution with labels: `route`, `service`
+  - Buckets (bytes): 100, 1000, 10000, 100000, 1000000, 10000000
 
 **Configuration Best Practices:**
-- Keep `max_label_length` under 200 to avoid Prometheus issues
-- Set `max_unique_paths` based on your API diversity (1000-10000 typical)
-- Monitor metric cardinality in Prometheus to tune these values
+- **max_label_length**: Keep under 200 characters to avoid Prometheus label size limits and memory issues
+  - Too small (< 50): May truncate useful path information
+  - Too large (> 200): Risk of Prometheus performance degradation
+  - Recommended: 100-150 for most use cases
+- **max_unique_paths**: Set based on your API diversity and traffic patterns
+  - Small APIs (< 100 endpoints): 500-1000
+  - Medium APIs (100-500 endpoints): 1000-5000
+  - Large APIs (> 500 endpoints): 5000-10000
+  - Monitor actual unique path count in your metrics to tune this value
+- **Monitoring**: Regularly check metric cardinality in Prometheus using queries like:
+  ```promql
+  count(http_status)
+  count by(path_template) (http_status)
+  ```
+- **Tuning**: If you see paths collapsed to `/...`, increase `max_unique_paths`. If Prometheus performance degrades, decrease both limits.
 
 #### File Logging
 ```yaml
@@ -1844,15 +1871,24 @@ global_rules:
       prometheus:
         max_label_length: 100      # Optional: Max path label length (default: 100)
         max_unique_paths: 1000     # Optional: Max unique paths (default: 1000)
+      # OR use zero-configuration with defaults
+      prometheus: {}
 ```
 
-Available metrics include:
-- `http_requests_total` - Total number of requests
-- `http_status{code, route, path_template, matched_host, service, node}` - Request count by status and normalized path
-- `http_latency{type, route, service, node}` - Request duration histograms in milliseconds
-- `bandwidth{type, route, service, node}` - Ingress/egress bandwidth in bytes
-- `http_request_size_bytes{route, service}` - Request size distribution
-- `http_response_size_bytes{route, service}` - Response size distribution
+**Plugin Configuration Parameters:**
+- `max_label_length` (default: 100) - Maximum length for path template labels. Paths exceeding this length are truncated with "..." suffix.
+- `max_unique_paths` (default: 1000) - Maximum number of unique normalized paths to track. After this limit, new paths are collapsed to `/...`.
+
+**Available Metrics:**
+- `http_requests_total` (Counter) - Total number of client requests since PingSIX started
+- `http_status{code, route, path_template, matched_host, service, node}` (Counter) - Request count by status and normalized path
+- `http_latency{type, route, service, node}` (Histogram) - Request duration in milliseconds
+  - Buckets (ms): 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 30000, 60000
+- `bandwidth{type, route, service, node}` (Counter) - Ingress/egress bandwidth in bytes
+- `http_request_size_bytes{route, service}` (Histogram) - Request size distribution
+  - Buckets (bytes): 100, 1000, 10000, 100000, 1000000, 10000000
+- `http_response_size_bytes{route, service}` (Histogram) - Response size distribution
+  - Buckets (bytes): 100, 1000, 10000, 100000, 1000000, 10000000
 
 **Metric Labels:**
 - `path_template` - Normalized URI path to avoid high cardinality (e.g., `/users/{id}` instead of `/users/123`)
@@ -1860,13 +1896,19 @@ Available metrics include:
 - `service` - Service ID
 - `node` - Upstream node address
 - `matched_host` - Matched host from route configuration
+- `type` - Request type (for latency) or traffic direction (ingress/egress for bandwidth)
+- `code` - HTTP status code
 
 **Path Normalization:**
 The Prometheus plugin automatically normalizes paths to prevent metric cardinality explosion:
 - Numeric IDs: `/users/123` → `/users/{id}`
 - UUIDs: `/items/550e8400-e29b-41d4-a716-446655440000` → `/items/{uuid}`
 - Hashes: `/files/a1b2c3d4e5f6...` → `/files/{hash}`
-- Deep paths: Limits to 8 segments, truncates to `/segment1/.../segment7/...`
+- Deep paths: Limits to 8 segments, e.g., `/a/b/c/d/e/f/g/h/i` → `/a/b/c/d/e/f/g/...`
+- Long paths: Truncates to `max_label_length` characters with "..." suffix
+- Cardinality limit: After `max_unique_paths` unique paths, new paths become `/...`
+
+For detailed configuration options and best practices, see the [Prometheus Plugin](#prometheus-metrics) section in the Plugins chapter.
 
 ### Sentry Integration
 

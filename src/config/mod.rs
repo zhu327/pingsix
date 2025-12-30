@@ -240,6 +240,7 @@ impl Listener {
 pub struct Etcd {
     #[validate(length(min = 1))]
     pub host: Vec<String>,
+    #[validate(length(min = 1))]
     pub prefix: String,
     pub timeout: Option<u32>,
     pub connect_timeout: Option<u32>,
@@ -732,8 +733,8 @@ routes:
         match conf {
             Ok(_) => panic!("Expected error, but got a valid config"),
             Err(e) => {
-                eprintln!("Error: {:?}", e);
-                assert!(true);
+                eprintln!("Error: {e:?}");
+                // Test passes if we get an error
             }
         }
     }
@@ -759,8 +760,8 @@ routes:
         match conf {
             Ok(_) => panic!("Expected error, but got a valid config"),
             Err(e) => {
-                eprintln!("Error: {:?}", e);
-                assert!(true);
+                eprintln!("Error: {e:?}");
+                // Test passes if we get an error
             }
         }
     }
@@ -784,8 +785,8 @@ routes:
         match conf {
             Ok(_) => panic!("Expected error, but got a valid config"),
             Err(e) => {
-                eprintln!("Error: {:?}", e);
-                assert!(true);
+                eprintln!("Error: {e:?}");
+                // Test passes if we get an error
             }
         }
     }
@@ -811,8 +812,8 @@ routes:
         match conf {
             Ok(_) => panic!("Expected error, but got a valid config"),
             Err(e) => {
-                eprintln!("Error: {:?}", e);
-                assert!(true);
+                eprintln!("Error: {e:?}");
+                // Test passes if we get an error
             }
         }
     }
@@ -847,8 +848,8 @@ upstreams:
         match conf {
             Ok(_) => panic!("Expected error, but got a valid config"),
             Err(e) => {
-                eprintln!("Error: {:?}", e);
-                assert!(true);
+                eprintln!("Error: {e:?}");
+                // Test passes if we get an error
             }
         }
     }
@@ -870,8 +871,8 @@ routes:
         match conf {
             Ok(_) => panic!("Expected error, but got a valid config"),
             Err(e) => {
-                eprintln!("Error: {:?}", e);
-                assert!(true);
+                eprintln!("Error: {e:?}");
+                // Test passes if we get an error
             }
         }
     }
@@ -903,8 +904,8 @@ services:
         match conf {
             Ok(_) => panic!("Expected error, but got a valid config"),
             Err(e) => {
-                eprintln!("Error: {:?}", e);
-                assert!(true);
+                eprintln!("Error: {e:?}");
+                // Test passes if we get an error
             }
         }
     }
@@ -942,8 +943,8 @@ upstreams:
         match conf {
             Ok(_) => panic!("Expected error, but got a valid config"),
             Err(e) => {
-                eprintln!("Error: {:?}", e);
-                assert!(true);
+                eprintln!("Error: {e:?}");
+                // Test passes if we get an error
             }
         }
     }
@@ -968,8 +969,8 @@ routes:
         match conf {
             Ok(_) => panic!("Expected error, but got a valid config"),
             Err(e) => {
-                eprintln!("Error: {:?}", e);
-                assert!(true);
+                eprintln!("Error: {e:?}");
+                // Test passes if we get an error
             }
         }
     }

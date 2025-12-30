@@ -28,11 +28,8 @@ pub struct EtcdConfigSync {
 
 impl EtcdConfigSync {
     pub fn new(config: Etcd, handler: Box<dyn EtcdEventHandler + Send + Sync>) -> Self {
-        assert!(
-            !config.prefix.is_empty(),
-            "EtcdConfigSync requires a non-empty prefix"
-        );
-
+        // Prefix validation is now handled by the validator in config::Etcd
+        // No need for runtime assertion
         Self {
             config,
             client: None,

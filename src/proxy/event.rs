@@ -227,13 +227,21 @@ impl ProxyEventHandler {
         P: Identifiable + InnerComparable<T>,
         F: Fn(T) -> pingora_error::Result<P>,
     {
-        // Safe to unwrap here because handle_event already checks kv().is_none()
-        let kv = event.kv().expect("Event should contain key-value pair");
+        // Handle missing kv gracefully instead of panicking
+        let kv = match event.kv() {
+            Some(kv) => kv,
+            None => {
+                log::error!("Event missing key-value pair in handle_resource");
+                return;
+            }
+        };
         let key = kv.key();
         match parse_key(key) {
             Ok((id, parsed_key_type)) if parsed_key_type == key_type => {
                 match json_to_resource::<T>(kv.value()) {
-                    Ok(resource) => {
+                    Ok(mut resource) => {
+                        // CRITICAL FIX: Set the ID from the etcd key to ensure correct DashMap insertion
+                        resource.set_id(id.clone());
                         log::info!("Handling {key_type}: {id}");
                         if let Ok(proxy) = create_proxy(resource) {
                             map.insert_resource(Arc::new(proxy));

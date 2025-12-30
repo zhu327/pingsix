@@ -422,15 +422,13 @@ impl AdminHttpApp {
         if self.router.at(path).is_err() {
             let mut handlers = HashMap::new();
             handlers.insert(method, handler);
-            self.router
-                .insert(path, handlers)
-                .expect("Route insertion should not fail");
-        } else {
-            let routes = self
-                .router
-                .at_mut(path)
-                .expect("Route should exist after check");
+            if let Err(e) = self.router.insert(path, handlers) {
+                log::error!("Failed to insert admin route '{path}': {e}");
+            }
+        } else if let Ok(routes) = self.router.at_mut(path) {
             routes.value.insert(method, handler);
+        } else {
+            log::error!("Failed to get mutable route for path '{path}'");
         }
         self
     }
@@ -491,9 +489,19 @@ fn validate_api_key(http_session: &ServerSession, api_key: &str) -> ApiResult<()
 
 fn validate_content_type(http_session: &ServerSession) -> ApiResult<()> {
     match http_session.get_header(header::CONTENT_TYPE) {
-        Some(content_type) if content_type.as_bytes() == b"application/json" => Ok(()),
-        _ => Err(ApiError::InvalidRequest(
-            "Content-Type must be application/json".into(),
+        Some(content_type) => {
+            let ct_str = content_type.to_str().unwrap_or("");
+            // Accept application/json with or without charset parameters
+            if ct_str.starts_with("application/json") {
+                Ok(())
+            } else {
+                Err(ApiError::InvalidRequest(
+                    "Content-Type must be application/json".into(),
+                ))
+            }
+        }
+        None => Err(ApiError::InvalidRequest(
+            "Content-Type header is required".into(),
         )),
     }
 }

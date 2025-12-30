@@ -165,13 +165,27 @@ impl TryFrom<Upstream> for HybridDiscovery {
                 _ => 80,
             });
 
-            if let Ok(ip_addr) = host.parse::<IpAddr>() {
+            // Strip brackets from IPv6 for parsing, then add them back for SocketAddr
+            let host_for_parse = if host.starts_with('[') && host.ends_with(']') {
+                &host[1..host.len() - 1]
+            } else {
+                host.as_str()
+            };
+
+            if let Ok(ip_addr) = host_for_parse.parse::<IpAddr>() {
                 // It's an IP address
-                // Handle backend creation for IP addresses
-                let addr = &SocketAddr::new(ip_addr, port as _).to_string();
-                let mut backend = Backend::new_with_weight(addr, *weight as _).map_err(|e| {
-                    ProxyError::Configuration(format!("Failed to create backend for {addr}: {e}"))
-                })?;
+                // Handle backend creation for IP addresses - add brackets for IPv6
+                let addr_str = if ip_addr.is_ipv6() {
+                    format!("[{ip_addr}]:{port}")
+                } else {
+                    format!("{ip_addr}:{port}")
+                };
+                let mut backend =
+                    Backend::new_with_weight(&addr_str, *weight as _).map_err(|e| {
+                        ProxyError::Configuration(format!(
+                            "Failed to create backend for {addr_str}: {e}"
+                        ))
+                    })?;
 
                 let tls = matches!(
                     upstream.scheme,
@@ -186,7 +200,7 @@ impl TryFrom<Upstream> for HybridDiscovery {
                     host.to_string()
                 };
 
-                let mut peer = HttpPeer::new(addr, tls, sni);
+                let mut peer = HttpPeer::new(&addr_str, tls, sni);
                 if matches!(
                     upstream.scheme,
                     UpstreamScheme::GRPC | UpstreamScheme::GRPCS
@@ -245,14 +259,8 @@ fn parse_host_and_port(addr: &str) -> ProxyResult<(String, Option<u32>)> {
         None
     };
 
-    // Ensure IPv6 addresses are enclosed in square brackets
-    let host = if host.contains(':') && !host.starts_with('[') {
-        format!("[{host}]")
-    } else {
-        host.to_string()
-    };
-
-    Ok((host, port))
+    // Return host as-is without brackets - brackets will be added later when constructing SocketAddr
+    Ok((host.to_string(), port))
 }
 
 #[cfg(test)]
@@ -263,19 +271,20 @@ mod tests {
     fn test_parse_upstream_node() {
         let test_cases = [
             ("127.0.0.1", ("127.0.0.1".to_string(), None)),
-            ("[::1]", ("[::1]".to_string(), None)),
+            // IPv6 addresses are now returned without brackets (brackets added later for SocketAddr)
+            ("[::1]", ("::1".to_string(), None)),
             ("example.com", ("example.com".to_string(), None)),
             ("example.com:80", ("example.com".to_string(), Some(80))),
             ("192.168.1.1:8080", ("192.168.1.1".to_string(), Some(8080))),
             (
                 "[2001:db8:85a3::8a2e:370:7334]:8080",
-                ("[2001:db8:85a3::8a2e:370:7334]".to_string(), Some(8080)),
+                ("2001:db8:85a3::8a2e:370:7334".to_string(), Some(8080)),
             ),
         ];
 
         for (input, expected) in test_cases {
             let result = parse_host_and_port(input).unwrap();
-            assert_eq!(result, expected);
+            assert_eq!(result, expected, "Failed for input: {input}");
         }
 
         // Test invalid cases

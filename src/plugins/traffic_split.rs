@@ -143,6 +143,40 @@ pub fn create_traffic_split_plugin(cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyP
     let config: PluginConfig =
         serde_json::from_value(cfg).map_err(|e| ProxyError::Serialization(e.to_string()))?;
 
+    // Validate configuration using validator crate
+    config.validate()?;
+
+    // Additional business logic validation
+    if config.rules.is_empty() {
+        return Err(ProxyError::Plugin(
+            "Traffic-split plugin requires at least one rule".to_string(),
+        ));
+    }
+
+    for (idx, rule) in config.rules.iter().enumerate() {
+        if rule.weighted_upstreams.is_empty() {
+            return Err(ProxyError::Plugin(format!(
+                "Rule {idx} must have at least one weighted upstream"
+            )));
+        }
+
+        let total_weight: u32 = rule.weighted_upstreams.iter().map(|u| u.weight).sum();
+        if total_weight == 0 {
+            return Err(ProxyError::Plugin(format!(
+                "Rule {idx} must have total weight greater than 0"
+            )));
+        }
+
+        // Validate that each weighted upstream has either upstream_id or inline upstream
+        for (wu_idx, wu) in rule.weighted_upstreams.iter().enumerate() {
+            if wu.upstream_id.is_none() && wu.upstream.is_none() {
+                return Err(ProxyError::Plugin(format!(
+                    "Rule {idx} weighted_upstream {wu_idx} must have either upstream_id or upstream defined"
+                )));
+            }
+        }
+    }
+
     let mut rule_upstreams = Vec::new();
     for rule in &config.rules {
         let mut ups_list = Vec::new();

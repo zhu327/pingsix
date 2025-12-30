@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,17 +25,99 @@ use super::{
     MapOperations,
 };
 
+fn sort_plugins_by_priority_desc(plugins: &mut Vec<Arc<dyn ProxyPlugin>>) {
+    // Deterministic ordering:
+    // - higher priority first
+    // - for ties, sort by plugin name to keep stable behavior across hash map iteration order
+    plugins.sort_by(|a, b| {
+        b.priority()
+            .cmp(&a.priority())
+            .then_with(|| a.name().cmp(b.name()))
+    });
+}
+
+fn build_plugin_name_index(plugins: &[Arc<dyn ProxyPlugin>]) -> Vec<String> {
+    let mut names: Vec<String> = plugins.iter().map(|p| p.name().to_string()).collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn route_overrides_plugin(route_plugin_names: &[String], plugin_name: &str) -> bool {
+    // route_plugin_names is sorted
+    route_plugin_names
+        .binary_search_by(|n| n.as_str().cmp(plugin_name))
+        .is_ok()
+}
+
+/// Merge two already-sorted plugin lists (priority desc) into a single list.
+///
+/// - Maintains global priority ordering (descending).
+/// - When a plugin name exists in route, service plugin with same name is skipped.
+/// - On equal priority, prefers route plugins for deterministic results.
+fn merge_route_and_service_plugins(
+    route_plugins: &[Arc<dyn ProxyPlugin>],
+    service_plugins: &[Arc<dyn ProxyPlugin>],
+    route_plugin_names: &[String],
+) -> Vec<Arc<dyn ProxyPlugin>> {
+    let mut merged = Vec::with_capacity(route_plugins.len() + service_plugins.len());
+
+    let mut i = 0usize;
+    let mut j = 0usize;
+
+    while i < route_plugins.len() || j < service_plugins.len() {
+        let take_route = match (route_plugins.get(i), service_plugins.get(j)) {
+            (Some(rp), Some(sp)) => {
+                let rp_prio = rp.priority();
+                let sp_prio = sp.priority();
+                if rp_prio > sp_prio {
+                    true
+                } else if rp_prio < sp_prio {
+                    false
+                } else {
+                    // Same priority: prefer route side
+                    true
+                }
+            }
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => break,
+        };
+
+        if take_route {
+            merged.push(route_plugins[i].clone());
+            i += 1;
+            continue;
+        }
+
+        // Take service plugin (unless overridden by route)
+        let sp = service_plugins[j].clone();
+        j += 1;
+        if route_overrides_plugin(route_plugin_names, sp.name()) {
+            continue;
+        }
+        merged.push(sp);
+    }
+
+    merged
+}
+
 /// Type alias for route match result: (params, route)
 type RouteMatchResult = Option<(Vec<(String, String)>, Arc<ProxyRoute>)>;
 
 /// Proxy route with upstream and plugin configuration.
 ///
 /// Routes are compiled at startup and cached for high-performance request matching.
-/// Plugin executors are dynamically built to ensure configuration changes take effect immediately.
+/// Plugin executors are cached for routes without service_id (static plugins),
+/// and dynamically built for routes with service_id (to reflect service updates).
 pub struct ProxyRoute {
     pub inner: config::Route,
     pub upstream: Option<Arc<ProxyUpstream>>,
     pub plugins: Vec<Arc<dyn ProxyPlugin>>,
+    /// Sorted index of route plugin names for fast "route overrides service" checks.
+    plugin_name_index: Vec<String>,
+    /// Cached executor for routes without service_id (performance optimization)
+    cached_executor: Option<Arc<ProxyPluginExecutor>>,
 }
 
 impl Identifiable for ProxyRoute {
@@ -55,6 +136,8 @@ impl ProxyRoute {
             inner: route.clone(),
             upstream: None,
             plugins: Vec::with_capacity(route.plugins.len()),
+            plugin_name_index: Vec::new(),
+            cached_executor: None,
         };
 
         // Configure upstream
@@ -71,6 +154,22 @@ impl ProxyRoute {
             let plugin = build_plugin(&name, value)
                 .map_err(|e| ProxyError::Plugin(format!("Failed to build plugin '{name}': {e}")))?;
             proxy_route.plugins.push(plugin);
+        }
+
+        // Pre-sort plugins once at build-time to avoid per-request sorting.
+        sort_plugins_by_priority_desc(&mut proxy_route.plugins);
+        proxy_route.plugin_name_index = build_plugin_name_index(&proxy_route.plugins);
+
+        // Optimization: Pre-build executor for routes without service_id (static plugins).
+        // Use shared empty executor to avoid allocations when no plugins are configured.
+        if route.service_id.is_none() {
+            proxy_route.cached_executor = Some(if proxy_route.plugins.is_empty() {
+                ProxyPluginExecutor::default_shared()
+            } else {
+                Arc::new(ProxyPluginExecutor {
+                    plugins: proxy_route.plugins.clone(),
+                })
+            });
         }
 
         Ok(proxy_route)
@@ -125,27 +224,28 @@ impl RouteContext for ProxyRoute {
     }
 
     fn build_plugin_executor(&self) -> Arc<ProxyPluginExecutor> {
-        let mut plugin_map: HashMap<String, Arc<dyn ProxyPlugin>> = HashMap::new();
-
-        // Merge route and service plugins
-        // Service plugins are fetched dynamically to ensure configuration changes take effect
-        let service_plugins = self
-            .inner
-            .service_id
-            .as_deref()
-            .and_then(service_fetch)
-            .map_or_else(Vec::new, |service| service.plugins.clone());
-
-        // Route plugins take precedence over service plugins (first inserted wins)
-        for plugin in self.plugins.iter().chain(service_plugins.iter()) {
-            plugin_map
-                .entry(plugin.name().to_string())
-                .or_insert_with(|| plugin.clone());
+        // Fast path: return cached executor for routes without service_id
+        if let Some(ref cached) = self.cached_executor {
+            return cached.clone();
         }
 
-        // Sort by priority in descending order
-        let mut merged_plugins: Vec<_> = plugin_map.into_values().collect();
-        merged_plugins.sort_by_key(|b| std::cmp::Reverse(b.priority()));
+        // Slow path (Scheme C): dynamically merge two pre-sorted lists in O(n+m).
+        // Service plugins are fetched dynamically to ensure service updates take effect.
+        let service = self.inner.service_id.as_deref().and_then(service_fetch);
+        let service_plugins: &[Arc<dyn ProxyPlugin>] = service
+            .as_ref()
+            .map(|s| s.plugins.as_slice())
+            .unwrap_or(&[]);
+
+        let merged_plugins = merge_route_and_service_plugins(
+            &self.plugins,
+            service_plugins,
+            &self.plugin_name_index,
+        );
+
+        if merged_plugins.is_empty() {
+            return ProxyPluginExecutor::default_shared();
+        }
 
         Arc::new(ProxyPluginExecutor {
             plugins: merged_plugins,
@@ -392,6 +492,9 @@ pub fn load_static_routes(config: &config::Config) -> ProxyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use serde_json::Value as JsonValue;
+    use std::collections::HashMap;
 
     #[test]
     fn test_wildcard_host_processing() {
@@ -414,7 +517,7 @@ mod tests {
         if let Some(dot_pos) = test_host.find('.') {
             let domain_part = &test_host[dot_pos + 1..];
             let reversed_domain: String = domain_part.chars().rev().collect();
-            let wildcard_pattern = format!("{}.{{*subdomain}}", reversed_domain);
+            let wildcard_pattern = format!("{reversed_domain}.{{*subdomain}}");
 
             assert_eq!(domain_part, "example.com");
             assert_eq!(reversed_domain, "moc.elpmaxe");
@@ -476,5 +579,105 @@ mod tests {
         let result = router.at("moc.elpmaxe.v1").unwrap(); // v1.example.com
         assert_eq!(result.value, &"wildcard_route");
         assert_eq!(result.params.get("subdomain"), Some("v1"));
+    }
+
+    #[derive(Debug)]
+    struct DummyPlugin {
+        name: &'static str,
+        priority: i32,
+    }
+
+    #[async_trait]
+    impl ProxyPlugin for DummyPlugin {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn priority(&self) -> i32 {
+            self.priority
+        }
+    }
+
+    #[test]
+    fn test_merge_route_service_plugins_preserves_priority_order() {
+        let route_plugins: Vec<Arc<dyn ProxyPlugin>> = vec![
+            Arc::new(DummyPlugin {
+                name: "route_mid",
+                priority: 50,
+            }),
+            Arc::new(DummyPlugin {
+                name: "route_low",
+                priority: 10,
+            }),
+        ];
+        let service_plugins: Vec<Arc<dyn ProxyPlugin>> = vec![
+            Arc::new(DummyPlugin {
+                name: "service_high",
+                priority: 100,
+            }),
+            Arc::new(DummyPlugin {
+                name: "service_lowmid",
+                priority: 20,
+            }),
+        ];
+
+        let route_names = build_plugin_name_index(&route_plugins);
+        let merged =
+            merge_route_and_service_plugins(&route_plugins, &service_plugins, &route_names);
+
+        let merged_names: Vec<&str> = merged.iter().map(|p| p.name()).collect();
+        assert_eq!(
+            merged_names,
+            vec!["service_high", "route_mid", "service_lowmid", "route_low"]
+        );
+    }
+
+    #[test]
+    fn test_merge_route_overrides_service_same_name() {
+        let route_dup: Arc<dyn ProxyPlugin> = Arc::new(DummyPlugin {
+            name: "dup",
+            priority: 10,
+        });
+        let service_dup: Arc<dyn ProxyPlugin> = Arc::new(DummyPlugin {
+            name: "dup",
+            priority: 10,
+        });
+        let service_other: Arc<dyn ProxyPlugin> = Arc::new(DummyPlugin {
+            name: "other",
+            priority: 5,
+        });
+
+        let route_plugins = vec![route_dup.clone()];
+        let service_plugins = vec![service_dup, service_other.clone()];
+
+        let route_names = build_plugin_name_index(&route_plugins);
+        let merged =
+            merge_route_and_service_plugins(&route_plugins, &service_plugins, &route_names);
+
+        assert_eq!(merged.len(), 2);
+        assert!(Arc::ptr_eq(&merged[0], &route_dup)); // route wins
+        assert!(Arc::ptr_eq(&merged[1], &service_other));
+    }
+
+    #[test]
+    fn test_route_without_service_and_without_plugins_reuses_shared_executor() {
+        let route_cfg = config::Route {
+            id: "r1".to_string(),
+            uri: Some("/".to_string()),
+            uris: vec![],
+            methods: vec![],
+            host: None,
+            hosts: vec![],
+            priority: 0,
+            plugins: HashMap::<String, JsonValue>::new(),
+            upstream: None,
+            upstream_id: Some("u1".to_string()),
+            service_id: None,
+            timeout: None,
+        };
+
+        let proxy_route = ProxyRoute::new_with_upstream_and_plugins(route_cfg).unwrap();
+        let exec = proxy_route.build_plugin_executor();
+        assert!(Arc::ptr_eq(&exec, &ProxyPluginExecutor::default_shared()));
     }
 }

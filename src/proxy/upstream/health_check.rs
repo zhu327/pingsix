@@ -31,7 +31,8 @@ pub struct HealthCheckRegistry {
 
 impl Default for HealthCheckRegistry {
     fn default() -> Self {
-        let (tx, _rx) = broadcast::channel(100);
+        // Use larger buffer to reduce lag probability
+        let (tx, _rx) = broadcast::channel(1000);
         Self {
             upstreams: DashMap::new(),
             update_notifier: tx,
@@ -96,6 +97,14 @@ impl HealthCheckRegistry {
         }
     }
 
+    /// Subscribes to registry update notifications.
+    ///
+    /// Returns a broadcast receiver that will receive `RegistryUpdate` events
+    /// when upstreams are added or removed from the registry.
+    pub fn subscribe_updates(&self) -> broadcast::Receiver<RegistryUpdate> {
+        self.update_notifier.subscribe()
+    }
+
     /// Retrieves the specified upstream for starting health checks.
     ///
     /// Returns a tuple containing the upstream ID, load balancer reference, and shutdown receiver
@@ -124,14 +133,6 @@ impl HealthCheckRegistry {
             .map(|entry| entry.key().clone())
             .collect()
     }
-
-    /// Subscribes to registry update notifications.
-    ///
-    /// Returns a broadcast receiver that will receive `RegistryUpdate` events
-    /// when upstreams are added or removed from the registry.
-    pub fn subscribe_updates(&self) -> broadcast::Receiver<RegistryUpdate> {
-        self.update_notifier.subscribe()
-    }
 }
 
 /// Health check executor that manages running health check tasks.
@@ -157,13 +158,13 @@ impl HealthCheckExecutor {
     /// This method:
     /// 1. Subscribes to registry updates
     /// 2. Spawns health check tasks for all registered upstreams
-    /// 3. Listens for add/remove events and manages tasks accordingly
+    /// 3. Listens for add/remove events and manages tasks accordingly (with Lagged handling)
     /// 4. Performs periodic cleanup of finished tasks
     /// 5. Gracefully shuts down all tasks on shutdown signal
     pub async fn run(&self, registry: Arc<HealthCheckRegistry>, mut shutdown: ShutdownWatch) {
         log::info!("Starting health check executor");
 
-        // Get update receiver directly from registry, no lock needed
+        // Get update receiver directly from registry
         let mut update_receiver = registry.subscribe_updates();
 
         // Store started health check tasks
@@ -207,8 +208,23 @@ impl HealthCheckExecutor {
                     }
                 }
 
-                // Handle registry update events
-                Ok(update) = update_receiver.recv() => {
+                // Handle registry update events with Lagged error handling
+                result = update_receiver.recv() => {
+                    let update = match result {
+                        Ok(upd) => upd,
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            log::warn!(
+                                "Health check executor lagged, skipped {skipped} events. Performing full resync."
+                            );
+                            // Perform full resync: rebuild running_tasks from current registry state
+                            self.resync_tasks(&registry, &mut running_tasks).await;
+                            continue;
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            log::info!("Registry update channel closed, stopping executor");
+                            break;
+                        }
+                    };
                     match update {
                         RegistryUpdate::Added(id) => {
                             log::debug!("Health check executor: upstream '{id}' added");
@@ -271,6 +287,42 @@ impl HealthCheckExecutor {
         }
 
         log::info!("Health check executor stopped");
+    }
+
+    /// Resync running tasks with current registry state after lagged events
+    async fn resync_tasks(
+        &self,
+        registry: &Arc<HealthCheckRegistry>,
+        running_tasks: &mut std::collections::HashMap<String, tokio::task::JoinHandle<()>>,
+    ) {
+        let current_upstream_ids: std::collections::HashSet<String> =
+            registry.get_all_upstream_ids().into_iter().collect();
+
+        // Remove tasks for upstreams no longer in registry
+        running_tasks.retain(|upstream_id, handle| {
+            if !current_upstream_ids.contains(upstream_id) {
+                log::debug!("Resync: stopping task for removed upstream '{upstream_id}'");
+                handle.abort();
+                false
+            } else {
+                true
+            }
+        });
+
+        // Start tasks for upstreams not yet running
+        for upstream_id in current_upstream_ids {
+            if let std::collections::hash_map::Entry::Vacant(e) = running_tasks.entry(upstream_id) {
+                if let Some((task_upstream_id, load_balancer, shutdown_rx)) =
+                    registry.get_upstream_for_start(e.key())
+                {
+                    log::debug!("Resync: starting task for new upstream '{task_upstream_id}'");
+                    let handle = tokio::spawn(async move {
+                        load_balancer.start(shutdown_rx).await;
+                    });
+                    e.insert(handle);
+                }
+            }
+        }
     }
 }
 

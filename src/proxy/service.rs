@@ -70,6 +70,16 @@ impl ProxyService {
             proxy_service.plugins.push(plugin);
         }
 
+        // Pre-sort plugins once at build-time to avoid per-request sorting in route+service merges.
+        // Deterministic ordering:
+        // - higher priority first
+        // - for ties, sort by plugin name to keep stable behavior across hash map iteration order
+        proxy_service.plugins.sort_by(|a, b| {
+            b.priority()
+                .cmp(&a.priority())
+                .then_with(|| a.name().cmp(b.name()))
+        });
+
         Ok(proxy_service)
     }
 

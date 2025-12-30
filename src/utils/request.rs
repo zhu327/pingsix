@@ -166,6 +166,7 @@ pub fn get_cookie_value<'a>(req_header: &'a RequestHeader, cookie_name: &str) ->
 ///
 /// Prefers the host from the URI, falls back to the `Host` header.
 /// Removes the port number if present in the `Host` header.
+/// Correctly handles IPv6 addresses (e.g., `[::1]:8080` -> `[::1]`).
 pub fn get_request_host(header: &RequestHeader) -> Option<&str> {
     // 1. Try host from URI (highest precedence, less likely to be ambiguous)
     if let Some(host) = header.uri.host() {
@@ -174,11 +175,24 @@ pub fn get_request_host(header: &RequestHeader) -> Option<&str> {
             return Some(host);
         }
     }
-    // 2. Fallback to Host header
+    // 2. Fallback to Host header with proper IPv6 support (RFC 3986 authority parsing)
     if let Some(host_header_value) = header.headers.get(http::header::HOST) {
         if let Ok(host_str) = host_header_value.to_str() {
-            // Remove port if present ":port"
-            return Some(host_str.split(':').next().unwrap_or("")); // Take the part before the first ':'
+            // Handle IPv6 addresses: [::1]:8080 -> [::1]
+            if host_str.starts_with('[') {
+                if let Some(bracket_end) = host_str.find(']') {
+                    return Some(&host_str[..=bracket_end]);
+                }
+                // Malformed IPv6, return as-is
+                return Some(host_str);
+            } else {
+                // IPv4/domain: example.com:8080 -> example.com
+                // Use rfind to handle edge cases correctly
+                if let Some(colon_pos) = host_str.rfind(':') {
+                    return Some(&host_str[..colon_pos]);
+                }
+                return Some(host_str);
+            }
         }
     }
     // 3. No host found

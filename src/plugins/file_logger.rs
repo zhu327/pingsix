@@ -223,7 +223,7 @@ impl LogFormat {
                     "http/1.1".to_string()
                 }
             }
-            "request_id" => ctx.get_str("request-id").unwrap_or("").to_string(),
+            "request_id" => ctx.request_id().unwrap_or("").to_string(),
             "body_bytes_sent" => session.body_bytes_sent().to_string(),
             "error" => e.map(|e| e.to_string()).unwrap_or_default(),
             _ => "".to_string(),
