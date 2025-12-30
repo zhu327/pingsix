@@ -245,19 +245,21 @@ impl ProxyHttp for HttpService {
     }
 
     fn request_cache_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<()> {
-        // Check for cache bypass headers
-        if session.req_header().headers.contains_key("x-bypass-cache")
-            || session.req_header().headers.contains_key("cache-control")
-                && session
-                    .req_header()
-                    .headers
-                    .get("cache-control")
-                    .and_then(|v| v.to_str().ok())
-                    .map(|s| s.contains("no-cache"))
-                    .unwrap_or(false)
-        {
-            log::debug!("Cache bypass requested, skipping cache");
+        // Check for cache bypass headers (optimized to avoid repeated map lookups)
+        let headers = &session.req_header().headers;
+
+        if headers.contains_key("x-bypass-cache") {
+            log::debug!("Cache bypass requested via x-bypass-cache header");
             return Ok(());
+        }
+
+        if let Some(cache_control) = headers.get("cache-control") {
+            if let Ok(cc_str) = cache_control.to_str() {
+                if cc_str.contains("no-cache") {
+                    log::debug!("Cache bypass requested via cache-control: no-cache");
+                    return Ok(());
+                }
+            }
         }
 
         // Check for cache settings from plugin configuration

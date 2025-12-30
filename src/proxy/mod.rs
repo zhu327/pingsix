@@ -48,10 +48,8 @@ where
     }
 
     fn reload_resources(&self, resources: Vec<Arc<T>>) {
-        // Log incoming resources for debug
-        for resource in &resources {
-            log::debug!("Reloading resource: {}", resource.id());
-        }
+        let count = resources.len();
+        log::debug!("Reloading {} resources", count);
 
         // Build a set of IDs to keep
         let valid_ids: HashSet<String> = resources.iter().map(|r| r.id().to_string()).collect();
@@ -61,10 +59,10 @@ where
 
         // Insert or update all resources
         for resource in resources {
-            let key = resource.id().to_string();
-            log::debug!("Inserting or updating resource '{key}'");
-            self.insert(key, resource);
+            self.insert(resource.id().to_string(), resource);
         }
+
+        log::info!("Successfully reloaded {} resources", count);
     }
 
     fn insert_resource(&self, resource: Arc<T>) {

@@ -199,7 +199,10 @@ impl RouteContext for ProxyRoute {
         })?;
 
         let mut backend = upstream.select_backend(session).ok_or_else(|| {
-            ProxyError::UpstreamSelection("Unable to determine backend for the request".to_string())
+            ProxyError::UpstreamSelection(format!(
+                "No healthy backend available for route '{}'",
+                self.inner.id
+            ))
         })?;
 
         let peer = backend.ext.get_mut::<HttpPeer>().ok_or_else(|| {
