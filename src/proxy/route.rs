@@ -254,6 +254,16 @@ impl MatchEntry {
             // - Exact hosts are reversed: "example.com" → "moc.elpmaxe"
             // - Wildcard hosts are converted: "*.example.com" → "moc.elpmaxe.{*subdomain}"
             // This enables efficient suffix matching using matchit's prefix-based router
+            // Diagram:
+            // ┌─────────────────────┬──────────────────────────────┐
+            // │ Incoming host       │ Reversed match tree path     │
+            // ├─────────────────────┼──────────────────────────────┤
+            // │ api.example.com     │ moc.elpmaxe.ipa              │
+            // │ blog.example.com    │ moc.elpmaxe.golb             │
+            // │ *.example.com       │ moc.elpmaxe.{*subdomain}     │
+            // └─────────────────────┴──────────────────────────────┘
+            // This lets matchit treat wildcard hosts as a shared prefix where the dynamic part
+            // (`{*subdomain}`) is matched as a parameter while still enabling O(log n) lookups.
             for host in hosts.iter() {
                 let processed_host = self.get_reversed_host(host);
                 let inner_router = self.host_uris.at_mut(processed_host.as_str());

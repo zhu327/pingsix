@@ -20,7 +20,7 @@ pub const CTX_KEY_UPSTREAM_OVERRIDE: &str = "pingsix_upstream_override";
 #[derive(Debug, Serialize, Deserialize, Validate)]
 struct WeightedUpstream {
     pub upstream_id: Option<String>,
-    pub upstream: Option<Upstream>, // 内联定义
+    pub upstream: Option<Upstream>, // Inline definition
     #[validate(range(min = 0))]
     pub weight: u32,
 }
@@ -28,7 +28,7 @@ struct WeightedUpstream {
 #[derive(Debug, Serialize, Deserialize, Validate)]
 struct MatchRule {
     #[serde(default)]
-    pub vars: Vec<Vec<String>>, // 格式如 [["arg_name", "==", "val"], ["http_x", "!=", "reg"]]
+    pub vars: Vec<Vec<String>>, // [["arg_name", "==", "val"], ["http_x", "!=", "reg"]]
     #[validate(nested)]
     pub weighted_upstreams: Vec<WeightedUpstream>,
 }
@@ -41,7 +41,7 @@ struct PluginConfig {
 
 pub struct PluginTrafficSplit {
     config: PluginConfig,
-    // 为了性能，预先将内联 upstream 转换为 ProxyUpstream
+    // Pre-compute inline upstream definitions for faster lookups
     rule_upstreams: Vec<Vec<Option<Arc<ProxyUpstream>>>>,
 }
 
@@ -57,11 +57,11 @@ impl ProxyPlugin for PluginTrafficSplit {
     async fn request_filter(&self, session: &mut Session, ctx: &mut ProxyContext) -> Result<bool> {
         for (rule_idx, rule) in self.config.rules.iter().enumerate() {
             if self.match_vars(session, &rule.vars) {
-                // 命中规则，执行加权选择
+                // Rule matched; run weighted upstream selection
                 if let Some(selected_ups) = self.pick_upstream(rule_idx, &rule.weighted_upstreams) {
                     ctx.set(CTX_KEY_UPSTREAM_OVERRIDE, selected_ups);
                 }
-                return Ok(false); // 匹配到第一个规则即停止
+                return Ok(false); // Stop at the first matching rule
             }
         }
         Ok(false)
@@ -69,7 +69,7 @@ impl ProxyPlugin for PluginTrafficSplit {
 }
 
 impl PluginTrafficSplit {
-    // 变量匹配逻辑
+    // Variable matching logic
     fn match_vars(&self, session: &mut Session, vars: &[Vec<String>]) -> bool {
         if vars.is_empty() {
             return true;
@@ -83,8 +83,8 @@ impl PluginTrafficSplit {
             let op = &v[1];
             let val = &v[2];
 
-            // 借助 PingSIX 现有的变量提取逻辑
-            // 如果 var_name 以 http_ 开头，则使用 HEAD 获取请求头，否则使用 VARS 获取变量
+            // Reuse the existing selector helpers for extracting values
+            // If the name starts with http_, read from headers, otherwise read from vars.
             let actual_val = if let Some(header_name) = var_name.strip_prefix("http_") {
                 request_selector_key(session, &UpstreamHashOn::HEAD, header_name)
             } else {
@@ -122,15 +122,15 @@ impl PluginTrafficSplit {
 
         for (i, ups_cfg) in upstreams.iter().enumerate() {
             if n < ups_cfg.weight {
-                // 1. 如果有 upstream_id，从全局 Map 获取
+                // 1. Use the referenced upstream when upstream_id is present
                 if let Some(ref id) = ups_cfg.upstream_id {
                     return upstream_fetch(id).map(|u| u as Arc<dyn UpstreamSelector>);
                 }
-                // 2. 如果是内联 upstream，使用预创建的对象
+                // 2. Fall back to the pre-created inline upstream for this rule
                 if let Some(ref inline_ups) = self.rule_upstreams[rule_idx][i] {
                     return Some(inline_ups.clone() as Arc<dyn UpstreamSelector>);
                 }
-                // 3. 如果 weight > 0 但没给上游，表示使用 Route 默认上游（返回 None）
+                // 3. If weight > 0 but no upstream declared, continue with the route's upstream
                 return None;
             }
             n -= ups_cfg.weight;

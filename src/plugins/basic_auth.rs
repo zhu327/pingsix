@@ -50,14 +50,20 @@ pub struct PluginBasicAuth {
 }
 
 impl PluginBasicAuth {
-    /// 校验 Basic Auth 凭证
+    /// Validates Basic Authentication credentials using constant-time comparison.
+    ///
+    /// This method:
+    /// 1. Checks for "Basic " prefix (case-insensitive)
+    /// 2. Decodes the Base64-encoded credentials
+    /// 3. Splits username and password at the first colon
+    /// 4. Uses constant-time comparison to prevent timing attacks
     fn validate_credentials(&self, auth_value: &str) -> bool {
-        // 1. 检查前缀
+        // 1. Check prefix
         if !auth_value.to_lowercase().starts_with("basic ") {
             return false;
         }
 
-        // 2. 解码 Base64
+        // 2. Decode Base64
         let credential_part = &auth_value[6..];
         let Ok(decoded_bytes) = general_purpose::STANDARD.decode(credential_part) else {
             return false;
@@ -67,12 +73,12 @@ impl PluginBasicAuth {
             return false;
         };
 
-        // 3. 分离 username:password
+        // 3. Separate username:password
         let Some((user, pass)) = decoded_str.split_once(':') else {
             return false;
         };
 
-        // 4. 使用恒定时间比较防止计时攻击
+        // 4. Use constant-time comparison to prevent timing attacks
         constant_time_eq(user, &self.config.username)
             && constant_time_eq(pass, &self.config.password)
     }
@@ -98,7 +104,7 @@ impl ProxyPlugin for PluginBasicAuth {
         };
 
         if !is_valid {
-            // 返回 401 并携带标准挑战头
+            // Return 401 and include the standard Basic challenge header
             ResponseBuilder::send_proxy_error(
                 session,
                 StatusCode::UNAUTHORIZED,
@@ -109,7 +115,7 @@ impl ProxyPlugin for PluginBasicAuth {
             return Ok(true);
         }
 
-        // 隐藏凭证：从上游请求中移除 Authorization 头
+        // Hide credentials by removing the Authorization header before forwarding upstream
         if self.config.hide_credentials {
             session
                 .req_header_mut()
@@ -117,5 +123,39 @@ impl ProxyPlugin for PluginBasicAuth {
         }
 
         Ok(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn build_plugin(username: &str, password: &str) -> PluginBasicAuth {
+        PluginBasicAuth {
+            config: PluginConfig {
+                username: username.to_string(),
+                password: password.to_string(),
+                hide_credentials: false,
+            },
+        }
+    }
+
+    #[test]
+    fn validate_credentials_accepts_valid_pairs() {
+        let plugin = build_plugin("demo", "s3cret");
+        let header = format!("Basic {}", general_purpose::STANDARD.encode("demo:s3cret"));
+        assert!(plugin.validate_credentials(&header));
+    }
+
+    #[test]
+    fn validate_credentials_rejects_invalid_pairs() {
+        let plugin = build_plugin("demo", "s3cret");
+
+        // Wrong prefix
+        assert!(!plugin.validate_credentials("Bearer something"));
+
+        // Wrong password
+        let header = format!("Basic {}", general_purpose::STANDARD.encode("demo:badpass"));
+        assert!(!plugin.validate_credentials(&header));
     }
 }

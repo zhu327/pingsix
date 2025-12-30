@@ -174,6 +174,23 @@ pingsix:
     password: password  # Optional authentication
 ```
 
+#### Hot Reload & Atomic Resource Swaps
+
+When etcd pushes an update the watcher pipeline performs the following steps:
+
+1. Deserialize the new resource set (routes, upstreams, services, rules, SSLs) in-memory.
+2. Validate IDs and plugin payloads exactly the same way as the bootstrap path.
+3. Swap the active data structure via `ArcSwap::store` (`reload_resources()` on each registry).
+   Readers always operate on an `Arc` snapshot, so they never observe partial state.
+4. Update the shared health-check registry by unregistering removed upstream IDs before registering
+   new ones. The executor reacts to `RegistryUpdate` events so probes are restarted with the latest
+   options.
+
+If validation fails at any step the old snapshot stays in place and the error is logged—no reload
+occurs until etcd provides a valid payload. This gives PingSIX an implicit rollback strategy where
+operators simply fix the broken config and re-publish; traffic continues to flow using the previous
+revision throughout the failure window.
+
 ## Docker Deployment
 
 PingSIX provides a multi-stage Docker build for efficient containerized deployment. The Docker image is optimized for production use with minimal attack surface and resource consumption.
@@ -1027,6 +1044,40 @@ upstreams:
           http_failures: 3             # HTTP failures before marking unhealthy
           tcp_failures: 2              # TCP failures before marking unhealthy
 ```
+
+#### Shared Health Check Lifecycle
+
+PingSIX runs all upstream health checks through a single global executor (`SHARED_HEALTH_CHECK_SERVICE`)
+so workers do not duplicate TCP/TLS probes. The lifecycle looks like:
+
+```
+┌──────────┐   register_upstream()   ┌──────────────────────┐
+│  Config  │ ─────────────────────▶  │ HealthCheckRegistry  │
+│ (route & │                         │  (DashMap + events)  │
+│ upstream)│ ◀────────────────────── └─────────┬────────────┘
+└──────────┘    unregister_upstream()          │broadcast
+                                               │RegistryUpdate
+                                               ▼
+                                     ┌──────────────────────┐
+                                     │ HealthCheckExecutor │
+                                     │  tokio task router  │
+                                     └─────────┬────────────┘
+                                               │spawn
+                                               ▼
+                                     ┌──────────────────────┐
+                                     │ LoadBalancer task   │
+                                     │ (one per upstream) │
+                                     └──────────────────────┘
+```
+
+- Registering an upstream pushes a `RegistryUpdate::Added` event; the executor spawns a tokio task
+  that runs the Pingora load balancer's active probe loop until the shutdown channel flips.
+- Removing or replacing an upstream sends `RegistryUpdate::Removed`, and the executor aborts the
+  previous task before the new configuration is applied.
+- During graceful shutdown the executor listens on `ShutdownWatch` so every probe stops cleanly.
+
+Because registrations are idempotent, updating an upstream simply unregisters the old task and
+installs the new one with fresh thresholds and destinations.
 
 ### Host Header Handling
 

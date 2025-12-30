@@ -96,7 +96,10 @@ impl HealthCheckRegistry {
         }
     }
 
-    /// 获取指定upstream用于启动健康检查
+    /// Retrieves the specified upstream for starting health checks.
+    ///
+    /// Returns a tuple containing the upstream ID, load balancer reference, and shutdown receiver
+    /// that can be used to spawn a health check task for the upstream.
     pub fn get_upstream_for_start(
         &self,
         upstream_id: &str,
@@ -122,13 +125,19 @@ impl HealthCheckRegistry {
             .collect()
     }
 
-    /// 获取更新通知接收器
+    /// Subscribes to registry update notifications.
+    ///
+    /// Returns a broadcast receiver that will receive `RegistryUpdate` events
+    /// when upstreams are added or removed from the registry.
     pub fn subscribe_updates(&self) -> broadcast::Receiver<RegistryUpdate> {
         self.update_notifier.subscribe()
     }
 }
 
-/// 健康检查执行器
+/// Health check executor that manages running health check tasks.
+///
+/// The executor runs as a background service, listening for registry updates
+/// and spawning/stopping health check tasks as upstreams are registered/unregistered.
 #[derive(Clone)]
 pub struct HealthCheckExecutor;
 
@@ -143,7 +152,14 @@ impl HealthCheckExecutor {
         Self
     }
 
-    /// 运行健康检查执行器 - 优化并发性能，移除RwLock
+    /// Runs the health check executor main loop.
+    ///
+    /// This method:
+    /// 1. Subscribes to registry updates
+    /// 2. Spawns health check tasks for all registered upstreams
+    /// 3. Listens for add/remove events and manages tasks accordingly
+    /// 4. Performs periodic cleanup of finished tasks
+    /// 5. Gracefully shuts down all tasks on shutdown signal
     pub async fn run(&self, registry: Arc<HealthCheckRegistry>, mut shutdown: ShutdownWatch) {
         log::info!("Starting health check executor");
 
@@ -310,10 +326,10 @@ impl Service for SharedHealthCheckService {
     }
 
     fn threads(&self) -> Option<usize> {
-        Some(1) // 使用单线程运行
+        Some(1) // Run on a single thread
     }
 }
 
-/// 全局共享健康检查服务实例
+/// Global shared health check service instance
 pub static SHARED_HEALTH_CHECK_SERVICE: Lazy<SharedHealthCheckService> =
     Lazy::new(SharedHealthCheckService::new);

@@ -1,55 +1,55 @@
-# 构建上下文中排除的文件和目录
+# Files and directories excluded from the Docker build context
 
-# Rust 构建产物
+# Rust build artifacts
 target/
 **/*.rs.bk
 *.pdb
 
-# Git 相关
+# Git metadata
 .git/
 .gitignore
 
-# 文档
+# Documentation (keep top-level config in repo)
 *.md
 docs/
 
-# IDE 和编辑器文件
+# IDE/editor state
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 
-# 操作系统文件
+# OS noise
 .DS_Store
 Thumbs.db
 
-# 日志文件
+# Log files
 *.log
 logs/
 
-# 临时文件
+# Temp directories
 tmp/
 temp/
 
-# Docker 相关
+# Docker-related files (avoid recursive builds)
 Dockerfile*
 docker-compose*.yml
 .dockerignore
 
-# 测试文件
+# Tests/benchmarks
 tests/
 benches/
 
-# CI/CD 配置
+# CI/CD configuration (not needed inside image)
 .github/
 .gitlab-ci.yml
 .travis.yml
 
-# 其他配置文件（保留 config.yaml 用于默认配置）
+# Other configs (keep default config.yaml)
 config.docker.yaml
 prometheus.yml
 
-# 许可证和法律文件
+# Licenses and legal docs
 LICENSE*
 NOTICE*

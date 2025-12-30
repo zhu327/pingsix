@@ -27,9 +27,9 @@ pub fn create_response_rewrite_plugin(cfg: JsonValue) -> ProxyResult<Arc<dyn Pro
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(untagged)]
 enum HeadersConfig {
-    /// 简单模式: {"Header": "Value"}
+    /// Simple mode: {"Header": "Value"}
     Simple(HashMap<String, String>),
-    /// 结构化模式: {"set": {}, "add": [], "remove": []}
+    /// Structured mode: {"set": {}, "add": [], "remove": []}
     Structured {
         #[serde(default)]
         add: Vec<String>,
@@ -44,7 +44,7 @@ enum HeadersConfig {
 struct PluginConfig {
     status_code: Option<u16>,
     headers: Option<HeadersConfig>,
-    /// 格式如 [["arg_name", "==", "val"], ["http_x", "!=", "reg"]]
+    /// Format like [["arg_name", "==", "val"], ["http_x", "!=", "reg"]]
     vars: Option<Vec<Vec<String>>>,
 }
 
@@ -65,7 +65,7 @@ pub struct PluginResponseRewrite {
 }
 
 impl PluginResponseRewrite {
-    /// 变量匹配逻辑 (复用 traffic-split 的逻辑)
+    /// Variable matching logic (shared with the traffic-split plugin)
     fn match_vars(&self, session: &mut Session, vars: &Option<Vec<Vec<String>>>) -> bool {
         let Some(vars) = vars else { return true };
         if vars.is_empty() {
@@ -103,14 +103,13 @@ impl PluginResponseRewrite {
         true
     }
 
-    /// 变量解析逻辑：将 Header Value 中的 $var 替换为实际值
+    /// Expand header templates by swapping `$var` placeholders with actual values.
     fn expand_vars(&self, session: &mut Session, val: &str) -> String {
         if !val.contains('$') {
             return val.to_string();
         }
 
-        // 简单实现：这里可以根据需要扩展正则匹配更多变量
-        // 为了演示，我们处理常见的几个变量
+        // Minimal implementation; extend with regex matching if more placeholders are introduced.
         let mut result = val.to_string();
         let placeholders = ["$remote_addr", "$upstream_addr", "$request_id"];
 
@@ -144,19 +143,19 @@ impl ProxyPlugin for PluginResponseRewrite {
         upstream_response: &mut ResponseHeader,
         _ctx: &mut ProxyContext,
     ) -> Result<()> {
-        // 1. 校验 vars 条件
+        // 1. Check matching conditions
         if !self.match_vars(session, &self.config.vars) {
             return Ok(());
         }
 
-        // 2. 修改状态码
+        // 2. Override the status code when configured
         if let Some(code) = self.config.status_code {
             if let Ok(status) = StatusCode::from_u16(code) {
                 let _ = upstream_response.set_status(status);
             }
         }
 
-        // 3. 处理 Headers
+        // 3. Apply header mutations
         if let Some(ref h_cfg) = self.config.headers {
             match h_cfg {
                 HeadersConfig::Simple(headers) => {

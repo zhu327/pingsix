@@ -19,7 +19,7 @@ use crate::utils::{request, response::ResponseBuilder};
 pub const PLUGIN_NAME: &str = "csrf";
 const PRIORITY: i32 = 2980;
 
-/// 安全方法，不进行 CSRF 校验
+/// Safe HTTP methods that do not require CSRF validation
 const SAFE_METHODS: &[Method] = &[Method::GET, Method::HEAD, Method::OPTIONS];
 
 pub fn create_csrf_plugin(cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyPlugin>> {
@@ -68,7 +68,7 @@ pub struct PluginCsrf {
 }
 
 impl PluginCsrf {
-    // 生成签名：sha256("{expires:123,random:0.5,key:secret}")
+    // Generates deterministic signature: sha256("{expires:123,random:0.5,key:secret}")
     fn gen_sign(&self, random: f64, expires: u64) -> String {
         let sign_str = format!(
             "{{expires:{},random:{},key:{}}}",
@@ -114,13 +114,13 @@ impl PluginCsrf {
             .unwrap()
             .as_secs();
 
-        // 校验过期
+        // Check expiration window
         if self.config.expires > 0 && (now - token_table.expires) > self.config.expires {
             log::error!("csrf token expired");
             return false;
         }
 
-        // 校验签名
+        // Validate signature
         let expected_sign = self.gen_sign(token_table.random, token_table.expires);
         if token_table.sign != expected_sign {
             log::error!("csrf token invalid signature");
@@ -143,12 +143,12 @@ impl ProxyPlugin for PluginCsrf {
     async fn request_filter(&self, session: &mut Session, _ctx: &mut ProxyContext) -> Result<bool> {
         let method = &session.req_header().method;
 
-        // 1. 安全方法直接跳过
+        // 1. Allow safe methods to bypass CSRF validation
         if SAFE_METHODS.contains(method) {
             return Ok(false);
         }
 
-        // 2. 从 Header 获取 Token
+        // 2. Read token from headers
         let header_token = request::get_req_header_value(session.req_header(), &self.config.name);
         if header_token.is_none() || header_token.unwrap().is_empty() {
             ResponseBuilder::send_proxy_error(
@@ -161,7 +161,7 @@ impl ProxyPlugin for PluginCsrf {
             return Ok(true);
         }
 
-        // 3. 从 Cookie 获取 Token
+        // 3. Read token from cookies
         let cookie_token = request::get_cookie_value(session.req_header(), &self.config.name);
         if cookie_token.is_none() {
             ResponseBuilder::send_proxy_error(
@@ -177,7 +177,7 @@ impl ProxyPlugin for PluginCsrf {
         let h_token = header_token.unwrap();
         let c_token = cookie_token.unwrap();
 
-        // 4. 校验一致性 (Double Submit)
+        // 4. Double-submit consistency check
         if h_token != c_token {
             ResponseBuilder::send_proxy_error(
                 session,
@@ -189,7 +189,7 @@ impl ProxyPlugin for PluginCsrf {
             return Ok(true);
         }
 
-        // 5. 校验签名和过期
+        // 5. Verify token signature and expiration
         if !self.check_token(c_token) {
             ResponseBuilder::send_proxy_error(
                 session,
@@ -212,8 +212,8 @@ impl ProxyPlugin for PluginCsrf {
     ) -> Result<()> {
         let csrf_token = self.gen_token_string();
 
-        // 设置 Cookie
-        // 注意：这里简单实现，生产环境建议加上 HttpOnly(如果是纯后端校验不加), Secure, SameSite=Lax
+        // Set the CSRF cookie; production deployments may also want HttpOnly (if applicable),
+        // Secure, and stricter SameSite policies.
         let cookie_val = format!(
             "{}={}; Path=/; SameSite=Lax; Max-Age={}",
             self.config.name, csrf_token, self.config.expires
@@ -221,5 +221,49 @@ impl ProxyPlugin for PluginCsrf {
 
         upstream_response.insert_header(header::SET_COOKIE, cookie_val)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn build_plugin(expires: u64) -> PluginCsrf {
+        PluginCsrf {
+            config: PluginConfig {
+                key: "unit-test-key".to_string(),
+                expires,
+                name: "csrf-token".to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn token_roundtrip_passes_validation() {
+        let plugin = build_plugin(7200);
+        let expires = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let random = 0.5_f64;
+        let sign = plugin.gen_sign(random, expires);
+        let token = CsrfToken {
+            random,
+            expires,
+            sign,
+        };
+        let json = serde_json::to_string(&token).unwrap();
+        let encoded = general_purpose::STANDARD.encode(json);
+        assert!(plugin.check_token(&encoded));
+    }
+
+    #[test]
+    fn tampered_token_is_rejected() {
+        let plugin = build_plugin(7200);
+        let token = plugin.gen_token_string();
+        let mut decoded = general_purpose::STANDARD.decode(token.as_bytes()).unwrap();
+        decoded[0] ^= 0x01;
+        let tampered = general_purpose::STANDARD.encode(decoded);
+        assert!(!plugin.check_token(&tampered));
     }
 }
