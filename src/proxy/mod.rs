@@ -49,7 +49,7 @@ where
 
     fn reload_resources(&self, resources: Vec<Arc<T>>) {
         let count = resources.len();
-        log::debug!("Reloading {} resources", count);
+        log::debug!("Reloading {count} resources");
 
         // Build a set of IDs to keep
         let valid_ids: HashSet<String> = resources.iter().map(|r| r.id().to_string()).collect();
@@ -62,7 +62,7 @@ where
             self.insert(resource.id().to_string(), resource);
         }
 
-        log::info!("Successfully reloaded {} resources", count);
+        log::info!("Successfully reloaded {count} resources");
     }
 
     fn insert_resource(&self, resource: Arc<T>) {

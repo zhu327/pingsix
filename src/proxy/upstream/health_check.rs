@@ -46,6 +46,9 @@ impl HealthCheckRegistry {
     }
 
     /// Register upstream health check - no mutable reference needed, DashMap supports concurrent inserts
+    ///
+    /// If an upstream with the same ID already exists, it will be replaced and the old health check
+    /// task will be gracefully shut down to prevent task leaks.
     pub fn register_upstream(
         &self,
         upstream_id: String,
@@ -59,7 +62,16 @@ impl HealthCheckRegistry {
             shutdown_rx,
         };
 
-        self.upstreams.insert(upstream_id.clone(), registered);
+        // Check if there's an existing upstream and shut it down first
+        if let Some(old_registered) = self.upstreams.insert(upstream_id.clone(), registered) {
+            log::info!(
+                "Replacing existing upstream '{upstream_id}', shutting down old health check"
+            );
+            // Send shutdown signal to the old health check task
+            if let Err(e) = old_registered.shutdown_tx.send(true) {
+                log::warn!("Failed to send shutdown signal to old upstream '{upstream_id}': {e}");
+            }
+        }
 
         // Notify executor of new upstream registration
         if let Err(e) = self
@@ -228,6 +240,15 @@ impl HealthCheckExecutor {
                     match update {
                         RegistryUpdate::Added(id) => {
                             log::debug!("Health check executor: upstream '{id}' added");
+
+                            // If there's already a running task for this upstream, abort it first
+                            // This handles the case where register_upstream is called multiple times
+                            // for the same upstream_id (e.g., during configuration updates)
+                            if let Some(old_handle) = running_tasks.remove(&id) {
+                                log::info!("Aborting existing health check task for upstream '{id}' before starting new one");
+                                old_handle.abort();
+                            }
+
                             // Start new health check task - direct registry access, no lock needed
                             if let Some((upstream_id, load_balancer, shutdown_rx)) =
                                 registry.get_upstream_for_start(&id)
