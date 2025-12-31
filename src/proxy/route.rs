@@ -94,15 +94,6 @@ fn merge_route_and_service_plugins(
 /// Type alias for route match result: (params, route)
 type RouteMatchResult = Option<(Vec<(String, String)>, Arc<ProxyRoute>)>;
 
-/// Cached executor to avoid repeated plugin merging
-struct CachedExecutor {
-    /// Pointer to the service instance used for merging.
-    /// None for routes without service_id, Some(ptr) for routes with service_id.
-    service_ptr: Option<usize>,
-    /// The resulting executor
-    executor: Arc<ProxyPluginExecutor>,
-}
-
 /// Proxy route with upstream and plugin configuration.
 ///
 /// Routes are compiled at startup and cached for high-performance request matching.
@@ -114,8 +105,8 @@ pub struct ProxyRoute {
     pub plugins: Vec<Arc<dyn ProxyPlugin>>,
     /// Sorted index of route plugin names for fast "route overrides service" checks.
     plugin_name_index: Vec<String>,
-    /// Cached executor for the route (unified cache for both static and dynamic routes)
-    cached_executor: ArcSwap<Option<CachedExecutor>>,
+    /// Cached executor for the route (unified cache for static routes)
+    cached_executor: Option<Arc<ProxyPluginExecutor>>,
 }
 
 impl Identifiable for ProxyRoute {
@@ -135,7 +126,7 @@ impl ProxyRoute {
             upstream: None,
             plugins: Vec::with_capacity(route.plugins.len()),
             plugin_name_index: Vec::new(),
-            cached_executor: ArcSwap::new(Arc::new(None)),
+            cached_executor: None,
         };
 
         // Configure upstream
@@ -168,12 +159,7 @@ impl ProxyRoute {
                     plugins: proxy_route.plugins.clone(),
                 })
             };
-            proxy_route
-                .cached_executor
-                .store(Arc::new(Some(CachedExecutor {
-                    service_ptr: None,
-                    executor,
-                })));
+            proxy_route.cached_executor = Some(executor);
         }
 
         Ok(proxy_route)
@@ -231,25 +217,13 @@ impl RouteContext for ProxyRoute {
     }
 
     fn build_plugin_executor(&self) -> Arc<ProxyPluginExecutor> {
+        // Check if the executor is already cached
+        if let Some(executor) = &self.cached_executor {
+            return executor.clone();
+        }
+
         // Fetch current service (if configured)
         let service = self.inner.service_id.as_deref().and_then(service_fetch);
-        let current_service_ptr = service.as_ref().map(|s| Arc::as_ptr(s) as usize);
-
-        // Fast path: check cache
-        // 1. If service is None (not configured), return cached executor
-        // 2. If service pointer matches, return cached executor
-        if let Some(cached) = &**self.cached_executor.load() {
-            match (cached.service_ptr, current_service_ptr) {
-                // Route has no service_id configured - always use cache
-                (None, None) => return cached.executor.clone(),
-                // Service pointer unchanged - use cache
-                (Some(cached_ptr), Some(current_ptr)) if cached_ptr == current_ptr => {
-                    return cached.executor.clone();
-                }
-                // Service changed or service_id was added/removed - rebuild
-                _ => {}
-            }
-        }
 
         // Slow path: build executor and update cache
         let Some(current_service) = service else {
@@ -262,11 +236,6 @@ impl RouteContext for ProxyRoute {
                     plugins: self.plugins.clone(),
                 })
             };
-            // Cache the route-only executor
-            self.cached_executor.store(Arc::new(Some(CachedExecutor {
-                service_ptr: None,
-                executor: executor.clone(),
-            })));
             return executor;
         };
 
@@ -279,21 +248,13 @@ impl RouteContext for ProxyRoute {
             &self.plugin_name_index,
         );
 
-        let executor = if merged_plugins.is_empty() {
+        if merged_plugins.is_empty() {
             ProxyPluginExecutor::default_shared()
         } else {
             Arc::new(ProxyPluginExecutor {
                 plugins: merged_plugins,
             })
-        };
-
-        // Update cache for next request
-        self.cached_executor.store(Arc::new(Some(CachedExecutor {
-            service_ptr: current_service_ptr,
-            executor: executor.clone(),
-        })));
-
-        executor
+        }
     }
 
     fn resolve_upstream(&self) -> Option<Arc<dyn UpstreamSelector>> {
