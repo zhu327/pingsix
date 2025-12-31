@@ -7,7 +7,8 @@ use futures::future::join_all;
 use hickory_resolver::TokioResolver;
 use once_cell::sync::OnceCell;
 use pingora::{protocols::ALPN, upstreams::peer::HttpPeer};
-use pingora_error::{Error, ErrorType::InternalError, Result};
+use pingora_core::utils::tls::CertKey;
+use pingora_error::{Error, ErrorType::InternalError, OrErr, Result};
 use pingora_load_balancing::{
     discovery::{ServiceDiscovery, Static},
     Backend,
@@ -15,7 +16,7 @@ use pingora_load_balancing::{
 use regex::Regex;
 
 use crate::{
-    config::{Upstream, UpstreamPassHost, UpstreamScheme},
+    config::{Upstream, UpstreamPassHost, UpstreamScheme, UpstreamTls},
     core::{ProxyError, ProxyResult},
 };
 
@@ -33,6 +34,40 @@ fn get_global_resolver() -> Arc<TokioResolver> {
         .clone()
 }
 
+/// Loads a client certificate and key from PEM format strings.
+///
+/// This function parses the certificate chain and private key from PEM encoded strings
+/// and creates a CertKey object that can be used for mTLS authentication.
+fn load_client_cert_key(tls_config: &UpstreamTls) -> ProxyResult<Arc<CertKey>> {
+    use pingora_core::tls::pkey::PKey;
+    use pingora_core::tls::x509::X509;
+
+    // Parse the certificate chain
+    let cert_pem = tls_config.client_cert.as_bytes();
+    let certificates = X509::stack_from_pem(cert_pem)
+        .or_err_with(pingora_error::ErrorType::InternalError, || {
+            "Failed to parse client certificate PEM"
+        })?;
+
+    if certificates.is_empty() {
+        return Err(ProxyError::Configuration(
+            "No certificates found in client_cert".to_string(),
+        ));
+    }
+
+    // Parse the private key
+    let key_pem = tls_config.client_key.as_bytes();
+    let private_key = PKey::private_key_from_pem(key_pem)
+        .or_err_with(pingora_error::ErrorType::InternalError, || {
+            "Failed to parse client private key PEM"
+        })?;
+
+    // Create CertKey using the new method
+    let cert_key = CertKey::new(certificates, private_key);
+
+    Ok(Arc::new(cert_key))
+}
+
 /// DNS-based service discovery.
 ///
 /// Resolves DNS names to IP addresses and creates backends for each resolved IP.
@@ -42,6 +77,7 @@ pub struct DnsDiscovery {
     port: u32,
     scheme: UpstreamScheme,
     weight: u32,
+    client_cert_key: Option<Arc<CertKey>>,
 }
 
 impl DnsDiscovery {
@@ -52,6 +88,7 @@ impl DnsDiscovery {
         scheme: UpstreamScheme,
         weight: u32,
         resolver: Arc<TokioResolver>,
+        client_cert_key: Option<Arc<CertKey>>,
     ) -> Self {
         Self {
             resolver,
@@ -59,6 +96,7 @@ impl DnsDiscovery {
             port,
             scheme,
             weight,
+            client_cert_key,
         }
     }
 }
@@ -102,6 +140,11 @@ impl ServiceDiscovery for DnsDiscovery {
                 let mut peer = HttpPeer::new(&addr, tls, self.domain.clone());
                 if matches!(self.scheme, UpstreamScheme::GRPC | UpstreamScheme::GRPCS) {
                     peer.options.alpn = ALPN::H2;
+                }
+
+                // Set client certificate if configured
+                if let Some(ref cert_key) = self.client_cert_key {
+                    peer.client_cert_key = Some(cert_key.clone());
                 }
 
                 // Insert HttpPeer into the backend
@@ -157,6 +200,13 @@ impl TryFrom<Upstream> for HybridDiscovery {
         let mut this = Self::default();
         let mut backends = BTreeSet::new();
 
+        // Load client certificate if configured
+        let client_cert_key = if let Some(ref tls) = upstream.tls {
+            Some(load_client_cert_key(tls)?)
+        } else {
+            None
+        };
+
         // Process each node in upstream
         for (addr, weight) in upstream.nodes.iter() {
             let (host, port) = parse_host_and_port(addr)?;
@@ -207,6 +257,12 @@ impl TryFrom<Upstream> for HybridDiscovery {
                 ) {
                     peer.options.alpn = ALPN::H2;
                 }
+
+                // Set client certificate if configured
+                if let Some(ref cert_key) = client_cert_key {
+                    peer.client_cert_key = Some(cert_key.clone());
+                }
+
                 assert!(backend.ext.insert::<HttpPeer>(peer).is_none());
 
                 backends.insert(backend);
@@ -214,7 +270,14 @@ impl TryFrom<Upstream> for HybridDiscovery {
                 // It's a domain name
                 // Handle DNS discovery for domain names
                 let resolver = get_global_resolver();
-                let discovery = DnsDiscovery::new(host, port, upstream.scheme, *weight, resolver);
+                let discovery = DnsDiscovery::new(
+                    host,
+                    port,
+                    upstream.scheme,
+                    *weight,
+                    resolver,
+                    client_cert_key.clone(),
+                );
                 this.discoveries.push(Box::new(discovery));
             }
         }

@@ -291,6 +291,14 @@ pub struct Tls {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
+pub struct UpstreamTls {
+    #[validate(length(min = 1))]
+    pub client_cert: String,
+    #[validate(length(min = 1))]
+    pub client_key: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
 pub struct Timeout {
     pub connect: u64,
     pub send: u64,
@@ -380,6 +388,8 @@ pub struct Upstream {
     #[serde(default)]
     pub pass_host: UpstreamPassHost,
     pub upstream_host: Option<String>,
+    #[validate(nested)]
+    pub tls: Option<UpstreamTls>,
 }
 
 impl Upstream {
@@ -973,5 +983,91 @@ routes:
                 // Test passes if we get an error
             }
         }
+    }
+
+    #[test]
+    fn test_upstream_with_tls() {
+        init_log();
+        let conf_str = r#"
+---
+pingsix:
+  listeners:
+    - address: "[::1]:8080"
+
+routes:
+  - id: "1"
+    uri: /
+    upstream:
+      nodes:
+        "127.0.0.1:1980": 1
+      scheme: https
+      tls:
+        client_cert: |
+          -----BEGIN CERTIFICATE-----
+          MIICLDCCAdKgAwIBAgIBADAKBggqhkjOPQQDAjB9MQswCQYDVQQGEwJCRTEPMA0G
+          A1UEChMGR251VExTMSUwIwYDVQQLExxHbnVUTFMgY2VydGlmaWNhdGUgYXV0aG9y
+          aXR5MQ8wDQYDVQQIEwZMZXV2ZW4xJTAjBgNVBAMTHEdudVRMUyBjZXJ0aWZpY2F0
+          ZSBhdXRob3JpdHkwHhcNMTEwNTIzMjAzODIxWhcNMTIxMjIyMDc0MTUxWjB9MQsw
+          CQYDVQQGEwJCRTEPMA0GA1UEChMGR251VExTMSUwIwYDVQQLExxHbnVUTFMgY2Vy
+          dGlmaWNhdGUgYXV0aG9yaXR5MQ8wDQYDVQQIEwZMZXV2ZW4xJTAjBgNVBAMTHEdu
+          dVRMUyBjZXJ0aWZpY2F0ZSBhdXRob3JpdHkwWTATBgcqhkjOPQIBBggqhkjOPQMB
+          BwNCAARS2I0jiuNn14Y2sSALCX3IybqiIJUvxUpj+oNfzngvj/Niyv2394BWnW4X
+          uQ4RTEiywK87WRcWMGgJB5kX/t2no0MwQTAPBgNVHRMBAf8EBTADAQH/MA8GA1Ud
+          DwEB/wQFAwMHBgAwHQYDVR0OBBYEFPC0gf6YEr+1KLlkQAPLzB9mTigDMAoGCCqG
+          SM49BAMCA0gAMEUCIDGuwD1KPyG+hRf88MeyMQcqOFZD0TbVleF+UsAGQ4enAiEA
+          l4wOuDwKQa+upc8GftXE2C//4mKANBC6It01gUaTIpo=
+          -----END CERTIFICATE-----
+        client_key: |
+          -----BEGIN EC PRIVATE KEY-----
+          MHcCAQEEIIrYSSNdykVHguvz6t+tCg4EBdAy/pQjf4qwl3VhfhBloAoGCCqGSM49
+          AwEHoUQDQgAEUtiNI4rjZ9eGNrEgCwl9yMm6oiCVL8VKY/qDX854L4/zYsr9t/eA
+          Vp1uF7kOEUxIssCvO1kXFjBoCQeZF/7dp6A==
+          -----END EC PRIVATE KEY-----
+
+upstreams:
+  - id: "1"
+    nodes:
+      "192.168.1.100:8443": 1
+    scheme: https
+    tls:
+      client_cert: |
+        -----BEGIN CERTIFICATE-----
+        MIICLDCCAdKgAwIBAgIBADAKBggqhkjOPQQDAjB9MQswCQYDVQQGEwJCRTEPMA0G
+        A1UEChMGR251VExTMSUwIwYDVQQLExxHbnVUTFMgY2VydGlmaWNhdGUgYXV0aG9y
+        aXR5MQ8wDQYDVQQIEwZMZXV2ZW4xJTAjBgNVBAMTHEdudVRMUyBjZXJ0aWZpY2F0
+        ZSBhdXRob3JpdHkwHhcNMTEwNTIzMjAzODIxWhcNMTIxMjIyMDc0MTUxWjB9MQsw
+        CQYDVQQGEwJCRTEPMA0GA1UEChMGR251VExTMSUwIwYDVQQLExxHbnVUTFMgY2Vy
+        dGlmaWNhdGUgYXV0aG9yaXR5MQ8wDQYDVQQIEwZMZXV2ZW4xJTAjBgNVBAMTHEdu
+        dVRMUyBjZXJ0aWZpY2F0ZSBhdXRob3JpdHkwWTATBgcqhkjOPQIBBggqhkjOPQMB
+        BwNCAARS2I0jiuNn14Y2sSALCX3IybqiIJUvxUpj+oNfzngvj/Niyv2394BWnW4X
+        uQ4RTEiywK87WRcWMGgJB5kX/t2no0MwQTAPBgNVHRMBAf8EBTADAQH/MA8GA1Ud
+        DwEB/wQFAwMHBgAwHQYDVR0OBBYEFPC0gf6YEr+1KLlkQAPLzB9mTigDMAoGCCqG
+        SM49BAMCA0gAMEUCIDGuwD1KPyG+hRf88MeyMQcqOFZD0TbVleF+UsAGQ4enAiEA
+        l4wOuDwKQa+upc8GftXE2C//4mKANBC6It01gUaTIpo=
+        -----END CERTIFICATE-----
+      client_key: |
+        -----BEGIN EC PRIVATE KEY-----
+        MHcCAQEEIIrYSSNdykVHguvz6t+tCg4EBdAy/pQjf4qwl3VhfhBloAoGCCqGSM49
+        AwEHoUQDQgAEUtiNI4rjZ9eGNrEgCwl9yMm6oiCVL8VKY/qDX854L4/zYsr9t/eA
+        Vp1uF7kOEUxIssCvO1kXFjBoCQeZF/7dp6A==
+        -----END EC PRIVATE KEY-----
+        "#;
+        let conf = Config::from_yaml(conf_str).unwrap();
+        assert_eq!(1, conf.routes.len());
+        assert_eq!(1, conf.upstreams.len());
+
+        // Check route upstream TLS config
+        let route_upstream = conf.routes[0].upstream.as_ref().unwrap();
+        assert!(route_upstream.tls.is_some());
+        let route_tls = route_upstream.tls.as_ref().unwrap();
+        assert!(route_tls.client_cert.contains("BEGIN CERTIFICATE"));
+        assert!(route_tls.client_key.contains("BEGIN EC PRIVATE KEY"));
+
+        // Check upstream TLS config
+        let upstream = &conf.upstreams[0];
+        assert!(upstream.tls.is_some());
+        let upstream_tls = upstream.tls.as_ref().unwrap();
+        assert!(upstream_tls.client_cert.contains("BEGIN CERTIFICATE"));
+        assert!(upstream_tls.client_key.contains("BEGIN EC PRIVATE KEY"));
     }
 }
