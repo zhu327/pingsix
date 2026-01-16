@@ -307,8 +307,9 @@ impl MatchEntry {
     /// Helper method to get or compute reversed host string with caching
     /// Converts wildcard patterns to matchit format for reversed hosts
     fn get_reversed_host(&self, host: &str) -> String {
+        let host = host.to_ascii_lowercase();
         self.reversed_host_cache
-            .entry(host.to_string())
+            .entry(host.clone())
             .or_insert_with(|| {
                 if let Some(domain_part) = host.strip_prefix("*") {
                     // Convert "*.example.com" to "moc.elpmaxe.{*subdomain}"
@@ -406,7 +407,8 @@ impl MatchEntry {
         if let Some(host_str) = host.filter(|h| !h.is_empty()) {
             // Just reverse the host and let matchit handle the matching
             // matchit will automatically match "moc.elpmaxe.ipa" against "moc.elpmaxe.{*subdomain}"
-            let reversed_host = host_str.chars().rev().collect::<String>();
+            let normalized_host = host_str.to_ascii_lowercase();
+            let reversed_host = normalized_host.chars().rev().collect::<String>();
             if let Ok(v) = self.host_uris.at(&reversed_host) {
                 if let Some(result) = Self::match_uri_method(v.value, uri, method) {
                     return Some(result);

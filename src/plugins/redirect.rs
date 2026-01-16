@@ -3,17 +3,14 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use http::{header, uri::Scheme, StatusCode, Uri};
 use pingora_error::Result;
-use pingora_http::ResponseHeader;
+use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_proxy::Session;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use validator::{Validate, ValidationError};
 
-use crate::{
-    core::{apply_regex_uri_template, ProxyContext, ProxyError, ProxyPlugin, ProxyResult},
-    utils::request::get_request_host,
-};
+use crate::core::{apply_regex_uri_template, ProxyContext, ProxyError, ProxyPlugin, ProxyResult};
 
 pub const PLUGIN_NAME: &str = "redirect";
 const PRIORITY: i32 = 900;
@@ -122,8 +119,8 @@ impl ProxyPlugin for PluginRedirect {
 impl PluginRedirect {
     async fn redirect_https(&self, session: &mut Session) -> Result<bool> {
         let current_uri = session.req_header().uri.clone();
-        let host = get_request_host(session.req_header())
-            .ok_or_else(|| ProxyError::Internal("Missing host".to_string()))?;
+        let authority = get_request_authority(session.req_header())
+            .ok_or_else(|| ProxyError::Internal("Missing host authority".to_string()))?;
 
         let path_and_query = current_uri
             .path_and_query()
@@ -132,7 +129,7 @@ impl PluginRedirect {
 
         let new_uri = Uri::builder()
             .scheme(Scheme::HTTPS)
-            .authority(host)
+            .authority(authority)
             .path_and_query(path_and_query)
             .build()
             .map_err(|e| ProxyError::Internal(format!("Failed to build HTTPS URI: {e}")))?;
@@ -243,4 +240,24 @@ impl PluginRedirect {
             .await?;
         Ok(true)
     }
+}
+
+fn get_request_authority(header: &RequestHeader) -> Option<String> {
+    if let Some(authority) = header.uri.authority() {
+        let authority = authority.as_str().trim();
+        if !authority.is_empty() {
+            return Some(authority.to_string());
+        }
+    }
+
+    if let Some(host_header_value) = header.headers.get(header::HOST) {
+        if let Ok(host_str) = host_header_value.to_str() {
+            let host_str = host_str.trim();
+            if !host_str.is_empty() {
+                return Some(host_str.to_string());
+            }
+        }
+    }
+
+    None
 }

@@ -410,15 +410,51 @@ impl Upstream {
 
     // Custom validation function for `nodes` keys
     fn validate_nodes_keys(nodes: &HashMap<String, u32>) -> Result<(), ValidationError> {
-        for key in nodes.keys() {
+        for (key, weight) in nodes {
             if !NODE_KEY_REGEX.is_match(key) {
                 let mut err = ValidationError::new("invalid_node_key");
                 err.add_param("key".into(), key);
                 return Err(err);
             }
+
+            if *weight == 0 {
+                let mut err = ValidationError::new("invalid_node_weight");
+                err.add_param("key".into(), key);
+                err.add_param("weight".into(), weight);
+                return Err(err);
+            }
+
+            if let Some(port_str) = Self::extract_port(key) {
+                let port = port_str.parse::<u32>().map_err(|_| {
+                    let mut err = ValidationError::new("invalid_node_port");
+                    err.add_param("key".into(), key);
+                    err.add_param("port".into(), &port_str);
+                    err
+                })?;
+
+                if port == 0 || port > 65535 {
+                    let mut err = ValidationError::new("invalid_node_port");
+                    err.add_param("key".into(), key);
+                    err.add_param("port".into(), &port);
+                    return Err(err);
+                }
+            }
         }
 
         Ok(())
+    }
+
+    fn extract_port(key: &str) -> Option<&str> {
+        if key.starts_with('[') {
+            if let Some(bracket_end) = key.find(']') {
+                if key.len() > bracket_end + 1 && &key[bracket_end + 1..bracket_end + 2] == ":" {
+                    return Some(&key[bracket_end + 2..]);
+                }
+                return None;
+            }
+        }
+
+        key.rfind(':').map(|idx| &key[idx + 1..])
     }
 }
 

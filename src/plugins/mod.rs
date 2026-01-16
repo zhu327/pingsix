@@ -103,6 +103,6 @@ static PLUGIN_BUILDER_REGISTRY: Lazy<HashMap<&'static str, PluginCreateFn>> = La
 pub fn build_plugin(name: &str, cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyPlugin>> {
     let builder = PLUGIN_BUILDER_REGISTRY
         .get(name)
-        .ok_or_else(|| ProxyError::Plugin("Unknown plugin type".to_string()))?;
+        .ok_or_else(|| ProxyError::Plugin(format!("Unknown plugin type: {name}")))?;
     builder(cfg)
 }
