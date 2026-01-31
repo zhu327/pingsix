@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use pingora_error::Result;
 use pingora_proxy::Session;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::sync::Arc;
@@ -115,7 +116,8 @@ impl PluginTrafficSplit {
             return None;
         }
 
-        let mut n = rand::random_range(0..total_weight);
+        let mut rng = rand::thread_rng();
+        let mut n = rng.gen_range(0..total_weight);
 
         for (i, ups_cfg) in upstreams.iter().enumerate() {
             if n < ups_cfg.weight {

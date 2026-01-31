@@ -103,8 +103,8 @@ impl PluginFaultInjection {
         match percentage {
             None => true, // If no percentage is set, always apply
             Some(pct) => {
-                let mut rng = rand::rng();
-                rng.random_range(1..=100) <= pct
+                let mut rng = rand::thread_rng();
+                rng.gen_range(1..=100) <= pct
             }
         }
     }

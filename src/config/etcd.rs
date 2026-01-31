@@ -85,17 +85,12 @@ impl EtcdConfigSync {
 
         let client = self.get_client().await?;
 
-        let (mut watcher, mut stream) = client
+        let mut stream = client
             .watch(prefix.as_str(), Some(options))
             .await
             .map_err(|e| {
                 ProxyError::etcd_error_with_cause(format!("Failed to watch key '{prefix}'"), e)
             })?;
-
-        watcher
-            .request_progress()
-            .await
-            .map_err(|e| ProxyError::etcd_error_with_cause("Failed to request progress", e))?;
 
         while let Some(response) = stream
             .message()

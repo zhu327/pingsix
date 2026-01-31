@@ -131,7 +131,7 @@ impl PluginRequestID {
             return Uuid::new_v4().to_string();
         }
 
-        let mut rng = rand::rng();
+        let mut rng = rand::thread_rng();
         (0..self.config.range_id.length)
             .map(|_| {
                 chars

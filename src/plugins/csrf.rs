@@ -87,9 +87,9 @@ impl PluginCsrf {
     ///
     /// Returns None if system time is unavailable (should never happen in practice)
     fn gen_token_string(&self) -> Option<String> {
-        let mut rng = rand::rng();
+        let mut rng = rand::thread_rng();
         // Generate 16 random bytes for better entropy than f64
-        let random_bytes: [u8; 16] = rng.random();
+        let random_bytes: [u8; 16] = rng.gen();
         let random = hex::encode(random_bytes);
 
         // Get current timestamp, handle potential system time errors gracefully
