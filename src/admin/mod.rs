@@ -479,11 +479,24 @@ impl ServeHttp for AdminHttpApp {
 }
 
 fn validate_api_key(http_session: &ServerSession, api_key: &str) -> ApiResult<()> {
-    match http_session.get_header("x-api-key") {
-        Some(key) if constant_time_eq(key.to_str().unwrap_or(""), api_key) => Ok(()),
-        _ => Err(ApiError::InvalidRequest(
+    // Defense-in-depth: reject misconfigured empty API keys even if validation was bypassed.
+    if api_key.trim().is_empty() {
+        return Err(ApiError::InvalidRequest(
             "Must provide valid API key".into(),
-        )),
+        ));
+    }
+
+    let provided_key = http_session
+        .get_header("x-api-key")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if !provided_key.is_empty() && constant_time_eq(provided_key, api_key) {
+        Ok(())
+    } else {
+        Err(ApiError::InvalidRequest(
+            "Must provide valid API key".into(),
+        ))
     }
 }
 

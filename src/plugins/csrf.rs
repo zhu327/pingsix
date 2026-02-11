@@ -3,6 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use base64::{engine::general_purpose, Engine as _};
+use hmac::{Hmac, Mac};
 use http::{header, Method, StatusCode};
 use pingora_error::Result;
 use pingora_http::ResponseHeader;
@@ -10,10 +11,10 @@ use pingora_proxy::Session;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 use validator::Validate;
 
-use crate::core::{ProxyContext, ProxyError, ProxyPlugin, ProxyResult};
+use crate::core::{constant_time_eq, ProxyContext, ProxyError, ProxyPlugin, ProxyResult};
 use crate::utils::{request, response::ResponseBuilder};
 
 pub const PLUGIN_NAME: &str = "csrf";
@@ -73,14 +74,14 @@ pub struct PluginCsrf {
 impl PluginCsrf {
     /// Generates HMAC-SHA256 signature for the token
     ///
-    /// Uses a more robust signature scheme: HMAC-SHA256(key, random || expires)
+    /// Uses standard HMAC-SHA256(key, random || expires).
     fn gen_sign(&self, random: &str, expires: u64) -> String {
-        let mut hasher = Sha256::new();
-        // Use HMAC-like construction: hash(key || data)
-        hasher.update(self.config.key.as_bytes());
-        hasher.update(random.as_bytes());
-        hasher.update(expires.to_string().as_bytes());
-        hex::encode(hasher.finalize())
+        type HmacSha256 = Hmac<Sha256>;
+        let mut mac = HmacSha256::new_from_slice(self.config.key.as_bytes())
+            .expect("HMAC accepts any key size");
+        mac.update(random.as_bytes());
+        mac.update(expires.to_string().as_bytes());
+        hex::encode(mac.finalize().into_bytes())
     }
 
     /// Generates a new CSRF token string (base64 encoded JSON)
@@ -147,7 +148,7 @@ impl PluginCsrf {
 
         // Validate signature using constant-time comparison
         let expected_sign = self.gen_sign(&token_table.random, token_table.expires);
-        if token_table.sign != expected_sign {
+        if !constant_time_eq(&token_table.sign, &expected_sign) {
             log::debug!("CSRF token invalid signature");
             return false;
         }

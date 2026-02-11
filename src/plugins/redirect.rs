@@ -117,6 +117,24 @@ impl ProxyPlugin for PluginRedirect {
 }
 
 impl PluginRedirect {
+    fn merge_query_string(
+        target_query: &str,
+        original_query: &str,
+        append_query_string: bool,
+    ) -> String {
+        if append_query_string {
+            if target_query.is_empty() {
+                original_query.to_string()
+            } else if original_query.is_empty() || target_query == original_query {
+                target_query.to_string()
+            } else {
+                format!("{target_query}&{original_query}")
+            }
+        } else {
+            target_query.to_string()
+        }
+    }
+
     async fn redirect_https(&self, session: &mut Session) -> Result<bool> {
         let current_uri = session.req_header().uri.clone();
         let authority = get_request_authority(session.req_header())
@@ -170,17 +188,11 @@ impl PluginRedirect {
             .and_then(|uri| uri.query().map(|q| q.to_string()))
             .unwrap_or_default();
         let new_path = path.split('?').next().unwrap_or(path);
-        let new_query = if self.config.append_query_string {
-            if target_query.is_empty() {
-                original_query.to_string()
-            } else if original_query.is_empty() {
-                target_query
-            } else {
-                format!("{target_query}&{original_query}")
-            }
-        } else {
-            target_query
-        };
+        let new_query = Self::merge_query_string(
+            &target_query,
+            original_query,
+            self.config.append_query_string,
+        );
 
         let new_path_and_query = if new_query.is_empty() {
             new_path.to_string()
@@ -199,22 +211,18 @@ impl PluginRedirect {
     ) -> Option<Uri> {
         if let Some(pq) = parts.path_and_query.take() {
             let path = pq.path();
-            let target_query = pq.query().unwrap_or("");
-            let new_path = apply_regex_uri_template(path, &self.regex_patterns);
-            let new_query = if self.config.append_query_string {
-                if target_query.is_empty() {
-                    original_query.to_string()
-                } else if original_query.is_empty() {
-                    target_query.to_string()
-                } else {
-                    format!("{target_query}&{original_query}")
-                }
-            } else {
-                target_query.to_string()
-            };
+            let rewritten = apply_regex_uri_template(path, &self.regex_patterns);
+            let (new_path, target_query) = rewritten
+                .split_once('?')
+                .map_or_else(|| (rewritten.as_str(), ""), |(p, q)| (p, q));
+            let new_query = Self::merge_query_string(
+                target_query,
+                original_query,
+                self.config.append_query_string,
+            );
 
             let new_uri = if new_query.is_empty() {
-                new_path
+                new_path.to_string()
             } else {
                 format!("{new_path}?{new_query}")
             };
@@ -260,4 +268,21 @@ fn get_request_authority(header: &RequestHeader) -> Option<String> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PluginRedirect;
+
+    #[test]
+    fn merge_query_string_does_not_duplicate_same_query() {
+        let merged = PluginRedirect::merge_query_string("a=1", "a=1", true);
+        assert_eq!(merged, "a=1");
+    }
+
+    #[test]
+    fn merge_query_string_appends_when_different() {
+        let merged = PluginRedirect::merge_query_string("b=2", "a=1", true);
+        assert_eq!(merged, "b=2&a=1");
+    }
 }

@@ -251,7 +251,17 @@ pub struct Etcd {
 #[derive(Clone, Debug, Serialize, Deserialize, Validate)]
 pub struct Admin {
     pub address: SocketAddr,
+    #[validate(length(min = 1), custom(function = "Admin::validate_api_key"))]
     pub api_key: String,
+}
+
+impl Admin {
+    fn validate_api_key(api_key: &str) -> Result<(), ValidationError> {
+        if api_key.trim().is_empty() {
+            return Err(ValidationError::new("api_key_required"));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Validate)]
@@ -952,6 +962,35 @@ services:
             Err(e) => {
                 eprintln!("Error: {e:?}");
                 // Test passes if we get an error
+            }
+        }
+    }
+
+    #[test]
+    fn test_admin_api_key_must_not_be_empty() {
+        init_log();
+        let conf_str = r#"
+---
+pingsix:
+  listeners:
+    - address: "[::1]:8080"
+  admin:
+    address: "127.0.0.1:9180"
+    api_key: "   "
+
+routes:
+  - id: "1"
+    uri: /
+    upstream:
+      nodes:
+        "127.0.0.1:1980": 1
+        "#;
+
+        let conf = Config::from_yaml(conf_str);
+        match conf {
+            Ok(_) => panic!("Expected error, but got a valid config"),
+            Err(e) => {
+                eprintln!("Error: {e:?}");
             }
         }
     }
