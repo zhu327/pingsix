@@ -201,7 +201,7 @@ fn add_optional_services(server: &mut Server, cfg: &config::Pingsix) {
                 return; // Fail fast on invalid DSN to avoid silent monitoring failures
             }
         };
-        server.sentry = Some(sentry::ClientOptions {
+        server.set_sentry_config(sentry::ClientOptions {
             dsn: Some(dsn),
             ..Default::default()
         });
