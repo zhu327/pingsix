@@ -28,60 +28,60 @@ use crate::core::{PluginCreateFn, ProxyError, ProxyPlugin, ProxyResult};
 
 /// Global registry mapping plugin names to their factory functions.
 ///
-/// Plugins are registered with their priority values as comments for reference.
-/// Higher priority values execute earlier in the plugin chain.
+/// Plugins are listed in descending priority order (higher priority = executes first).
+/// The priority value determines execution order in the plugin chain.
 static PLUGIN_BUILDER_REGISTRY: Lazy<HashMap<&'static str, PluginCreateFn>> = Lazy::new(|| {
     let arr: Vec<(&str, PluginCreateFn)> = vec![
-        (
-            file_logger::PLUGIN_NAME,
-            file_logger::create_file_logger_plugin,
-        ), // 399
-        (echo::PLUGIN_NAME, echo::create_echo_plugin), // 412
-        (
-            prometheus::PLUGIN_NAME,
-            prometheus::create_prometheus_plugin,
-        ), // 500
-        (
-            limit_count::PLUGIN_NAME,
-            limit_count::create_limit_count_plugin,
-        ), // 503
-        (grpc_web::PLUGIN_NAME, grpc_web::create_grpc_web_plugin), // 505
-        (
-            response_rewrite::PLUGIN_NAME,
-            response_rewrite::create_response_rewrite_plugin,
-        ), // 899
-        (redirect::PLUGIN_NAME, redirect::create_redirect_plugin), // 900
-        (
-            traffic_split::PLUGIN_NAME,
-            traffic_split::create_traffic_split_plugin,
-        ), // 966
-        (gzip::PLUGIN_NAME, gzip::create_gzip_plugin), // 995
-        (brotli::PLUGIN_NAME, brotli::create_brotli_plugin), // 996
-        (
-            proxy_rewrite::PLUGIN_NAME,
-            proxy_rewrite::create_proxy_rewrite_plugin,
-        ), // 1008
-        (cache::PLUGIN_NAME, cache::create_cache_plugin), // 1085
-        (
-            fault_injection::PLUGIN_NAME,
-            fault_injection::create_fault_injection_plugin,
-        ), // 11000
         (
             request_id::PLUGIN_NAME,
             request_id::create_request_id_plugin,
         ), // 12015
-        (key_auth::PLUGIN_NAME, key_auth::create_key_auth_plugin), // 2500
+        (
+            fault_injection::PLUGIN_NAME,
+            fault_injection::create_fault_injection_plugin,
+        ), // 11000
+        (cors::PLUGIN_NAME, cors::create_cors_plugin), // 4000
+        (
+            ip_restriction::PLUGIN_NAME,
+            ip_restriction::create_ip_restriction_plugin,
+        ), // 3000
+        (csrf::PLUGIN_NAME, csrf::create_csrf_plugin), // 2980
         (
             basic_auth::PLUGIN_NAME,
             basic_auth::create_basic_auth_plugin,
         ), // 2520
         (jwt_auth::PLUGIN_NAME, jwt_auth::create_jwt_auth_plugin), // 2510
-        (csrf::PLUGIN_NAME, csrf::create_csrf_plugin), // 2980
+        (key_auth::PLUGIN_NAME, key_auth::create_key_auth_plugin), // 2500
+        (cache::PLUGIN_NAME, cache::create_cache_plugin), // 1085
         (
-            ip_restriction::PLUGIN_NAME,
-            ip_restriction::create_ip_restriction_plugin,
-        ), // 3000
-        (cors::PLUGIN_NAME, cors::create_cors_plugin), // 4000
+            proxy_rewrite::PLUGIN_NAME,
+            proxy_rewrite::create_proxy_rewrite_plugin,
+        ), // 1008
+        (brotli::PLUGIN_NAME, brotli::create_brotli_plugin), // 996
+        (gzip::PLUGIN_NAME, gzip::create_gzip_plugin), // 995
+        (
+            traffic_split::PLUGIN_NAME,
+            traffic_split::create_traffic_split_plugin,
+        ), // 966
+        (redirect::PLUGIN_NAME, redirect::create_redirect_plugin), // 900
+        (
+            response_rewrite::PLUGIN_NAME,
+            response_rewrite::create_response_rewrite_plugin,
+        ), // 899
+        (grpc_web::PLUGIN_NAME, grpc_web::create_grpc_web_plugin), // 505
+        (
+            limit_count::PLUGIN_NAME,
+            limit_count::create_limit_count_plugin,
+        ), // 503
+        (
+            prometheus::PLUGIN_NAME,
+            prometheus::create_prometheus_plugin,
+        ), // 500
+        (echo::PLUGIN_NAME, echo::create_echo_plugin), // 412
+        (
+            file_logger::PLUGIN_NAME,
+            file_logger::create_file_logger_plugin,
+        ), // 399
     ];
     arr.into_iter().collect()
 });

@@ -35,7 +35,7 @@ pingsix:
     address: 0.0.0.0:9091
 
   sentry:
-    dsn: https://1234567890@sentry.io/123456
+    dsn: https://examplePublicKey@o0.ingest.sentry.io/0
 
 # api routes example for https://apisix.apache.org/docs/apisix/admin-api/#route
 # Here is a complete example, which is a subset of routes from the apisix docs. The fields not mentioned here indicate that pingsix does not support them.

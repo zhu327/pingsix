@@ -293,9 +293,10 @@ impl ProxyEventHandler {
     }
 }
 
-// ! When resource creation fails, it still just logs the error and skips.
-// ! This may cause the gateway state to be inconsistent with etcd.
-// ! For the creation failure of critical resources, more complex handling strategies may be required (for example, retry, mark as invalid, or stop the service if the failure has a large impact, etc.).
+// When resource creation fails during etcd sync, the gateway logs and skips.
+// This may cause state inconsistency. A failed route creation means traffic that
+// etcd expects to be routed will receive 404s instead. For production deployments,
+// monitor the "Failed to create proxy" error logs and consider adding health metrics.
 impl EtcdEventHandler for ProxyEventHandler {
     fn handle_event(&self, event: &Event) {
         let kv = match event.kv() {

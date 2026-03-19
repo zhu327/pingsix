@@ -109,10 +109,10 @@ impl Service for Logger {
         // Use configurable flush interval (default: 5 seconds)
         let mut flush_interval = interval(Duration::from_secs(5));
 
-        // TODO: For log rotation, consider integrating `tracing_appender::rolling` or similar.
-        // Example:
-        // let mut roller = tracing_appender::rolling::hourly(parent, "app.log");
-        // On rotation, update `file` to the new file handle.
+        log::warn!(
+            "Log rotation is not implemented. Log file '{log_file_path}' will grow unbounded. \
+             Configure external log rotation (e.g., logrotate) for production use."
+        );
 
         loop {
             tokio::select! {

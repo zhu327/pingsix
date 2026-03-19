@@ -205,23 +205,27 @@ static HTTP_HEADER_X_FORWARDED_FOR: Lazy<HeaderName> =
 
 static HTTP_HEADER_X_REAL_IP: Lazy<HeaderName> = Lazy::new(|| HeaderName::from_static("x-real-ip"));
 
-/// Gets the client's apparent IP address based on common proxy headers or the direct connection address.
+/// Gets the client's apparent IP address.
 ///
-/// The order of precedence is:
-/// 1. `X-Forwarded-For` (first IP in the list)
-/// 2. `X-Real-IP`
-/// 3. Direct client address (`session.client_addr()`)
+/// Prefers the direct connection address for security (non-spoofable).
+/// Only uses proxy headers (`X-Forwarded-For`, `X-Real-IP`) as fallback.
+///
+/// **Security note**: Proxy headers can be spoofed by clients. For IP-based
+/// access control or rate limiting, use the direct connection address or validate
+/// proxy headers against a list of trusted proxy CIDRs.
 ///
 /// Returns an empty string if no IP address can be determined.
 pub fn get_client_ip(session: &Session) -> String {
-    // 1. Check X-Forwarded-For
+    // 1. Prefer direct client address (non-spoofable)
+    if let Some(addr) = session.client_addr() {
+        if let Some(inet) = addr.as_inet() {
+            return inet.ip().to_string();
+        }
+    }
+
+    // 2. Fallback to X-Forwarded-For (can be spoofed)
     if let Some(value) = session.get_header(HTTP_HEADER_X_FORWARDED_FOR.clone()) {
         if let Ok(forwarded) = value.to_str() {
-            // Note: Takes the *first* IP from the X-Forwarded-For list.
-            // This is common practice but assumes the first IP is the actual client
-            // and the header hasn't been spoofed by intermediate proxies or the client.
-            // For environments requiring higher security, validate against a list
-            // of trusted proxy IPs or implement more sophisticated logic.
             if let Some(ip) = forwarded.split(',').next() {
                 let trimmed_ip = ip.trim();
                 if !trimmed_ip.is_empty() {
@@ -231,7 +235,7 @@ pub fn get_client_ip(session: &Session) -> String {
         }
     }
 
-    // 2. Check X-Real-IP
+    // 3. Fallback to X-Real-IP (can be spoofed)
     if let Some(value) = session.get_header(HTTP_HEADER_X_REAL_IP.clone()) {
         if let Ok(real_ip) = value.to_str() {
             let trimmed_ip = real_ip.trim();
@@ -241,16 +245,6 @@ pub fn get_client_ip(session: &Session) -> String {
         }
     }
 
-    // 3. Fallback to direct client address
-    if let Some(addr) = session.client_addr() {
-        // Return only the IP part, converting IPAddr to string
-        return addr
-            .as_inet()
-            .map(|addr| addr.ip().to_string())
-            .unwrap_or_default();
-    }
-
-    // 4. Unable to determine IP
     log::debug!("Could not determine client IP address");
-    "".to_string()
+    String::new()
 }

@@ -26,6 +26,18 @@ use crate::{
 
 use super::{discovery::HybridDiscovery, health_check::SHARED_HEALTH_CHECK_SERVICE};
 
+/// Runs a closure over the inner LB for any SelectionLB variant, eliminating repetitive match arms.
+macro_rules! with_lb {
+    ($lb:expr, |$lb_var:ident| $body:expr) => {
+        match $lb {
+            SelectionLB::RoundRobin($lb_var) => $body,
+            SelectionLB::Random($lb_var) => $body,
+            SelectionLB::Fnv($lb_var) => $body,
+            SelectionLB::Ketama($lb_var) => $body,
+        }
+    };
+}
+
 /// Fetches an upstream by its ID.
 pub fn upstream_fetch(id: &str) -> Option<Arc<ProxyUpstream>> {
     match UPSTREAM_MAP.get(id) {
@@ -86,15 +98,9 @@ impl ProxyUpstream {
 
     /// Register health check with shared service
     fn register_health_check(&mut self) -> ProxyResult<()> {
-        // Get direct Arc reference to the LoadBalancer
         let load_balancer: Arc<
             dyn pingora_core::services::background::BackgroundService + Send + Sync,
-        > = match &self.lb {
-            SelectionLB::RoundRobin(lb) => lb.upstreams.clone(),
-            SelectionLB::Random(lb) => lb.upstreams.clone(),
-            SelectionLB::Fnv(lb) => lb.upstreams.clone(),
-            SelectionLB::Ketama(lb) => lb.upstreams.clone(),
-        };
+        > = with_lb!(&self.lb, |lb| lb.upstreams.clone());
 
         let upstream_id = self.inner.id.clone();
 
@@ -121,6 +127,7 @@ impl ProxyUpstream {
     }
 
     /// Sets the timeout for an `HttpPeer`.
+    /// Note: Duplicated in ProxyRoute — consider extracting to shared utility if consolidating.
     fn set_timeout(&self, p: &mut HttpPeer) {
         if let Some(config::Timeout {
             connect,
@@ -148,12 +155,7 @@ impl UpstreamSelector for ProxyUpstream {
         let key = request_selector_key(session, &self.inner.hash_on, self.inner.key.as_str());
         log::debug!("proxy lb key: {}", &key);
 
-        let mut backend = match &self.lb {
-            SelectionLB::RoundRobin(lb) => lb.upstreams.select(key.as_bytes(), 256),
-            SelectionLB::Random(lb) => lb.upstreams.select(key.as_bytes(), 256),
-            SelectionLB::Fnv(lb) => lb.upstreams.select(key.as_bytes(), 256),
-            SelectionLB::Ketama(lb) => lb.upstreams.select(key.as_bytes(), 256),
-        };
+        let mut backend = with_lb!(&self.lb, |lb| lb.upstreams.select(key.as_bytes(), 256));
 
         if let Some(backend) = backend.as_mut() {
             if let Some(peer) = backend.ext.get_mut::<HttpPeer>() {
@@ -242,26 +244,23 @@ where
             upstreams.health_check_frequency = Some(health_check_frequency);
         }
 
+        // Extract the Arc<LoadBalancer> via background_service().task().
+        // The wrapper is intentionally dropped — health checks are driven by
+        // SHARED_HEALTH_CHECK_SERVICE, not by Pingora's background service mechanism.
         let background =
             background_service(&format!("health check for {}", upstream.id), upstreams);
         let upstreams = background.task();
 
-        let this = Self { upstreams };
-
-        Ok(this)
+        Ok(Self { upstreams })
     }
 }
 
 impl From<config::HealthCheck> for Box<dyn HealthCheckTrait + Send + Sync + 'static> {
     fn from(value: config::HealthCheck) -> Self {
         match value.active.r#type {
-            config::ActiveCheckType::TCP => {
-                let health_check: Box<TcpHealthCheck> = value.into();
-                health_check
-            }
+            config::ActiveCheckType::TCP => Into::<Box<TcpHealthCheck>>::into(value),
             config::ActiveCheckType::HTTP | config::ActiveCheckType::HTTPS => {
-                let health_check: Box<HttpHealthCheck> = value.into();
-                health_check
+                Into::<Box<HttpHealthCheck>>::into(value)
             }
         }
     }

@@ -386,12 +386,13 @@ impl ProxyHttp for HttpService {
             if let Some(upstream) = route.resolve_upstream() {
                 if let Some(retries) = upstream.get_retries() {
                     if retries > 0 && ctx.tries < retries {
-                        if let Some(timeout) = upstream.get_retry_timeout() {
-                            let elapsed_ms = ctx.elapsed_ms();
-                            if elapsed_ms <= (timeout * 1000) as u128 {
-                                ctx.tries += 1;
-                                e.set_retry(true);
-                            }
+                        let within_timeout = match upstream.get_retry_timeout() {
+                            Some(timeout) => ctx.elapsed_ms() <= (timeout * 1000) as u128,
+                            None => true,
+                        };
+                        if within_timeout {
+                            ctx.tries += 1;
+                            e.set_retry(true);
                         }
                     }
                 }

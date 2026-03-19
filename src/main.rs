@@ -1,4 +1,3 @@
-#![allow(clippy::upper_case_acronyms)]
 mod admin;
 mod config;
 mod core;
@@ -210,6 +209,16 @@ fn add_optional_services(server: &mut Server, cfg: &config::Pingsix) {
 
     // Admin interface requires etcd for config validation and security
     if cfg.etcd.is_some() && cfg.admin.is_some() {
+        if let Some(admin_cfg) = &cfg.admin {
+            if !admin_cfg.address.ip().is_loopback() {
+                log::warn!(
+                    "Admin API is bound to non-loopback address {}. \
+                     API key will be transmitted in cleartext. \
+                     Consider binding to 127.0.0.1 or using a TLS-terminating reverse proxy.",
+                    admin_cfg.address
+                );
+            }
+        }
         log::debug!("Configuring admin HTTP interface");
         let admin_service_http = AdminHttpApp::admin_http_service(cfg);
         server.add_service(admin_service_http);

@@ -66,49 +66,47 @@ impl From<ProxyError> for ApiError {
 
 impl ApiError {
     fn into_response(self) -> ApiResponse {
+        use ApiError::*;
         match self {
-            ApiError::EtcdGetError(_) | ApiError::RequestBodyReadError(_) => {
+            EtcdGetError(_) | RequestBodyReadError(_) => {
                 CommonErrors::internal_server_error(&self.to_string())
             }
-            ApiError::ValidationError(_)
-            | ApiError::MissingParameter(_)
-            | ApiError::InvalidRequest(_) => CommonErrors::bad_request(&self.to_string()),
-            ApiError::ProxyError(proxy_err) => {
-                // Handle different ProxyError types appropriately
-                match &proxy_err {
-                    ProxyError::ValidationStructured(validation_errors) => {
-                        // For structured validation errors, we can provide detailed field-level errors
-                        let detailed_errors: std::collections::HashMap<String, Vec<String>> =
-                            validation_errors
-                                .field_errors()
-                                .iter()
-                                .map(|(field, errors)| {
-                                    let error_messages: Vec<String> =
-                                        errors.iter().map(|e| e.to_string()).collect();
-                                    (field.to_string(), error_messages)
-                                })
-                                .collect();
-
-                        let response_body = serde_json::json!({
-                            "error": "Validation failed",
-                            "details": detailed_errors
-                        });
-
-                        Response::builder()
-                            .status(400)
-                            .header("Content-Type", "application/json")
-                            .body(response_body.to_string().into_bytes())
-                            .expect("Failed to build HTTP error response")
-                    }
-                    ProxyError::Validation(_) | ProxyError::Configuration(_) => {
-                        CommonErrors::bad_request(&proxy_err.to_string())
-                    }
-                    _ => {
-                        // For other errors, treat as internal server error
-                        CommonErrors::internal_server_error(&proxy_err.to_string())
-                    }
-                }
+            ValidationError(_) | MissingParameter(_) | InvalidRequest(_) => {
+                CommonErrors::bad_request(&self.to_string())
             }
+            ProxyError(proxy_err) => Self::proxy_error_response(&proxy_err),
+        }
+    }
+
+    fn proxy_error_response(proxy_err: &ProxyError) -> ApiResponse {
+        match proxy_err {
+            ProxyError::ValidationStructured(validation_errors) => {
+                let detailed_errors: HashMap<String, Vec<String>> = validation_errors
+                    .field_errors()
+                    .iter()
+                    .map(|(field, errors)| {
+                        (
+                            field.to_string(),
+                            errors.iter().map(|e| e.to_string()).collect(),
+                        )
+                    })
+                    .collect();
+
+                let response_body = serde_json::json!({
+                    "error": "Validation failed",
+                    "details": detailed_errors
+                });
+
+                Response::builder()
+                    .status(400)
+                    .header("Content-Type", "application/json")
+                    .body(response_body.to_string().into_bytes())
+                    .expect("Failed to build HTTP error response")
+            }
+            ProxyError::Validation(_) | ProxyError::Configuration(_) => {
+                CommonErrors::bad_request(&proxy_err.to_string())
+            }
+            _ => CommonErrors::internal_server_error(&proxy_err.to_string()),
         }
     }
 }
@@ -149,16 +147,20 @@ trait AdminResource: DeserializeOwned + Validate + Identifiable + Send + Sync + 
 }
 
 // Implement AdminResource for all supported configuration types
+fn validate_plugins(plugins: &HashMap<String, serde_json::Value>) -> ApiResult<()> {
+    for (name, value) in plugins {
+        build_plugin(name, value.clone()).map_err(|e| {
+            ApiError::ValidationError(format!("Failed to build plugin '{name}': {e}"))
+        })?;
+    }
+    Ok(())
+}
+
 impl AdminResource for config::Route {
     const RESOURCE_TYPE: &'static str = "routes";
 
     fn validate_plugins_if_supported(resource: &Self) -> ApiResult<()> {
-        for (name, value) in &resource.plugins {
-            build_plugin(name, value.clone()).map_err(|e| {
-                ApiError::ValidationError(format!("Failed to build plugin '{name}': {e}"))
-            })?;
-        }
-        Ok(())
+        validate_plugins(&resource.plugins)
     }
 }
 
@@ -170,12 +172,7 @@ impl AdminResource for config::Service {
     const RESOURCE_TYPE: &'static str = "services";
 
     fn validate_plugins_if_supported(resource: &Self) -> ApiResult<()> {
-        for (name, value) in &resource.plugins {
-            build_plugin(name, value.clone()).map_err(|e| {
-                ApiError::ValidationError(format!("Failed to build plugin '{name}': {e}"))
-            })?;
-        }
-        Ok(())
+        validate_plugins(&resource.plugins)
     }
 }
 
@@ -183,12 +180,7 @@ impl AdminResource for config::GlobalRule {
     const RESOURCE_TYPE: &'static str = "global_rules";
 
     fn validate_plugins_if_supported(resource: &Self) -> ApiResult<()> {
-        for (name, value) in &resource.plugins {
-            build_plugin(name, value.clone()).map_err(|e| {
-                ApiError::ValidationError(format!("Failed to build plugin '{name}': {e}"))
-            })?;
-        }
-        Ok(())
+        validate_plugins(&resource.plugins)
     }
 }
 
@@ -196,18 +188,27 @@ impl AdminResource for config::SSL {
     const RESOURCE_TYPE: &'static str = "ssls";
 }
 
-// Generic handler that significantly reduces code duplication
-struct ResourceHandler<T: AdminResource> {
-    _phantom: PhantomData<T>,
+macro_rules! admin_handler {
+    ($name:ident) => {
+        struct $name<T: AdminResource> {
+            _phantom: PhantomData<T>,
+        }
+        impl<T: AdminResource> $name<T> {
+            fn new() -> Self {
+                Self {
+                    _phantom: PhantomData,
+                }
+            }
+        }
+    };
 }
 
-impl<T: AdminResource> ResourceHandler<T> {
-    fn new() -> Self {
-        Self {
-            _phantom: PhantomData,
-        }
-    }
+admin_handler!(ResourceHandler);
+admin_handler!(GetHandler);
+admin_handler!(DeleteHandler);
+admin_handler!(ListHandler);
 
+impl<T: AdminResource> ResourceHandler<T> {
     fn extract_key(params: &RequestParams) -> ApiResult<String> {
         let id = params
             .get("id")
@@ -236,7 +237,7 @@ impl<T: AdminResource> Handler for ResourceHandler<T> {
         http_session: &mut ServerSession,
         params: RequestParams,
     ) -> ApiResult<ApiResponse> {
-        validate_content_type(http_session)?;
+        http_session.validate_content_type()?;
 
         let body_data = read_request_body(http_session)
             .await
@@ -254,18 +255,6 @@ impl<T: AdminResource> Handler for ResourceHandler<T> {
 }
 
 // GET handler - separate type needed to distinguish operation types
-struct GetHandler<T: AdminResource> {
-    _phantom: PhantomData<T>,
-}
-
-impl<T: AdminResource> GetHandler<T> {
-    fn new() -> Self {
-        Self {
-            _phantom: PhantomData,
-        }
-    }
-}
-
 #[async_trait]
 impl<T: AdminResource> Handler for GetHandler<T> {
     async fn handle(
@@ -295,18 +284,6 @@ impl<T: AdminResource> Handler for GetHandler<T> {
 }
 
 // DELETE handler
-struct DeleteHandler<T: AdminResource> {
-    _phantom: PhantomData<T>,
-}
-
-impl<T: AdminResource> DeleteHandler<T> {
-    fn new() -> Self {
-        Self {
-            _phantom: PhantomData,
-        }
-    }
-}
-
 #[async_trait]
 impl<T: AdminResource> Handler for DeleteHandler<T> {
     async fn handle(
@@ -324,18 +301,6 @@ impl<T: AdminResource> Handler for DeleteHandler<T> {
 }
 
 // LIST handler
-struct ListHandler<T: AdminResource> {
-    _phantom: PhantomData<T>,
-}
-
-impl<T: AdminResource> ListHandler<T> {
-    fn new() -> Self {
-        Self {
-            _phantom: PhantomData,
-        }
-    }
-}
-
 #[async_trait]
 impl<T: AdminResource> Handler for ListHandler<T> {
     async fn handle(
@@ -447,7 +412,7 @@ impl ServeHttp for AdminHttpApp {
     async fn response(&self, http_session: &mut ServerSession) -> ApiResponse {
         http_session.set_keepalive(None);
 
-        if validate_api_key(http_session, &self.config.api_key).is_err() {
+        if http_session.validate_api_key(&self.config.api_key).is_err() {
             return CommonErrors::forbidden("Invalid API key");
         }
 
@@ -478,44 +443,49 @@ impl ServeHttp for AdminHttpApp {
     }
 }
 
-fn validate_api_key(http_session: &ServerSession, api_key: &str) -> ApiResult<()> {
-    // Defense-in-depth: reject misconfigured empty API keys even if validation was bypassed.
-    if api_key.trim().is_empty() {
-        return Err(ApiError::InvalidRequest(
-            "Must provide valid API key".into(),
-        ));
-    }
-
-    let provided_key = http_session
-        .get_header("x-api-key")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-
-    if !provided_key.is_empty() && constant_time_eq(provided_key, api_key) {
-        Ok(())
-    } else {
-        Err(ApiError::InvalidRequest(
-            "Must provide valid API key".into(),
-        ))
-    }
+trait AdminSessionExt {
+    fn validate_api_key(&self, api_key: &str) -> ApiResult<()>;
+    fn validate_content_type(&self) -> ApiResult<()>;
 }
 
-fn validate_content_type(http_session: &ServerSession) -> ApiResult<()> {
-    match http_session.get_header(header::CONTENT_TYPE) {
-        Some(content_type) => {
-            let ct_str = content_type.to_str().unwrap_or("");
-            // Accept application/json with or without charset parameters
-            if ct_str.starts_with("application/json") {
-                Ok(())
-            } else {
-                Err(ApiError::InvalidRequest(
-                    "Content-Type must be application/json".into(),
-                ))
-            }
+impl AdminSessionExt for ServerSession {
+    fn validate_api_key(&self, api_key: &str) -> ApiResult<()> {
+        if api_key.trim().is_empty() {
+            return Err(ApiError::InvalidRequest(
+                "Must provide valid API key".into(),
+            ));
         }
-        None => Err(ApiError::InvalidRequest(
-            "Content-Type header is required".into(),
-        )),
+
+        let provided_key = self
+            .get_header("x-api-key")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+
+        if !provided_key.is_empty() && constant_time_eq(provided_key, api_key) {
+            Ok(())
+        } else {
+            Err(ApiError::InvalidRequest(
+                "Must provide valid API key".into(),
+            ))
+        }
+    }
+
+    fn validate_content_type(&self) -> ApiResult<()> {
+        match self.get_header(header::CONTENT_TYPE) {
+            Some(content_type) => {
+                let ct_str = content_type.to_str().unwrap_or("");
+                if ct_str.starts_with("application/json") {
+                    Ok(())
+                } else {
+                    Err(ApiError::InvalidRequest(
+                        "Content-Type must be application/json".into(),
+                    ))
+                }
+            }
+            None => Err(ApiError::InvalidRequest(
+                "Content-Type header is required".into(),
+            )),
+        }
     }
 }
 

@@ -137,7 +137,7 @@ impl Config {
     }
 
     /// Serializes configuration back to YAML format for debugging or export.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn to_yaml(&self) -> String {
         serde_yaml::to_string(self).unwrap_or_else(|e| {
             log::error!("Failed to serialize config to YAML: {e}");
@@ -357,16 +357,20 @@ impl Route {
         Ok(())
     }
 
-    pub fn get_hosts(&self) -> Vec<String> {
-        self.host
-            .clone()
-            .map_or_else(|| self.hosts.clone(), |host| vec![host.to_string()])
+    pub fn get_hosts(&self) -> Vec<&str> {
+        if let Some(ref host) = self.host {
+            vec![host.as_str()]
+        } else {
+            self.hosts.iter().map(|s| s.as_str()).collect()
+        }
     }
 
-    pub fn get_uris(&self) -> Vec<String> {
-        self.uri
-            .clone()
-            .map_or_else(|| self.uris.clone(), |uri| vec![uri.to_string()])
+    pub fn get_uris(&self) -> Vec<&str> {
+        if let Some(ref uri) = self.uri {
+            vec![uri.as_str()]
+        } else {
+            self.uris.iter().map(|s| s.as_str()).collect()
+        }
     }
 
     fn default_priority() -> u32 {
@@ -506,6 +510,7 @@ pub struct ActiveCheck {
 
 #[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[allow(clippy::upper_case_acronyms)]
 pub enum ActiveCheckType {
     TCP,
     #[default]
@@ -571,6 +576,7 @@ impl Unhealthy {
 
 #[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[allow(clippy::upper_case_acronyms)]
 pub enum UpstreamHashOn {
     #[default]
     VARS,
@@ -580,6 +586,7 @@ pub enum UpstreamHashOn {
 
 #[derive(Copy, Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[allow(clippy::upper_case_acronyms)]
 pub enum UpstreamScheme {
     #[default]
     HTTP,
@@ -590,6 +597,7 @@ pub enum UpstreamScheme {
 
 #[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[allow(clippy::upper_case_acronyms)]
 pub enum UpstreamPassHost {
     #[default]
     PASS,
@@ -629,6 +637,7 @@ pub struct GlobalRule {
 }
 
 #[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
+#[allow(clippy::upper_case_acronyms)]
 pub struct SSL {
     #[serde(default)]
     pub id: String,

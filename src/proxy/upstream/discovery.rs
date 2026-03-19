@@ -148,7 +148,7 @@ impl ServiceDiscovery for DnsDiscovery {
                 }
 
                 // Insert HttpPeer into the backend
-                assert!(backend.ext.insert::<HttpPeer>(peer).is_none());
+                debug_assert!(backend.ext.insert::<HttpPeer>(peer).is_none());
 
                 Some(backend)
             })
@@ -263,7 +263,7 @@ impl TryFrom<Upstream> for HybridDiscovery {
                     peer.client_cert_key = Some(cert_key.clone());
                 }
 
-                assert!(backend.ext.insert::<HttpPeer>(peer).is_none());
+                debug_assert!(backend.ext.insert::<HttpPeer>(peer).is_none());
 
                 backends.insert(backend);
             } else {
