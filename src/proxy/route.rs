@@ -335,7 +335,7 @@ impl MatchEntry {
                 // Sort routes by priority (higher priority values take precedence)
                 routes
                     .value
-                    .sort_by(|a, b| b.inner.priority.cmp(&a.inner.priority));
+                    .sort_by_key(|b| std::cmp::Reverse(b.inner.priority));
             }
             Err(_) => {
                 router.insert(uri, vec![proxy_route])?;
