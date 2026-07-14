@@ -214,7 +214,7 @@ impl PluginRedirect {
             let rewritten = apply_regex_uri_template(path, &self.regex_patterns);
             let (new_path, target_query) = rewritten
                 .split_once('?')
-                .map_or_else(|| (rewritten.as_str(), ""), |(p, q)| (p, q));
+                .map_or_else(|| (rewritten.as_ref(), ""), |(p, q)| (p, q));
             let new_query = Self::merge_query_string(
                 target_query,
                 original_query,

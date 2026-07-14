@@ -99,7 +99,7 @@ pub fn reload_global_plugin() {
         .map(|(_, plugin)| plugin)
         .collect();
 
-    GLOBAL_PLUGIN.store(Arc::new(ProxyPluginExecutor { plugins }));
+    GLOBAL_PLUGIN.store(Arc::new(ProxyPluginExecutor::new(plugins)));
 }
 
 /// Loads services from the given configuration.

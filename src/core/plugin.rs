@@ -2,7 +2,7 @@
 //!
 //! Provides the plugin trait, executor, context, and URI rewriting utilities.
 
-use std::{any::Any, collections::HashMap, sync::Arc, time::Instant};
+use std::{any::Any, borrow::Cow, collections::HashMap, sync::Arc, time::Instant};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -51,6 +51,9 @@ pub trait RouteContext: Send + Sync {
     /// Get the service ID if available
     fn service_id(&self) -> Option<&str>;
 
+    /// Return the configured URI template used to match this route.
+    fn uri_template(&self) -> Option<&str>;
+
     /// Select an HTTP peer for the route
     fn select_http_peer(&self, session: &mut Session) -> ProxyResult<Box<HttpPeer>>;
 
@@ -91,7 +94,8 @@ pub struct ProxyContext {
     /// Unique request identifier, set by request-id plugin if enabled.
     pub request_id: Option<String>,
     /// Custom variables available to plugins (type-erased, thread-safe).
-    pub vars: HashMap<String, Box<dyn Any + Send + Sync>>,
+    /// Lazily allocated because many requests never store plugin variables.
+    pub vars: Option<HashMap<String, Box<dyn Any + Send + Sync>>>,
 }
 
 impl Default for ProxyContext {
@@ -106,7 +110,7 @@ impl Default for ProxyContext {
             global_plugin: ProxyPluginExecutor::default_shared(),
             request_start: Instant::now(),
             request_id: None,
-            vars: HashMap::new(),
+            vars: None,
         }
     }
 }
@@ -143,12 +147,17 @@ impl ProxyContext {
 
     /// Store a typed value into the context for inter-plugin communication.
     pub fn set<T: Any + Send + Sync>(&mut self, key: impl Into<String>, value: T) {
-        self.vars.insert(key.into(), Box::new(value));
+        self.vars
+            .get_or_insert_with(HashMap::new)
+            .insert(key.into(), Box::new(value));
     }
 
     /// Get a typed reference from the context with type safety.
     pub fn get<T: Any>(&self, key: &str) -> Option<&T> {
-        self.vars.get(key).and_then(|v| v.downcast_ref::<T>())
+        self.vars
+            .as_ref()
+            .and_then(|vars| vars.get(key))
+            .and_then(|v| v.downcast_ref::<T>())
     }
 
     /// Convenience method for string values to avoid repeated type annotation.
@@ -247,6 +256,14 @@ pub trait ProxyPlugin: Send + Sync {
         Ok(())
     }
 
+    /// Whether this plugin implements response body filtering.
+    ///
+    /// Executors use this capability to skip body-filter traversal when no
+    /// configured plugin needs it.
+    fn has_response_body_filter(&self) -> bool {
+        false
+    }
+
     /// Handle the response body chunks
     ///
     /// Use this for: content compression, body transformation, and filtering.
@@ -279,21 +296,26 @@ pub fn sort_plugins_by_priority_desc(plugins: &mut [Arc<dyn ProxyPlugin>]) {
     });
 }
 
-/// Constant-time string comparison to prevent timing attacks.
-///
-/// Uses HMAC-based comparison to avoid leaking length or content information.
-/// Both inputs are hashed first so the comparison always operates on fixed-size data.
-pub fn constant_time_eq(a: &str, b: &str) -> bool {
+/// Hashes a secret for comparison against precomputed configuration digests.
+pub fn secret_digest(value: &str) -> [u8; 32] {
     use sha2::{Digest, Sha256};
 
-    let hash_a = Sha256::digest(a.as_bytes());
-    let hash_b = Sha256::digest(b.as_bytes());
+    Sha256::digest(value.as_bytes()).into()
+}
 
-    let mut result = 0u8;
-    for (byte_a, byte_b) in hash_a.iter().zip(hash_b.iter()) {
-        result |= byte_a ^ byte_b;
-    }
-    result == 0
+/// Compares fixed-length secret digests in constant time.
+pub fn constant_time_digest_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
+    use subtle::ConstantTimeEq;
+
+    a.ct_eq(b).into()
+}
+
+/// Constant-time string comparison for legacy callers.
+///
+/// New authentication plugins should precompute their expected digest during
+/// configuration loading and call `constant_time_digest_eq` instead.
+pub fn constant_time_eq(a: &str, b: &str) -> bool {
+    constant_time_digest_eq(&secret_digest(a), &secret_digest(b))
 }
 
 /// Precompiled placeholder pattern for regex URI templates (e.g., "$1", "$10").
@@ -315,7 +337,10 @@ static TEMPLATE_PLACEHOLDER_RE: Lazy<Regex> =
 /// # Performance Notes
 /// Regex patterns are precompiled during plugin initialization to avoid
 /// per-request compilation overhead in high-traffic scenarios.
-pub fn apply_regex_uri_template(uri: &str, regex_patterns: &[(Regex, String)]) -> String {
+pub fn apply_regex_uri_template<'a>(
+    uri: &'a str,
+    regex_patterns: &[(Regex, String)],
+) -> Cow<'a, str> {
     for (re, redirect_template) in regex_patterns {
         if let Some(captures) = re.captures(uri) {
             // Build new URI by substituting capture groups into template.
@@ -337,12 +362,12 @@ pub fn apply_regex_uri_template(uri: &str, regex_patterns: &[(Regex, String)]) -
                             .to_string()
                     }
                 });
-            return redirect_uri.into_owned();
+            return Cow::Owned(redirect_uri.into_owned());
         }
     }
 
     // Return original URI if no patterns match
-    uri.to_string()
+    Cow::Borrowed(uri)
 }
 
 // =============================================================================
@@ -361,6 +386,8 @@ static DEFAULT_PLUGIN_EXECUTOR: Lazy<Arc<ProxyPluginExecutor>> =
 #[derive(Default)]
 pub struct ProxyPluginExecutor {
     pub plugins: Vec<Arc<dyn ProxyPlugin>>,
+    /// Whether at least one configured plugin processes response body chunks.
+    pub has_response_body_filter: bool,
 }
 
 /// Invokes a plugin method on each plugin in sequence (async, propagates Result).
@@ -391,6 +418,16 @@ macro_rules! for_each_plugin_async_unit {
 }
 
 impl ProxyPluginExecutor {
+    pub fn new(plugins: Vec<Arc<dyn ProxyPlugin>>) -> Self {
+        let has_response_body_filter = plugins
+            .iter()
+            .any(|plugin| plugin.has_response_body_filter());
+        Self {
+            plugins,
+            has_response_body_filter,
+        }
+    }
+
     /// Returns shared empty executor instance to minimize memory allocation.
     pub fn default_shared() -> Arc<Self> {
         DEFAULT_PLUGIN_EXECUTOR.clone()
@@ -458,14 +495,16 @@ impl ProxyPlugin for ProxyPluginExecutor {
         end_of_stream: bool,
         ctx: &mut ProxyContext,
     ) -> Result<()> {
-        for_each_plugin_sync!(
-            self,
-            response_body_filter,
-            session,
-            body,
-            end_of_stream,
-            ctx
-        );
+        if self.has_response_body_filter {
+            for_each_plugin_sync!(
+                self,
+                response_body_filter,
+                session,
+                body,
+                end_of_stream,
+                ctx
+            );
+        }
         Ok(())
     }
 
@@ -477,6 +516,29 @@ impl ProxyPlugin for ProxyPluginExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct BodyFilterPlugin;
+
+    #[async_trait]
+    impl ProxyPlugin for BodyFilterPlugin {
+        fn name(&self) -> &str {
+            "body-filter"
+        }
+
+        fn priority(&self) -> i32 {
+            0
+        }
+
+        fn has_response_body_filter(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn test_executor_detects_response_body_filter() {
+        let executor = ProxyPluginExecutor::new(vec![Arc::new(BodyFilterPlugin)]);
+        assert!(executor.has_response_body_filter);
+    }
 
     #[test]
     fn test_redirect_with_valid_match() {

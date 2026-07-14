@@ -40,6 +40,11 @@ serde_with = "3.12.0"
 # NOTE: serde_yaml 0.9 is unmaintained. Consider migrating to serde_yml.
 serde_yaml = "0.9"
 sha2 = "0.10.9"
+subtle = "2.6.1"
 tokio = { version = "1.41.1", features = ["fs"] }
 uuid = { version = "1.16.0", features = ["v4"] }
 validator = { version = "0.20.0", features = ["derive"] }
+
+[profile.release]
+lto = "thin"
+strip = "symbols"

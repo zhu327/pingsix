@@ -203,6 +203,9 @@ impl HealthCheckExecutor {
             }
         }
 
+        let mut cleanup_interval = tokio::time::interval(Duration::from_secs(1));
+        cleanup_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         loop {
             tokio::select! {
                 biased; // Prioritize shutdown signal
@@ -294,7 +297,7 @@ impl HealthCheckExecutor {
                 }
 
                 // Periodic cleanup of completed tasks when no events occur
-                _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                _ = cleanup_interval.tick() => {
                     running_tasks.retain(|upstream_id, handle| {
                         if handle.is_finished() {
                             log::debug!("Health check task for upstream '{upstream_id}' has finished");

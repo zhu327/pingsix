@@ -135,6 +135,18 @@ impl Service for Logger {
                             if let Err(e) = file.write_all(&data).await {
                                 log::error!("Failed to write to log file '{log_file_path}': {e}");
                             }
+
+                            // Drain a bounded batch to amortize select and write overhead
+                            // without starving the shutdown and periodic flush branches.
+                            for _ in 0..256 {
+                                let Ok(data) = self.receiver.try_recv() else {
+                                    break;
+                                };
+                                if let Err(e) = file.write_all(&data).await {
+                                    log::error!("Failed to write to log file '{log_file_path}': {e}");
+                                    break;
+                                }
+                            }
                         }
                         None => {
                             log::debug!("Log channel closed, stopping log writer");

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{borrow::Cow, sync::Arc};
 
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -191,7 +191,7 @@ impl ProxyPlugin for PluginPrometheus {
         let route_id = route.as_ref().map_or_else(|| "", |r| r.id());
 
         // Use path template to avoid high cardinality issues
-        let path_template = self.normalize_path_template(session);
+        let path_template = self.normalize_path_template(session, ctx);
 
         // Extract host, falling back to empty string
         let host = route.as_ref().map_or("", |_| {
@@ -207,26 +207,26 @@ impl ProxyPlugin for PluginPrometheus {
         let node = ctx
             .peer
             .as_ref()
-            .map_or_else(|| "".to_string(), |p| p._address.to_string());
+            .map_or(Cow::Borrowed(""), |p| Cow::Owned(p._address.to_string()));
 
         // Update Prometheus metrics with normalized path template
         STATUS
-            .with_label_values(&[code, route_id, &path_template, host, service, &node])
+            .with_label_values(&[code, route_id, &path_template, host, service, node.as_ref()])
             .inc();
 
         // Record request latency
         let elapsed_ms = ctx.elapsed_ms_f64();
         LATENCY
-            .with_label_values(&["request", route_id, service, &node])
+            .with_label_values(&["request", route_id, service, node.as_ref()])
             .observe(elapsed_ms);
 
         // Record bandwidth metrics
         BANDWIDTH
-            .with_label_values(&["ingress", route_id, service, &node])
+            .with_label_values(&["ingress", route_id, service, node.as_ref()])
             .inc_by(session.body_bytes_read() as _);
 
         BANDWIDTH
-            .with_label_values(&["egress", route_id, service, &node])
+            .with_label_values(&["egress", route_id, service, node.as_ref()])
             .inc_by(session.body_bytes_sent() as _);
 
         // Record request and response sizes
@@ -241,20 +241,18 @@ impl ProxyPlugin for PluginPrometheus {
 }
 
 impl PluginPrometheus {
-    /// Normalize URI path to avoid high cardinality issues
-    /// Uses route path template if available, otherwise applies basic normalization
-    fn normalize_path_template(&self, session: &Session) -> String {
-        // For now, just use the actual path since we don't expose URI templates in the trait
-        // In a real implementation, you might want to add path template methods to RouteContext
-        let actual_path = session.req_header().uri.path();
+    /// Normalize URI path to avoid high cardinality issues.
+    /// Prefer the matched route template, which avoids request-time regex work and
+    /// naturally groups dynamic path parameters into one metric series.
+    fn normalize_path_template(&self, session: &Session, ctx: &ProxyContext) -> String {
+        if let Some(template) = ctx.route.as_ref().and_then(|route| route.uri_template()) {
+            return self.limit_path_label(template.to_string());
+        }
 
-        // Apply basic normalization patterns
-        self.normalize_path(actual_path)
+        self.normalize_path(session.req_header().uri.path())
     }
 
-    /// Apply basic path normalization to reduce metric cardinality
-    /// Implements max_label_length limit and path convergence strategy
-    /// Correctly tracks unique paths (not total request count)
+    /// Apply basic path normalization to reduce metric cardinality.
     fn normalize_path(&self, path: &str) -> String {
         // Replace numeric IDs with placeholders using pre-compiled regex
         let path = NUMERIC_ID_REGEX.replace_all(path, "/{id}");
@@ -265,36 +263,100 @@ impl PluginPrometheus {
         // Replace other common patterns using pre-compiled regex
         let path = HASH_REGEX.replace_all(&path, "/{hash}");
 
-        // Limit path segment count to prevent deep hierarchies
-        let segments: Vec<&str> = path.split('/').collect();
-        let path = if segments.len() > 8 {
-            // Keep first 7 segments and append "..."
-            format!("{}/...", segments[..7].join("/"))
+        // Limit path segment count without collecting all path segments.
+        // Matches the original `split('/').collect()` semantics: once the path
+        // exceeds 8 segments, keep only the first 7 and append "/...".
+        let mut segment_count = 0;
+        let mut truncate_at = None;
+        for (index, byte) in path.bytes().enumerate() {
+            if byte == b'/' {
+                segment_count += 1;
+                if segment_count == 7 {
+                    truncate_at = Some(index);
+                } else if segment_count == 8 {
+                    break;
+                }
+            }
+        }
+        let path = if segment_count >= 8 {
+            format!(
+                "{}/...",
+                &path[..truncate_at.expect("recorded at 7th slash")]
+            )
         } else {
-            path.to_string()
+            path.into_owned()
         };
 
-        // Enforce maximum label length to prevent memory issues
+        self.limit_path_label(path)
+    }
+
+    /// Enforce label length and unique-path limits for both request paths and
+    /// route templates.
+    fn limit_path_label(&self, path: String) -> String {
         let normalized = if path.len() > self.config.max_label_length {
-            let truncate_at = self.config.max_label_length.saturating_sub(3);
+            let truncate_at = path
+                .char_indices()
+                .map(|(index, _)| index)
+                .take_while(|&index| index <= self.config.max_label_length.saturating_sub(3))
+                .last()
+                .unwrap_or(0);
             format!("{}...", &path[..truncate_at])
         } else {
             path
         };
 
-        // Check if this normalized path has been seen before
         if self.seen_paths.contains_key(&normalized) {
             return normalized;
         }
 
-        // New path: check if we've reached the limit
         if self.seen_paths.len() >= self.config.max_unique_paths {
-            // Return generic pattern for new paths after limit is reached
             return "/...".to_string();
         }
 
-        // Record this new path
         self.seen_paths.insert(normalized.clone(), ());
         normalized
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn plugin(max_label_length: usize, max_unique_paths: usize) -> PluginPrometheus {
+        PluginPrometheus {
+            config: PrometheusConfig {
+                max_label_length,
+                max_unique_paths,
+            },
+            seen_paths: Arc::new(DashMap::new()),
+        }
+    }
+
+    #[test]
+    fn route_templates_obey_label_length_limit() {
+        let plugin = plugin(8, 10);
+        assert_eq!(
+            plugin.limit_path_label("/abcdefghij".to_string()),
+            "/abcd..."
+        );
+    }
+
+    #[test]
+    fn route_templates_obey_unique_path_limit() {
+        let plugin = plugin(100, 1);
+        assert_eq!(plugin.limit_path_label("/first".to_string()), "/first");
+        assert_eq!(plugin.limit_path_label("/second".to_string()), "/...");
+    }
+
+    #[test]
+    fn normalize_path_collapses_beyond_eight_segments() {
+        let plugin = plugin(100, 100);
+        // 9 segments: keep the first 7 and append "/...".
+        assert_eq!(
+            plugin.normalize_path("/a/b/c/d/e/f/g/h"),
+            "/a/b/c/d/e/f/..."
+        );
+        // 8 segments: under the limit, unchanged.
+        assert_eq!(plugin.normalize_path("/a/b/c/d/e/f/g"), "/a/b/c/d/e/f/g");
     }
 }

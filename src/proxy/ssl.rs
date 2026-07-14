@@ -56,8 +56,8 @@ impl Identifiable for ProxySSL {
 
 impl ProxySSL {
     /// Gets the list of SNIs for the SSL.
-    fn get_snis(&self) -> Vec<String> {
-        self.inner.snis.clone()
+    fn get_snis(&self) -> &[String] {
+        &self.inner.snis
     }
 }
 
@@ -70,10 +70,8 @@ impl MatchEntry {
     /// Inserts an SSL into the match entry.
     /// Supports wildcard SNI patterns (e.g., "*.example.com") by converting them to matchit format.
     fn insert_ssl(&mut self, proxy_ssl: Arc<ProxySSL>) -> Result<(), InsertError> {
-        let snis = proxy_ssl.get_snis();
-
         // Insert for host URIs with wildcard support
-        for sni in snis.iter() {
+        for sni in proxy_ssl.get_snis() {
             // Process SNI for wildcard matching (similar to route host matching)
             let processed_sni = if let Some(domain_part) = sni.strip_prefix("*") {
                 // Wildcard: "*.example.com" -> "moc.elpmaxe.{*subdomain}"
@@ -92,11 +90,11 @@ impl MatchEntry {
     }
 
     /// Matches an SNI to an SSL.
-    fn match_sni(&self, sni: String) -> Option<Arc<ProxySSL>> {
-        // Reverse SNI to match the stored reversed SNI patterns
+    fn match_sni(&self, sni: &str) -> Option<Arc<ProxySSL>> {
+        // Reverse SNI to match the stored reversed SNI patterns.
         let reversed_sni = sni.chars().rev().collect::<String>();
 
-        log::debug!("match sni: sni={sni:?}");
+        log::debug!("match sni: {sni:?}");
 
         if let Ok(v) = self.snis.at(&reversed_sni) {
             return Some(v.value.clone());
@@ -221,11 +219,9 @@ impl TlsAccept for DynamicCert {
             .servername(NameType::HOST_NAME)
             .unwrap_or(DEFAULT_SERVER_NAME);
 
-        let proxy_ssl = if let Some(ssl) = global_ssl_match_fetch().match_sni(sni.to_string()) {
-            ssl.clone()
-        } else {
-            self.default.clone()
-        };
+        let proxy_ssl = global_ssl_match_fetch()
+            .match_sni(sni)
+            .unwrap_or_else(|| self.default.clone());
 
         match (&proxy_ssl.parsed_cert, &proxy_ssl.parsed_key) {
             (Ok(cert), Ok(key)) => {

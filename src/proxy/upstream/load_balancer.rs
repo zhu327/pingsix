@@ -152,10 +152,22 @@ impl Drop for ProxyUpstream {
 // Implementation of UpstreamSelector trait for decoupling from core module
 impl UpstreamSelector for ProxyUpstream {
     fn select_backend<'a>(&'a self, session: &'a mut Session) -> Option<Backend> {
-        let key = request_selector_key(session, &self.inner.hash_on, self.inner.key.as_str());
-        log::debug!("proxy lb key: {}", &key);
-
-        let mut backend = with_lb!(&self.lb, |lb| lb.upstreams.select(key.as_bytes(), 256));
+        let mut backend = match &self.lb {
+            SelectionLB::RoundRobin(lb) => lb.upstreams.select(b"", 256),
+            SelectionLB::Random(lb) => lb.upstreams.select(b"", 256),
+            SelectionLB::Fnv(lb) => {
+                let key =
+                    request_selector_key(session, &self.inner.hash_on, self.inner.key.as_str());
+                log::debug!("proxy lb key: {key}");
+                lb.upstreams.select(key.as_bytes(), 256)
+            }
+            SelectionLB::Ketama(lb) => {
+                let key =
+                    request_selector_key(session, &self.inner.hash_on, self.inner.key.as_str());
+                log::debug!("proxy lb key: {key}");
+                lb.upstreams.select(key.as_bytes(), 256)
+            }
+        };
 
         if let Some(backend) = backend.as_mut() {
             if let Some(peer) = backend.ext.get_mut::<HttpPeer>() {

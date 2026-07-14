@@ -119,7 +119,7 @@ impl PluginResponseRewrite {
                     "$remote_addr" => {
                         request_selector_key(session, &UpstreamHashOn::VARS, "remote_addr")
                     }
-                    _ => "".to_string(),
+                    _ => std::borrow::Cow::Borrowed(""),
                 };
                 result = result.replace(p, &actual);
             }

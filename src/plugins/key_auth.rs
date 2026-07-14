@@ -9,7 +9,9 @@ use serde_json::Value as JsonValue;
 use validator::Validate;
 
 use crate::{
-    core::{constant_time_eq, ProxyContext, ProxyError, ProxyPlugin, ProxyResult},
+    core::{
+        constant_time_digest_eq, secret_digest, ProxyContext, ProxyError, ProxyPlugin, ProxyResult,
+    },
     utils::{request, response::ResponseBuilder},
 };
 
@@ -26,7 +28,15 @@ const DEFAULT_API_KEY_QUERY: &str = "apikey";
 /// against configured keys. If the key is invalid or missing, it returns a `401 Unauthorized` response.
 pub fn create_key_auth_plugin(cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyPlugin>> {
     let config = PluginConfig::try_from(cfg)?;
-    Ok(Arc::new(PluginKeyAuth { config }))
+    let key_digests = config
+        .get_valid_keys()
+        .into_iter()
+        .map(|key| secret_digest(key))
+        .collect();
+    Ok(Arc::new(PluginKeyAuth {
+        config,
+        key_digests,
+    }))
 }
 
 /// Configuration for the Key Auth plugin.
@@ -111,6 +121,7 @@ enum KeySource {
 /// or integration with a consumer management system instead of fixed key matching.
 pub struct PluginKeyAuth {
     config: PluginConfig,
+    key_digests: Vec<[u8; 32]>,
 }
 
 #[async_trait]
@@ -169,19 +180,14 @@ impl ProxyPlugin for PluginKeyAuth {
 impl PluginKeyAuth {
     /// Validate the provided key against configured keys using constant-time comparison
     fn is_valid_key(&self, provided_key: &str) -> bool {
-        let valid_keys = self.config.get_valid_keys();
+        let provided_digest = secret_digest(provided_key);
+        let mut matched = 0u8;
 
-        if valid_keys.is_empty() {
-            return false;
+        // Compare every configured digest to avoid leaking which rotation key matched.
+        for valid_key_digest in &self.key_digests {
+            matched |= u8::from(constant_time_digest_eq(&provided_digest, valid_key_digest));
         }
 
-        // Use constant-time comparison to prevent timing attacks
-        for valid_key in valid_keys {
-            if constant_time_eq(provided_key, valid_key) {
-                return true;
-            }
-        }
-
-        false
+        matched != 0
     }
 }

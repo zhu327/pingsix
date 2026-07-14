@@ -10,7 +10,7 @@ use serde_json::Value as JsonValue;
 
 use crate::core::{ProxyContext, ProxyError, ProxyPlugin, ProxyResult};
 use crate::utils::{
-    request::{get_client_ip, get_req_header_value},
+    request::{get_direct_client_ip, get_req_header_value},
     response::ResponseBuilder,
 };
 
@@ -177,11 +177,10 @@ impl PluginIPRestriction {
     fn get_real_client_ip(&self, session: &Session) -> Result<IpAddr> {
         if self.config.use_forwarded_headers {
             // Get the immediate client IP (could be a proxy)
-            let immediate_client = get_client_ip(session).parse::<IpAddr>().map_err(
-                |e| -> Box<pingora_error::Error> {
-                    ProxyError::Internal(format!("Failed to parse immediate client IP: {e}")).into()
-                },
-            )?;
+            let immediate_client =
+                get_direct_client_ip(session).ok_or_else(|| -> Box<pingora_error::Error> {
+                    ProxyError::Internal("Failed to determine immediate client IP".into()).into()
+                })?;
 
             // Check if the immediate client is a trusted proxy
             if self.is_trusted_proxy(immediate_client) {
@@ -195,11 +194,9 @@ impl PluginIPRestriction {
             Ok(immediate_client)
         } else {
             // Use direct client IP without considering proxy headers
-            get_client_ip(session)
-                .parse::<IpAddr>()
-                .map_err(|e| -> Box<pingora_error::Error> {
-                    ProxyError::Internal(format!("Failed to parse client IP: {e}")).into()
-                })
+            get_direct_client_ip(session).ok_or_else(|| -> Box<pingora_error::Error> {
+                ProxyError::Internal("Failed to determine client IP".into()).into()
+            })
         }
     }
 

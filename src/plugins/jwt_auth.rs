@@ -269,7 +269,7 @@ impl PluginJWTAuth {
         let token = {
             let header_val =
                 request::get_req_header_value(session.req_header(), &self.config.header)?;
-            if header_val.to_lowercase().starts_with("bearer ") {
+            if header_val.len() >= 7 && header_val[..7].eq_ignore_ascii_case("bearer ") {
                 Some(header_val[7..].to_string())
             } else {
                 Some(header_val.to_string())

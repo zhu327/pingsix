@@ -10,7 +10,9 @@ use serde_json::Value as JsonValue;
 use validator::Validate;
 
 use crate::{
-    core::{constant_time_eq, ProxyContext, ProxyError, ProxyPlugin, ProxyResult},
+    core::{
+        constant_time_digest_eq, secret_digest, ProxyContext, ProxyError, ProxyPlugin, ProxyResult,
+    },
     utils::{request, response::ResponseBuilder},
 };
 
@@ -20,7 +22,13 @@ const PRIORITY: i32 = 2520;
 /// Creates a Basic Auth plugin instance.
 pub fn create_basic_auth_plugin(cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyPlugin>> {
     let config = PluginConfig::try_from(cfg)?;
-    Ok(Arc::new(PluginBasicAuth { config }))
+    let username_digest = secret_digest(&config.username);
+    let password_digest = secret_digest(&config.password);
+    Ok(Arc::new(PluginBasicAuth {
+        config,
+        username_digest,
+        password_digest,
+    }))
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate)]
@@ -47,6 +55,8 @@ impl TryFrom<JsonValue> for PluginConfig {
 
 pub struct PluginBasicAuth {
     config: PluginConfig,
+    username_digest: [u8; 32],
+    password_digest: [u8; 32],
 }
 
 impl PluginBasicAuth {
@@ -58,8 +68,8 @@ impl PluginBasicAuth {
     /// 3. Splits username and password at the first colon
     /// 4. Uses constant-time comparison to prevent timing attacks
     fn validate_credentials(&self, auth_value: &str) -> bool {
-        // 1. Check prefix
-        if !auth_value.to_lowercase().starts_with("basic ") {
+        // 1. Check prefix without allocating a lowercased copy.
+        if auth_value.len() < 6 || !auth_value[..6].eq_ignore_ascii_case("basic ") {
             return false;
         }
 
@@ -78,9 +88,10 @@ impl PluginBasicAuth {
             return false;
         };
 
-        // 4. Use constant-time comparison to prevent timing attacks
-        constant_time_eq(user, &self.config.username)
-            && constant_time_eq(pass, &self.config.password)
+        // 4. Hash each supplied value once and compare against configuration
+        // digests in constant time.
+        constant_time_digest_eq(&secret_digest(user), &self.username_digest)
+            & constant_time_digest_eq(&secret_digest(pass), &self.password_digest)
     }
 }
 
@@ -137,6 +148,8 @@ mod tests {
                 password: password.to_string(),
                 hide_credentials: false,
             },
+            username_digest: secret_digest(username),
+            password_digest: secret_digest(password),
         }
     }
 

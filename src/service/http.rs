@@ -315,9 +315,9 @@ impl ProxyHttp for HttpService {
                     }
                 });
 
-            // 2. Add headers from plugin's `vary` configuration
+            // 2. Add headers from plugin's pre-normalized `vary` configuration
             for h in settings.vary.iter() {
-                vary_headers.insert(h.trim().to_lowercase());
+                vary_headers.insert(h.clone());
             }
 
             // 3. Build the variance key
@@ -407,6 +407,19 @@ impl ProxyHttp for HttpService {
 fn ensure_max_age(cc: Option<CacheControl>, settings: &CacheSettings) -> Option<CacheControl> {
     match cc {
         Some(existing_cc) => {
+            let has_max_age_existing = existing_cc.directives.contains_key("max-age");
+            let needs_smaxage_rewrite =
+                settings.respect_s_maxage && existing_cc.directives.contains_key("s-maxage");
+            let needs_stale_while_revalidate = settings.stale_while_revalidate.is_some_and(|_| {
+                !existing_cc
+                    .directives
+                    .contains_key("stale-while-revalidate")
+            });
+
+            if has_max_age_existing && !needs_smaxage_rewrite && !needs_stale_while_revalidate {
+                return Some(existing_cc);
+            }
+
             let mut directives = DirectiveMap::with_capacity(existing_cc.directives.len() + 3);
             let mut has_max_age = false;
 

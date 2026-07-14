@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use arc_swap::ArcSwap;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use dashmap::DashMap;
 use matchit::{InsertError, Router as MatchRouter};
 use once_cell::sync::Lazy;
@@ -99,14 +99,21 @@ type RouteMatchResult = Option<(Vec<(String, String)>, Arc<ProxyRoute>)>;
 /// Routes are compiled at startup and cached for high-performance request matching.
 /// Plugin executors are cached for routes without service_id (static plugins),
 /// and dynamically built for routes with service_id (to reflect service updates).
+struct ServicePluginExecutor {
+    service: Arc<super::service::ProxyService>,
+    executor: Arc<ProxyPluginExecutor>,
+}
+
 pub struct ProxyRoute {
     pub inner: config::Route,
     pub upstream: Option<Arc<ProxyUpstream>>,
     pub plugins: Vec<Arc<dyn ProxyPlugin>>,
     /// Sorted index of route plugin names for fast "route overrides service" checks.
     plugin_name_index: Vec<String>,
-    /// Cached executor for the route (unified cache for static routes)
+    /// Cached executor for routes without services.
     cached_executor: Option<Arc<ProxyPluginExecutor>>,
+    /// Executor merged with the currently published service configuration.
+    service_executor: ArcSwapOption<ServicePluginExecutor>,
 }
 
 impl Identifiable for ProxyRoute {
@@ -127,6 +134,7 @@ impl ProxyRoute {
             plugins: Vec::with_capacity(route.plugins.len()),
             plugin_name_index: Vec::new(),
             cached_executor: None,
+            service_executor: ArcSwapOption::empty(),
         };
 
         // Configure upstream
@@ -155,9 +163,7 @@ impl ProxyRoute {
             let executor = if proxy_route.plugins.is_empty() {
                 ProxyPluginExecutor::default_shared()
             } else {
-                Arc::new(ProxyPluginExecutor {
-                    plugins: proxy_route.plugins.clone(),
-                })
+                Arc::new(ProxyPluginExecutor::new(proxy_route.plugins.clone()))
             };
             proxy_route.cached_executor = Some(executor);
         }
@@ -201,6 +207,12 @@ impl RouteContext for ProxyRoute {
         self.inner.service_id.as_deref()
     }
 
+    fn uri_template(&self) -> Option<&str> {
+        // A route with multiple URIs does not retain which alternative matched;
+        // use runtime normalization for those to avoid assigning the wrong label.
+        self.inner.uri.as_deref()
+    }
+
     fn select_http_peer(&self, session: &mut Session) -> ProxyResult<Box<HttpPeer>> {
         let upstream = self.resolve_upstream().ok_or_else(|| {
             ProxyError::UpstreamSelection(
@@ -231,39 +243,45 @@ impl RouteContext for ProxyRoute {
             return executor.clone();
         }
 
-        // Fetch current service (if configured)
+        // Fetch the published service. Cache validity is tied to the Arc identity: dynamic
+        // configuration updates publish a new ProxyService Arc, so a changed service rebuilds
+        // the merged executor once and subsequent requests reuse it.
         let service = self.inner.service_id.as_deref().and_then(service_fetch);
 
-        // Slow path: build executor and update cache
         let Some(current_service) = service else {
             // No service found (might be deleted or misconfigured)
             // Fallback to route-only plugins
             let executor = if self.plugins.is_empty() {
                 ProxyPluginExecutor::default_shared()
             } else {
-                Arc::new(ProxyPluginExecutor {
-                    plugins: self.plugins.clone(),
-                })
+                Arc::new(ProxyPluginExecutor::new(self.plugins.clone()))
             };
             return executor;
         };
 
-        // Dynamically merge route and service plugins
-        let service_plugins: &[Arc<dyn ProxyPlugin>] = current_service.plugins.as_slice();
+        if let Some(cached) = self.service_executor.load_full() {
+            if Arc::ptr_eq(&cached.service, &current_service) {
+                return cached.executor.clone();
+            }
+        }
 
         let merged_plugins = merge_route_and_service_plugins(
             &self.plugins,
-            service_plugins,
+            current_service.plugins.as_slice(),
             &self.plugin_name_index,
         );
-
-        if merged_plugins.is_empty() {
+        let executor = if merged_plugins.is_empty() {
             ProxyPluginExecutor::default_shared()
         } else {
-            Arc::new(ProxyPluginExecutor {
-                plugins: merged_plugins,
-            })
-        }
+            Arc::new(ProxyPluginExecutor::new(merged_plugins))
+        };
+
+        self.service_executor
+            .store(Some(Arc::new(ServicePluginExecutor {
+                service: current_service,
+                executor: executor.clone(),
+            })));
+        executor
     }
 
     fn resolve_upstream(&self) -> Option<Arc<dyn UpstreamSelector>> {
@@ -314,13 +332,20 @@ impl MatchEntry {
     /// Converts host to reversed matchit-compatible pattern.
     /// Wildcard "*.example.com" becomes "moc.elpmaxe.{*subdomain}".
     /// Exact "api.example.com" becomes "moc.elpmaxe.ipa".
+    fn reverse_ascii_lowercase(input: &str) -> String {
+        let mut reversed = String::with_capacity(input.len());
+        for ch in input.chars().rev() {
+            reversed.push(ch.to_ascii_lowercase());
+        }
+        reversed
+    }
+
     fn reverse_host(host: &str) -> String {
-        let host = host.to_ascii_lowercase();
         if let Some(domain_part) = host.strip_prefix("*") {
-            let reversed_domain: String = domain_part.chars().rev().collect();
+            let reversed_domain = Self::reverse_ascii_lowercase(domain_part);
             format!("{reversed_domain}{{*subdomain}}")
         } else {
-            host.chars().rev().collect()
+            Self::reverse_ascii_lowercase(host)
         }
     }
 
@@ -417,8 +442,7 @@ impl MatchEntry {
         if let Some(host_str) = host.filter(|h| !h.is_empty()) {
             // Just reverse the host and let matchit handle the matching
             // matchit will automatically match "moc.elpmaxe.ipa" against "moc.elpmaxe.{*subdomain}"
-            let normalized_host = host_str.to_ascii_lowercase();
-            let reversed_host = normalized_host.chars().rev().collect::<String>();
+            let reversed_host = Self::reverse_ascii_lowercase(host_str);
             if let Ok(v) = self.host_uris.at(&reversed_host) {
                 if let Some(result) = Self::match_uri_method(v.value, uri, method) {
                     return Some(result);
@@ -437,23 +461,22 @@ impl MatchEntry {
         method: &str,
     ) -> RouteMatchResult {
         if let Ok(v) = match_router.at(uri) {
-            // Convert params to Vec - more efficient for small number of params (typical case)
-            let params: Vec<(String, String)> = v
-                .params
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect();
+            let route = v.value.iter().find(|route| {
+                route.inner.methods.is_empty()
+                    || route
+                        .inner
+                        .methods
+                        .iter()
+                        .any(|configured| *configured == method)
+            })?;
 
-            for route in v.value.iter() {
-                if route.inner.methods.is_empty() {
-                    return Some((params, route.clone()));
-                }
-
-                // Match method
-                if route.inner.methods.iter().any(|m| *m == method) {
-                    return Some((params, route.clone()));
-                }
-            }
+            let params = (!v.params.is_empty()).then(|| {
+                v.params
+                    .iter()
+                    .map(|(key, value)| (key.to_string(), value.to_string()))
+                    .collect()
+            });
+            return Some((params.unwrap_or_default(), route.clone()));
         }
         None
     }
@@ -553,7 +576,7 @@ mod tests {
     fn test_host_matching_patterns() {
         // Test that incoming hosts are simply reversed for matching
         let incoming_host = "api.example.com";
-        let reversed_host: String = incoming_host.chars().rev().collect();
+        let reversed_host: String = incoming_host.to_ascii_lowercase().chars().rev().collect();
         assert_eq!(reversed_host, "moc.elpmaxe.ipa");
 
         // Wildcard pattern "*.example.com" becomes "moc.elpmaxe.{*subdomain}"
@@ -562,6 +585,13 @@ mod tests {
 
         // matchit should be able to match "moc.elpmaxe.ipa" against "moc.elpmaxe.{*subdomain}"
         // This test just verifies our pattern generation is correct
+    }
+
+    #[test]
+    fn test_host_reversal_preserves_utf8_characters() {
+        let host = "例子.测试";
+        let reversed = host.to_ascii_lowercase().chars().rev().collect::<String>();
+        assert_eq!(reversed, MatchEntry::reverse_host(host));
     }
 
     #[test]

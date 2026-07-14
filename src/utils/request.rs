@@ -1,5 +1,5 @@
-use http::HeaderName;
-use once_cell::sync::Lazy;
+use std::{borrow::Cow, net::IpAddr};
+
 use pingora_http::RequestHeader;
 use pingora_proxy::Session;
 
@@ -9,56 +9,56 @@ use crate::config::UpstreamHashOn;
 ///
 /// Selects a value from the request (variable, header, or cookie) to be used,
 /// typically for consistent upstream hashing.
-pub fn request_selector_key(session: &mut Session, hash_on: &UpstreamHashOn, key: &str) -> String {
+pub fn request_selector_key<'a>(
+    session: &'a mut Session,
+    hash_on: &UpstreamHashOn,
+    key: &str,
+) -> Cow<'a, str> {
     match hash_on {
         UpstreamHashOn::VARS => handle_vars(session, key),
-        UpstreamHashOn::HEAD => get_req_header_value(session.req_header(), key)
-            .unwrap_or_default()
-            .to_string(),
-        UpstreamHashOn::COOKIE => get_cookie_value(session.req_header(), key)
-            .unwrap_or_default()
-            .to_string(),
+        UpstreamHashOn::HEAD => {
+            Cow::Borrowed(get_req_header_value(session.req_header(), key).unwrap_or_default())
+        }
+        UpstreamHashOn::COOKIE => {
+            Cow::Borrowed(get_cookie_value(session.req_header(), key).unwrap_or_default())
+        }
     }
 }
 
 /// Handles variable-based request selection by interpreting predefined variable names.
 ///
 /// Supports variables like request URI components, client/server addresses, and query arguments (`arg_*`).
-fn handle_vars(session: &mut Session, key: &str) -> String {
+fn handle_vars<'a>(session: &'a mut Session, key: &str) -> Cow<'a, str> {
     // Handle query arguments prefixed with "arg_"
     if let Some(name) = key.strip_prefix("arg_") {
-        return get_query_value(session.req_header(), name)
-            .unwrap_or_default()
-            .to_string();
+        return Cow::Borrowed(get_query_value(session.req_header(), name).unwrap_or_default());
     }
 
     // Handle predefined variable names
     match key {
-        "uri" => session.req_header().uri.path().to_string(),
-        "request_uri" => session.req_header().uri.path_and_query().map_or_else(
-            || session.req_header().uri.path().to_string(),
-            |pq| pq.to_string(),
-        ), // Fallback to path if no query
-        "query_string" => session
-            .req_header()
-            .uri
-            .query()
-            .unwrap_or_default()
-            .to_string(),
+        "uri" => Cow::Borrowed(session.req_header().uri.path()),
+        "request_uri" => Cow::Borrowed(
+            session
+                .req_header()
+                .uri
+                .path_and_query()
+                .map_or_else(|| session.req_header().uri.path(), |pq| pq.as_str()),
+        ),
+        "query_string" => Cow::Borrowed(session.req_header().uri.query().unwrap_or_default()),
         "remote_addr" => session
             .client_addr()
-            .map_or_else(|| "".to_string(), |addr| addr.to_string()),
+            .map_or_else(|| Cow::Borrowed(""), |addr| Cow::Owned(addr.to_string())),
         "remote_port" => session
             .client_addr()
             .and_then(|s| s.as_inet())
-            .map_or_else(|| "".to_string(), |i| i.port().to_string()),
+            .map_or_else(|| Cow::Borrowed(""), |i| Cow::Owned(i.port().to_string())),
         "server_addr" => session
             .server_addr()
-            .map_or_else(|| "".to_string(), |addr| addr.to_string()),
+            .map_or_else(|| Cow::Borrowed(""), |addr| Cow::Owned(addr.to_string())),
         // Add other variables here if needed
         _ => {
             log::debug!("Unsupported variable key for hashing: {key}");
-            "".to_string()
+            Cow::Borrowed("")
         }
     }
 }
@@ -199,52 +199,10 @@ pub fn get_request_host(header: &RequestHeader) -> Option<&str> {
     None
 }
 
-// Use http::header constants where available for better readability and type safety
-static HTTP_HEADER_X_FORWARDED_FOR: Lazy<HeaderName> =
-    Lazy::new(|| HeaderName::from_static("x-forwarded-for"));
-
-static HTTP_HEADER_X_REAL_IP: Lazy<HeaderName> = Lazy::new(|| HeaderName::from_static("x-real-ip"));
-
-/// Gets the client's apparent IP address.
-///
-/// Prefers the direct connection address for security (non-spoofable).
-/// Only uses proxy headers (`X-Forwarded-For`, `X-Real-IP`) as fallback.
-///
-/// **Security note**: Proxy headers can be spoofed by clients. For IP-based
-/// access control or rate limiting, use the direct connection address or validate
-/// proxy headers against a list of trusted proxy CIDRs.
-///
-/// Returns an empty string if no IP address can be determined.
-pub fn get_client_ip(session: &Session) -> String {
-    // 1. Prefer direct client address (non-spoofable)
-    if let Some(addr) = session.client_addr() {
-        if let Some(inet) = addr.as_inet() {
-            return inet.ip().to_string();
-        }
-    }
-
-    // 2. Fallback to X-Forwarded-For (can be spoofed)
-    if let Some(value) = session.get_header(HTTP_HEADER_X_FORWARDED_FOR.clone()) {
-        if let Ok(forwarded) = value.to_str() {
-            if let Some(ip) = forwarded.split(',').next() {
-                let trimmed_ip = ip.trim();
-                if !trimmed_ip.is_empty() {
-                    return trimmed_ip.to_string();
-                }
-            }
-        }
-    }
-
-    // 3. Fallback to X-Real-IP (can be spoofed)
-    if let Some(value) = session.get_header(HTTP_HEADER_X_REAL_IP.clone()) {
-        if let Ok(real_ip) = value.to_str() {
-            let trimmed_ip = real_ip.trim();
-            if !trimmed_ip.is_empty() {
-                return trimmed_ip.to_string();
-            }
-        }
-    }
-
-    log::debug!("Could not determine client IP address");
-    String::new()
+/// Returns the peer address without formatting it as a string.
+pub fn get_direct_client_ip(session: &Session) -> Option<IpAddr> {
+    session
+        .client_addr()
+        .and_then(|addr| addr.as_inet())
+        .map(|inet| inet.ip())
 }

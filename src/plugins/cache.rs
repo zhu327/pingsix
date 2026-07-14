@@ -27,6 +27,7 @@ pub const CTX_KEY_CACHE_SETTINGS: &str = "pingsix_cache_settings";
 pub struct CacheSettings {
     pub ttl: Duration,
     pub statuses: Arc<HashSet<u16>>,
+    /// Lowercase, trimmed Vary header names from config, pre-normalized at plugin creation.
     pub vary: Arc<Vec<String>>,
     pub hide_cache_headers: bool,
     pub max_file_size_bytes: usize,
@@ -157,11 +158,20 @@ pub fn create_cache_plugin(cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyPlugin>> 
         })
         .collect::<Result<Vec<_>>>()?;
 
+    let vary = Arc::new(
+        config
+            .vary
+            .iter()
+            .map(|h| h.trim().to_ascii_lowercase())
+            .filter(|h| !h.is_empty())
+            .collect(),
+    );
+
     // Pre-build cache settings at plugin creation to avoid per-request overhead
     let cache_settings = Arc::new(CacheSettings {
         ttl: Duration::from_secs(config.ttl),
         statuses,
-        vary: Arc::new(config.vary.clone()),
+        vary,
         hide_cache_headers: config.hide_cache_headers,
         max_file_size_bytes: config.max_file_size_bytes,
         stale_while_revalidate: config.stale_while_revalidate_secs.map(Duration::from_secs),

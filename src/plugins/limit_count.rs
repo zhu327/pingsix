@@ -147,8 +147,8 @@ impl ProxyPlugin for PluginRateLimit {
             return self.handle_missing_key(session, ctx).await;
         }
 
-        // Check rate limit (pass by reference to avoid clone)
-        let (is_limited, current_count, remaining) = self.check_rate_limit(&key);
+        // Check rate limit without forcing borrowed selector keys to allocate.
+        let (is_limited, current_count, remaining) = self.check_rate_limit(key.as_ref());
 
         if is_limited {
             return self
@@ -188,8 +188,8 @@ impl PluginRateLimit {
             }
             KeyMissingPolicy::Default => {
                 // Use a default key for all requests with missing keys
-                let default_key = "_default_rate_limit_key".to_string();
-                let (is_limited, current_count, remaining) = self.check_rate_limit(&default_key);
+                let (is_limited, current_count, remaining) =
+                    self.check_rate_limit("_default_rate_limit_key");
 
                 if is_limited {
                     self.handle_rate_limit(session, current_count, remaining)
@@ -202,8 +202,9 @@ impl PluginRateLimit {
     }
 
     /// Check if the request exceeds the rate limit and return detailed information
-    fn check_rate_limit(&self, key: &String) -> (bool, isize, isize) {
-        let current_count = self.rate.observe(key, 1);
+    fn check_rate_limit(&self, key: &str) -> (bool, isize, isize) {
+        // Rate::observe requires a sized hash key. Passing &&str keeps this allocation-free.
+        let current_count = self.rate.observe(&key, 1);
         let remaining = (self.config.count as isize) - current_count;
         let is_limited = current_count > self.config.count as isize;
 

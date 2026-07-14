@@ -102,9 +102,7 @@ impl EtcdConfigSync {
                 break;
             }
 
-            for event in response.events() {
-                self.handler.handle_event(event);
-            }
+            self.handler.handle_events(response.events());
         }
         Ok(())
     }
@@ -184,6 +182,15 @@ impl Service for EtcdConfigSync {
 
 pub trait EtcdEventHandler {
     fn handle_event(&self, event: &Event);
+
+    /// Apply all events from one etcd watch response. Implementations can
+    /// coalesce expensive derived-state rebuilds after the batch is complete.
+    fn handle_events(&self, events: &[Event]) {
+        for event in events {
+            self.handle_event(event);
+        }
+    }
+
     fn handle_list_response(&self, response: &GetResponse);
 }
 

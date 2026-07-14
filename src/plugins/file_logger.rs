@@ -155,78 +155,84 @@ impl LogFormat {
         for segment in &self.segments {
             match segment {
                 Segment::Static(text) => output.push_str(text),
-                Segment::Variable(var) => {
-                    let value = self.get_variable_value(var, session, e, ctx);
-                    output.push_str(&value);
-                }
+                Segment::Variable(var) => self.write_variable(&mut output, var, session, e, ctx),
             }
         }
 
         output
     }
 
-    /// Extract variable value - separated for better readability
-    fn get_variable_value(
+    /// Writes a variable directly into the final buffer to avoid a temporary
+    /// allocation for borrowed request fields.
+    fn write_variable(
         &self,
+        output: &mut String,
         var: &str,
         session: &mut Session,
         e: Option<&Error>,
         ctx: &mut ProxyContext,
-    ) -> String {
-        // Handle custom variables first
+    ) {
+        use std::fmt::Write;
+
         if let Some(custom_var_name) = var.strip_prefix("var_") {
-            return ctx.get_str(custom_var_name).unwrap_or("").to_string();
+            output.push_str(ctx.get_str(custom_var_name).unwrap_or(""));
+            return;
         }
 
-        // Handle built-in variables
         match var {
-            "request_method" => session.req_header().method.as_str().to_string(),
-            "uri" => session.req_header().uri.path().to_string(),
-            "query_string" => session
-                .req_header()
-                .uri
-                .query()
-                .unwrap_or_default()
-                .to_string(),
-            "http_host" => session
-                .req_header()
-                .uri
-                .host()
-                .unwrap_or_default()
-                .to_string(),
-            "request_time" => ctx.elapsed_ms().to_string(),
-            "http_user_agent" => request::get_req_header_value(session.req_header(), "user-agent")
-                .unwrap_or_default()
-                .to_string(),
-            "http_referer" => request::get_req_header_value(session.req_header(), "referer")
-                .unwrap_or_default()
-                .to_string(),
-            "remote_addr" => session
-                .client_addr()
-                .map(|addr| addr.to_string())
-                .unwrap_or_default(),
-            "remote_port" => session
-                .client_addr()
-                .and_then(|s| s.as_inet())
-                .map_or_else(|| "".to_string(), |i| i.port().to_string()),
-            "server_addr" => session
-                .server_addr()
-                .map_or_else(|| "".to_string(), |addr| addr.to_string()),
-            "status" => session
-                .response_written()
-                .map(|v| v.status.as_u16().to_string())
-                .unwrap_or_default(),
-            "server_protocol" => {
-                if session.is_http2() {
-                    "http/2".to_string()
-                } else {
-                    "http/1.1".to_string()
+            "request_method" => output.push_str(session.req_header().method.as_str()),
+            "uri" => output.push_str(session.req_header().uri.path()),
+            "query_string" => output.push_str(session.req_header().uri.query().unwrap_or_default()),
+            "http_host" => output.push_str(session.req_header().uri.host().unwrap_or_default()),
+            "request_time" => {
+                let _ = write!(output, "{}", ctx.elapsed_ms());
+            }
+            "http_user_agent" => output.push_str(
+                request::get_req_header_value(session.req_header(), "user-agent")
+                    .unwrap_or_default(),
+            ),
+            "http_referer" => output.push_str(
+                request::get_req_header_value(session.req_header(), "referer").unwrap_or_default(),
+            ),
+            "remote_addr" => {
+                if let Some(addr) = session.client_addr() {
+                    let _ = write!(output, "{addr}");
                 }
             }
-            "request_id" => ctx.request_id().unwrap_or("").to_string(),
-            "body_bytes_sent" => session.body_bytes_sent().to_string(),
-            "error" => e.map(|e| e.to_string()).unwrap_or_default(),
-            _ => "".to_string(),
+            "remote_port" => {
+                if let Some(port) = session
+                    .client_addr()
+                    .and_then(|addr| addr.as_inet())
+                    .map(|addr| addr.port())
+                {
+                    let _ = write!(output, "{port}");
+                }
+            }
+            "server_addr" => {
+                if let Some(addr) = session.server_addr() {
+                    let _ = write!(output, "{addr}");
+                }
+            }
+            "status" => {
+                if let Some(response) = session.response_written() {
+                    let _ = write!(output, "{}", response.status.as_u16());
+                }
+            }
+            "server_protocol" => output.push_str(if session.is_http2() {
+                "http/2"
+            } else {
+                "http/1.1"
+            }),
+            "request_id" => output.push_str(ctx.request_id().unwrap_or("")),
+            "body_bytes_sent" => {
+                let _ = write!(output, "{}", session.body_bytes_sent());
+            }
+            "error" => {
+                if let Some(error) = e {
+                    let _ = write!(output, "{error}");
+                }
+            }
+            _ => {}
         }
     }
 }
