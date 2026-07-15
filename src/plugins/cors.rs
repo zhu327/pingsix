@@ -68,9 +68,10 @@ impl PluginConfig {
     }
 
     fn validate(&self) -> Result<(), ValidationError> {
-        if self.allow_credential && self.allow_origins == "*" {
+        // Both "*" and "**" mean any origin; credentials cannot be combined with either.
+        if self.allow_credential && (self.allow_origins == "*" || self.allow_origins == "**") {
             return Err(ValidationError::new(
-                "allow_credential cannot be used with allow_origins='*'",
+                "allow_credential cannot be used with allow_origins='*' or '**'",
             ));
         }
         Ok(())
@@ -242,7 +243,17 @@ impl PluginCors {
         resp: &mut ResponseHeader,
         origin: &str,
     ) -> Result<()> {
-        resp.insert_header(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin)?;
+        // Without credentials, "*" may be returned literally; otherwise reflect Origin.
+        let reflecting_origin = if !self.config.allow_credential
+            && (self.config.allow_origins == "*" || self.config.allow_origins == "**")
+        {
+            resp.insert_header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")?;
+            false
+        } else {
+            resp.insert_header(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin)?;
+            true
+        };
+
         if self.config.allow_credential {
             resp.insert_header(header::ACCESS_CONTROL_ALLOW_CREDENTIALS, "true")?;
         }
@@ -264,6 +275,7 @@ impl PluginCors {
         } else {
             self.config.allow_headers.clone()
         };
+        let dynamic_allow_headers = self.config.allow_headers == "**";
         resp.insert_header(header::ACCESS_CONTROL_ALLOW_HEADERS, headers)?;
 
         resp.insert_header(
@@ -275,8 +287,11 @@ impl PluginCors {
             resp.insert_header(header::ACCESS_CONTROL_EXPOSE_HEADERS, expose)?;
         }
 
-        if self.config.allow_origins != "*" {
-            resp.insert_header(header::VARY, "Origin")?;
+        if reflecting_origin {
+            merge_vary(resp, "Origin")?;
+        }
+        if dynamic_allow_headers {
+            merge_vary(resp, "Access-Control-Request-Headers")?;
         }
 
         Ok(())
@@ -325,5 +340,83 @@ impl ProxyPlugin for PluginCors {
     ) -> Result<()> {
         self.apply_cors_headers(session, upstream_response)?;
         Ok(())
+    }
+}
+
+/// Merge a vary token into an existing Vary header without duplicates.
+fn merge_vary(resp: &mut ResponseHeader, name: &str) -> Result<()> {
+    let mut values: Vec<String> = resp
+        .headers
+        .get_all(header::VARY)
+        .iter()
+        .flat_map(|v| v.to_str().unwrap_or("").split(','))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect();
+
+    let has_name = values.iter().any(|v| v.eq_ignore_ascii_case(name));
+    if !has_name {
+        values.push(name.to_string());
+    }
+
+    let mut seen = HashSet::new();
+    values.retain(|v| seen.insert(v.to_ascii_lowercase()));
+
+    resp.insert_header(header::VARY, values.join(", "))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pingora_http::ResponseHeader;
+
+    #[test]
+    fn credentials_rejected_with_double_star() {
+        let cfg = PluginConfig {
+            allow_origins: "**".into(),
+            allow_credential: true,
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn credentials_rejected_with_single_star() {
+        let cfg = PluginConfig {
+            allow_origins: "*".into(),
+            allow_credential: true,
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn merge_vary_origin_preserves_existing_and_dedups() {
+        let mut resp = ResponseHeader::build(http::StatusCode::OK, None).unwrap();
+        resp.insert_header(header::VARY, "Accept-Encoding").unwrap();
+        merge_vary(&mut resp, "Origin").unwrap();
+        let vary = resp.headers.get(header::VARY).unwrap().to_str().unwrap();
+        assert!(vary.to_ascii_lowercase().contains("accept-encoding"));
+        assert!(vary.to_ascii_lowercase().contains("origin"));
+
+        merge_vary(&mut resp, "Origin").unwrap();
+        let vary2 = resp.headers.get(header::VARY).unwrap().to_str().unwrap();
+        assert_eq!(
+            vary2.to_ascii_lowercase().matches("origin").count(),
+            1,
+            "Origin must not be duplicated: {vary2}"
+        );
+    }
+
+    #[test]
+    fn merge_vary_adds_access_control_request_headers() {
+        let mut resp = ResponseHeader::build(http::StatusCode::OK, None).unwrap();
+        merge_vary(&mut resp, "Access-Control-Request-Headers").unwrap();
+        let vary = resp.headers.get(header::VARY).unwrap().to_str().unwrap();
+        assert!(vary
+            .to_ascii_lowercase()
+            .contains("access-control-request-headers"));
     }
 }

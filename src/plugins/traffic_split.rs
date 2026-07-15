@@ -4,12 +4,14 @@ use pingora_proxy::Session;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 use validator::Validate;
 
 use crate::config::{Upstream, UpstreamHashOn};
-use crate::core::{ProxyContext, ProxyError, ProxyPlugin, ProxyResult, UpstreamSelector};
-use crate::proxy::upstream::{upstream_fetch, ProxyUpstream};
+use crate::core::{
+    HealthCheckSpec, ProxyContext, ProxyError, ProxyPlugin, ProxyResult, UpstreamSelector,
+};
+use crate::proxy::upstream::ProxyUpstream;
 use crate::utils::request::request_selector_key;
 
 pub const PLUGIN_NAME: &str = "traffic-split";
@@ -18,7 +20,7 @@ const PRIORITY: i32 = 966;
 #[derive(Debug, Serialize, Deserialize, Validate)]
 struct WeightedUpstream {
     pub upstream_id: Option<String>,
-    pub upstream: Option<Upstream>, // Inline definition
+    pub upstream: Option<Upstream>,
     #[validate(range(min = 0))]
     pub weight: u32,
 }
@@ -26,7 +28,7 @@ struct WeightedUpstream {
 #[derive(Debug, Serialize, Deserialize, Validate)]
 struct MatchRule {
     #[serde(default)]
-    pub vars: Vec<Vec<String>>, // [["arg_name", "==", "val"], ["http_x", "!=", "reg"]]
+    pub vars: Vec<Vec<String>>,
     #[validate(nested)]
     pub weighted_upstreams: Vec<WeightedUpstream>,
 }
@@ -37,10 +39,22 @@ struct PluginConfig {
     pub rules: Vec<MatchRule>,
 }
 
+/// Weighted target after compilation. `PassThrough` keeps the route default upstream.
+#[derive(Clone)]
+enum WeightedTarget {
+    Upstream(Arc<dyn UpstreamSelector>),
+    PassThrough,
+}
+
+struct CompiledRule {
+    targets: Vec<(u32, WeightedTarget)>,
+    total_weight: u64,
+}
+
 pub struct PluginTrafficSplit {
     config: PluginConfig,
-    // Pre-compute inline upstream definitions for faster lookups
-    rule_upstreams: Vec<Vec<Option<Arc<ProxyUpstream>>>>,
+    rules: Vec<CompiledRule>,
+    health_check_specs: Vec<HealthCheckSpec>,
 }
 
 #[async_trait]
@@ -52,14 +66,44 @@ impl ProxyPlugin for PluginTrafficSplit {
         PRIORITY
     }
 
+    fn health_check_targets(
+        &self,
+    ) -> Vec<(
+        String,
+        Arc<dyn pingora_core::services::background::BackgroundService + Send + Sync>,
+    )> {
+        self.health_check_specs
+            .iter()
+            .map(|spec| (spec.key.clone(), spec.service.clone()))
+            .collect()
+    }
+
+    fn health_check_specs(&self) -> Option<Vec<HealthCheckSpec>> {
+        Some(
+            self.health_check_specs
+                .iter()
+                .map(|spec| HealthCheckSpec {
+                    key: spec.key.clone(),
+                    fingerprint: spec.fingerprint,
+                    service: spec.service.clone(),
+                })
+                .collect(),
+        )
+    }
+
     async fn request_filter(&self, session: &mut Session, ctx: &mut ProxyContext) -> Result<bool> {
         for (rule_idx, rule) in self.config.rules.iter().enumerate() {
             if self.match_vars(session, &rule.vars) {
-                // Rule matched; run weighted upstream selection
-                if let Some(selected_ups) = self.pick_upstream(rule_idx, &rule.weighted_upstreams) {
-                    ctx.upstream_override = Some(selected_ups);
+                match self.pick_upstream(rule_idx) {
+                    Some(WeightedTarget::Upstream(selected)) => {
+                        ctx.upstream_override = Some(selected);
+                    }
+                    Some(WeightedTarget::PassThrough) => {
+                        ctx.upstream_override = None;
+                    }
+                    None => {}
                 }
-                return Ok(false); // Stop at the first matching rule
+                return Ok(false);
             }
         }
         Ok(false)
@@ -67,7 +111,6 @@ impl ProxyPlugin for PluginTrafficSplit {
 }
 
 impl PluginTrafficSplit {
-    // Variable matching logic
     fn match_vars(&self, session: &mut Session, vars: &[Vec<String>]) -> bool {
         if vars.is_empty() {
             return true;
@@ -81,8 +124,6 @@ impl PluginTrafficSplit {
             let op = &v[1];
             let val = &v[2];
 
-            // Reuse the existing selector helpers for extracting values
-            // If the name starts with http_, read from headers, otherwise read from vars.
             let actual_val = if let Some(header_name) = var_name.strip_prefix("http_") {
                 request_selector_key(session, &UpstreamHashOn::HEAD, header_name)
             } else {
@@ -106,83 +147,263 @@ impl PluginTrafficSplit {
         true
     }
 
-    fn pick_upstream(
-        &self,
-        rule_idx: usize,
-        upstreams: &[WeightedUpstream],
-    ) -> Option<Arc<dyn UpstreamSelector>> {
-        let total_weight: u32 = upstreams.iter().map(|u| u.weight).sum();
-        if total_weight == 0 {
+    fn pick_upstream(&self, rule_idx: usize) -> Option<WeightedTarget> {
+        let rule = &self.rules[rule_idx];
+        if rule.total_weight == 0 {
             return None;
         }
 
         let mut rng = rand::thread_rng();
-        let mut n = rng.gen_range(0..total_weight);
+        let mut n = rng.gen_range(0..rule.total_weight);
 
-        for (i, ups_cfg) in upstreams.iter().enumerate() {
-            if n < ups_cfg.weight {
-                // 1. Use the referenced upstream when upstream_id is present
-                if let Some(ref id) = ups_cfg.upstream_id {
-                    return upstream_fetch(id).map(|u| u as Arc<dyn UpstreamSelector>);
-                }
-                // 2. Fall back to the pre-created inline upstream for this rule
-                if let Some(ref inline_ups) = self.rule_upstreams[rule_idx][i] {
-                    return Some(inline_ups.clone() as Arc<dyn UpstreamSelector>);
-                }
-                // 3. If weight > 0 but no upstream declared, continue with the route's upstream
-                return None;
+        for (weight, target) in &rule.targets {
+            let w = u64::from(*weight);
+            if n < w {
+                return Some(target.clone());
             }
-            n -= ups_cfg.weight;
+            n -= w;
         }
         None
     }
 }
 
 pub fn create_traffic_split_plugin(cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyPlugin>> {
+    // Admin / registry path: structural validation only. Named upstream existence is
+    // checked later by CandidateSnapshot against the same-version resource graph.
+    create_traffic_split_plugin_with_upstreams(cfg, &HashMap::new())
+}
+
+/// Validate traffic-split JSON without resolving named upstreams (Admin pre-check).
+pub fn validate_traffic_split_config(cfg: &JsonValue) -> ProxyResult<()> {
+    let config: PluginConfig = serde_json::from_value(cfg.clone())
+        .map_err(|e| ProxyError::Serialization(e.to_string()))?;
+    config.validate()?;
+    if config.rules.is_empty() {
+        return Err(ProxyError::Plugin(
+            "Traffic-split plugin requires at least one rule".to_string(),
+        ));
+    }
+    for (rule_idx, rule) in config.rules.iter().enumerate() {
+        if rule.weighted_upstreams.is_empty() {
+            return Err(ProxyError::Plugin(format!(
+                "Rule {rule_idx} must have at least one weighted upstream"
+            )));
+        }
+        let total_weight = rule
+            .weighted_upstreams
+            .iter()
+            .try_fold(0_u64, |acc, item| {
+                acc.checked_add(u64::from(item.weight)).ok_or_else(|| {
+                    ProxyError::Configuration("traffic-split weight overflow".into())
+                })
+            })?;
+        if total_weight == 0 {
+            return Err(ProxyError::Plugin(format!(
+                "Rule {rule_idx} must have total weight greater than 0"
+            )));
+        }
+        for wu in &rule.weighted_upstreams {
+            if wu.upstream_id.is_some() && wu.upstream.is_some() {
+                return Err(ProxyError::Configuration(
+                    "traffic-split target cannot set both upstream_id and upstream".into(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn create_traffic_split_plugin_with_upstreams(
+    cfg: JsonValue,
+    upstreams: &HashMap<String, Arc<ProxyUpstream>>,
+) -> ProxyResult<Arc<dyn ProxyPlugin>> {
     let config: PluginConfig =
         serde_json::from_value(cfg).map_err(|e| ProxyError::Serialization(e.to_string()))?;
 
-    // Validate configuration using validator crate
     config.validate()?;
 
-    // Additional business logic validation
     if config.rules.is_empty() {
         return Err(ProxyError::Plugin(
             "Traffic-split plugin requires at least one rule".to_string(),
         ));
     }
 
-    for (idx, rule) in config.rules.iter().enumerate() {
+    let mut rules = Vec::with_capacity(config.rules.len());
+    let mut health_check_specs = Vec::new();
+
+    for (rule_idx, rule) in config.rules.iter().enumerate() {
         if rule.weighted_upstreams.is_empty() {
             return Err(ProxyError::Plugin(format!(
-                "Rule {idx} must have at least one weighted upstream"
+                "Rule {rule_idx} must have at least one weighted upstream"
             )));
         }
 
-        let total_weight: u32 = rule.weighted_upstreams.iter().map(|u| u.weight).sum();
+        let total_weight = rule
+            .weighted_upstreams
+            .iter()
+            .try_fold(0_u64, |acc, item| {
+                acc.checked_add(u64::from(item.weight)).ok_or_else(|| {
+                    ProxyError::Configuration("traffic-split weight overflow".into())
+                })
+            })?;
+
         if total_weight == 0 {
             return Err(ProxyError::Plugin(format!(
-                "Rule {idx} must have total weight greater than 0"
+                "Rule {rule_idx} must have total weight greater than 0"
             )));
         }
-    }
 
-    let mut rule_upstreams = Vec::new();
-    for rule in &config.rules {
-        let mut ups_list = Vec::new();
-        for wu in &rule.weighted_upstreams {
-            if let Some(ref inline) = wu.upstream {
-                let p_ups = ProxyUpstream::new_with_shared_health_check(inline.clone())?;
-                ups_list.push(Some(Arc::new(p_ups)));
-            } else {
-                ups_list.push(None);
+        let mut targets = Vec::with_capacity(rule.weighted_upstreams.len());
+        for (upstream_idx, wu) in rule.weighted_upstreams.iter().enumerate() {
+            if wu.upstream_id.is_some() && wu.upstream.is_some() {
+                return Err(ProxyError::Configuration(
+                    "traffic-split target cannot set both upstream_id and upstream".into(),
+                ));
             }
+            let target = if let Some(id) = wu.upstream_id.as_deref() {
+                WeightedTarget::Upstream(upstreams.get(id).cloned().ok_or_else(|| {
+                    ProxyError::Configuration(format!(
+                        "Traffic-split references missing upstream '{id}'"
+                    ))
+                })? as Arc<dyn UpstreamSelector>)
+            } else if let Some(ref inline) = wu.upstream {
+                let upstream = Arc::new(ProxyUpstream::build(inline.clone())?);
+                health_check_specs.push(HealthCheckSpec {
+                    key: format!("traffic-split/{rule_idx}/{upstream_idx}"),
+                    fingerprint: crate::proxy::runtime::fingerprint_upstream_for_health_check(
+                        &upstream.inner,
+                    ),
+                    service: upstream.health_check_service(),
+                });
+                WeightedTarget::Upstream(upstream as Arc<dyn UpstreamSelector>)
+            } else {
+                WeightedTarget::PassThrough
+            };
+            targets.push((wu.weight, target));
         }
-        rule_upstreams.push(ups_list);
+
+        rules.push(CompiledRule {
+            targets,
+            total_weight,
+        });
     }
 
     Ok(Arc::new(PluginTrafficSplit {
         config,
-        rule_upstreams,
+        rules,
+        health_check_specs,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{SelectionType, UpstreamHashOn, UpstreamPassHost, UpstreamScheme};
+
+    fn sample_upstream(id: &str) -> Upstream {
+        let mut nodes = HashMap::new();
+        nodes.insert("127.0.0.1:8080".into(), 1);
+        Upstream {
+            id: id.into(),
+            retries: None,
+            retry_timeout: None,
+            timeout: None,
+            nodes,
+            r#type: SelectionType::RoundRobin,
+            checks: None,
+            hash_on: UpstreamHashOn::VARS,
+            key: "uri".into(),
+            scheme: UpstreamScheme::HTTP,
+            pass_host: UpstreamPassHost::PASS,
+            upstream_host: None,
+            tls: None,
+        }
+    }
+
+    #[test]
+    fn pass_through_target_is_allowed() {
+        let cfg = serde_json::json!({
+            "rules": [{
+                "weighted_upstreams": [
+                    { "weight": 1 },
+                    { "upstream_id": "u1", "weight": 1 }
+                ]
+            }]
+        });
+        let mut upstreams = HashMap::new();
+        upstreams.insert(
+            "u1".into(),
+            Arc::new(ProxyUpstream::build(sample_upstream("u1")).unwrap()),
+        );
+        let plugin = create_traffic_split_plugin_with_upstreams(cfg, &upstreams).unwrap();
+        let specs = plugin.health_check_specs().unwrap();
+        assert!(specs.is_empty());
+    }
+
+    #[test]
+    fn large_weights_do_not_wrap_like_u32_sum() {
+        // Summing as u32 would wrap u32::MAX + 1 to 0; u64 checked path accepts this.
+        let cfg = serde_json::json!({
+            "rules": [{
+                "weighted_upstreams": [
+                    { "upstream_id": "u1", "weight": u32::MAX },
+                    { "upstream_id": "u1", "weight": 1 }
+                ]
+            }]
+        });
+        let mut upstreams = HashMap::new();
+        upstreams.insert(
+            "u1".into(),
+            Arc::new(ProxyUpstream::build(sample_upstream("u1")).unwrap()),
+        );
+        assert!(create_traffic_split_plugin_with_upstreams(cfg, &upstreams).is_ok());
+    }
+
+    #[test]
+    fn zero_total_weight_is_rejected() {
+        let cfg = serde_json::json!({
+            "rules": [{
+                "weighted_upstreams": [
+                    { "weight": 0 },
+                    { "upstream_id": "u1", "weight": 0 }
+                ]
+            }]
+        });
+        let mut upstreams = HashMap::new();
+        upstreams.insert(
+            "u1".into(),
+            Arc::new(ProxyUpstream::build(sample_upstream("u1")).unwrap()),
+        );
+        assert!(create_traffic_split_plugin_with_upstreams(cfg, &upstreams).is_err());
+    }
+
+    #[test]
+    fn missing_named_upstream_is_rejected() {
+        let cfg = serde_json::json!({
+            "rules": [{
+                "weighted_upstreams": [
+                    { "upstream_id": "missing", "weight": 1 }
+                ]
+            }]
+        });
+        let upstreams = HashMap::new();
+        assert!(create_traffic_split_plugin_with_upstreams(cfg, &upstreams).is_err());
+    }
+
+    #[test]
+    fn dual_upstream_id_and_inline_is_rejected() {
+        let cfg = serde_json::json!({
+            "rules": [{
+                "weighted_upstreams": [{
+                    "upstream_id": "u1",
+                    "upstream": {
+                        "nodes": { "127.0.0.1:8080": 1 },
+                        "type": "roundrobin"
+                    },
+                    "weight": 1
+                }]
+            }]
+        });
+        assert!(validate_traffic_split_config(&cfg).is_err());
+    }
 }

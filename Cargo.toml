@@ -2,6 +2,7 @@
 name = "pingsix"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.88"
 
 [dependencies]
 arc-swap = "1.7.1"

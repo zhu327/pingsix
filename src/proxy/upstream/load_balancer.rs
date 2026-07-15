@@ -1,9 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
-use dashmap::DashMap;
+use futures::FutureExt;
 use http::Uri;
-use log::info;
-use once_cell::sync::Lazy;
 use pingora::services::background::background_service;
 use pingora_core::upstreams::peer::HttpPeer;
 use pingora_error::Error;
@@ -19,12 +17,11 @@ use pingora_proxy::Session;
 
 use crate::{
     config::{self, Identifiable},
-    core::{ErrorContext, ProxyError, ProxyResult, UpstreamSelector},
-    proxy::MapOperations,
+    core::{ProxyError, ProxyResult, UpstreamSelector},
     utils::request::request_selector_key,
 };
 
-use super::{discovery::HybridDiscovery, health_check::SHARED_HEALTH_CHECK_SERVICE};
+use super::discovery::HybridDiscovery;
 
 /// Runs a closure over the inner LB for any SelectionLB variant, eliminating repetitive match arms.
 macro_rules! with_lb {
@@ -36,17 +33,6 @@ macro_rules! with_lb {
             SelectionLB::Ketama($lb_var) => $body,
         }
     };
-}
-
-/// Fetches an upstream by its ID.
-pub fn upstream_fetch(id: &str) -> Option<Arc<ProxyUpstream>> {
-    match UPSTREAM_MAP.get(id) {
-        Some(upstream) => Some(upstream.value().clone()),
-        None => {
-            log::debug!("Upstream '{id}' not found in cache");
-            None
-        }
-    }
 }
 
 /// Proxy load balancer.
@@ -68,8 +54,8 @@ impl Identifiable for ProxyUpstream {
 }
 
 impl ProxyUpstream {
-    /// Creates a ProxyUpstream that uses the shared health check service
-    pub fn new_with_shared_health_check(mut upstream: config::Upstream) -> ProxyResult<Self> {
+    /// Build an upstream without changing the global health-check registry.
+    pub(crate) fn build(mut upstream: config::Upstream) -> ProxyResult<Self> {
         // Auto-generate upstream ID if empty (for inline upstreams in route, service, traffic-split)
         if upstream.id.is_empty() {
             upstream.id = format!("inline_{}", uuid::Uuid::new_v4());
@@ -80,50 +66,22 @@ impl ProxyUpstream {
             ProxyError::Configuration(format!("Failed to create load balancer: {e}"))
         })?;
 
-        let mut proxy_upstream = ProxyUpstream {
+        Ok(ProxyUpstream {
             inner: upstream,
             lb,
-        };
-
-        // Register with shared health check service
-        proxy_upstream
-            .register_health_check()
-            .with_context(&format!(
-                "Failed to register health check for upstream '{}'",
-                proxy_upstream.inner.id
-            ))?;
-
-        Ok(proxy_upstream)
+        })
     }
 
-    /// Register health check with shared service
-    fn register_health_check(&mut self) -> ProxyResult<()> {
-        let load_balancer: Arc<
-            dyn pingora_core::services::background::BackgroundService + Send + Sync,
-        > = with_lb!(&self.lb, |lb| lb.upstreams.clone());
-
-        let upstream_id = self.inner.id.clone();
-
-        // Register with shared health check service
-        SHARED_HEALTH_CHECK_SERVICE
-            .register_upstream(upstream_id.clone(), load_balancer)
-            .map_err(|e| {
-                ProxyError::HealthCheck(format!("Failed to register health check: {e}"))
-            })?;
-
-        log::debug!(
-            "Registered upstream '{}' to shared health check service",
-            self.inner.id
-        );
-
-        Ok(())
+    pub(crate) fn health_check_service(
+        &self,
+    ) -> Arc<dyn pingora_core::services::background::BackgroundService + Send + Sync> {
+        with_lb!(&self.lb, |lb| lb.upstreams.clone())
     }
 
-    /// Stop health check service for this upstream
-    fn stop_health_check(&mut self) {
-        let upstream_id = self.id();
-        SHARED_HEALTH_CHECK_SERVICE.unregister_upstream(upstream_id);
-        info!("Unregistered upstream '{upstream_id}' from shared health check service");
+    /// Test helper: select a backend without a full proxy session.
+    #[cfg(test)]
+    pub(crate) fn select_backend_for_test(&self) -> Option<Backend> {
+        with_lb!(&self.lb, |lb| lb.upstreams.select(b"", 256))
     }
 
     /// Sets the timeout for an `HttpPeer`.
@@ -139,13 +97,6 @@ impl ProxyUpstream {
             p.options.read_timeout = Some(Duration::from_secs(read));
             p.options.write_timeout = Some(Duration::from_secs(send));
         }
-    }
-}
-
-impl Drop for ProxyUpstream {
-    /// Stop health check service when upstream is dropped
-    fn drop(&mut self) {
-        self.stop_health_check();
     }
 }
 
@@ -263,7 +214,56 @@ where
             background_service(&format!("health check for {}", upstream.id), upstreams);
         let upstreams = background.task();
 
+        // Discover backends before the LB is published. Pingora's Backends start empty;
+        // without this, a newly published runtime can select nothing until the HC task
+        // runs its first update(). Static discovery completes via now_or_never; DNS
+        // discovery runs on a helper thread so we never nest block_on inside Tokio.
+        eager_discover_backends(&upstreams, &upstream.id)?;
+
         Ok(Self { upstreams })
+    }
+}
+
+fn eager_discover_backends<BS>(lb: &Arc<LoadBalancer<BS>>, upstream_id: &str) -> ProxyResult<()>
+where
+    BS: BackendSelection + Send + Sync + 'static,
+    BS::Iter: BackendIter,
+{
+    match lb.update().now_or_never() {
+        Some(Ok(())) => Ok(()),
+        Some(Err(e)) => Err(ProxyError::Configuration(format!(
+            "Upstream '{upstream_id}' discovery failed: {e}"
+        ))),
+        None => {
+            let lb = lb.clone();
+            let id = upstream_id.to_string();
+            std::thread::Builder::new()
+                .name(format!("upstream-discover-{id}"))
+                .spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(|e| {
+                            ProxyError::Configuration(format!(
+                                "Failed to create discovery runtime for upstream '{id}': {e}"
+                            ))
+                        })?;
+                    rt.block_on(lb.update()).map_err(|e| {
+                        ProxyError::Configuration(format!("Upstream '{id}' discovery failed: {e}"))
+                    })
+                })
+                .map_err(|e| {
+                    ProxyError::Configuration(format!(
+                        "Failed to spawn discovery for upstream '{upstream_id}': {e}"
+                    ))
+                })?
+                .join()
+                .map_err(|_| {
+                    ProxyError::Configuration(format!(
+                        "Discovery thread panicked for upstream '{upstream_id}'"
+                    ))
+                })?
+        }
     }
 }
 
@@ -362,34 +362,4 @@ impl From<config::HealthCheck> for Box<HttpHealthCheck> {
         // Return the Boxed health check
         Box::new(health_check)
     }
-}
-
-// Define a global upstream map, initialized lazily
-pub static UPSTREAM_MAP: Lazy<DashMap<String, Arc<ProxyUpstream>>> = Lazy::new(DashMap::new);
-
-/// Loads upstreams from the given configuration.
-pub fn load_static_upstreams(config: &config::Config) -> ProxyResult<()> {
-    // Collect all ProxyUpstream instances into a vector.
-    let proxy_upstreams: Vec<Arc<ProxyUpstream>> = config
-        .upstreams
-        .iter()
-        .map(|upstream| {
-            log::debug!("Configuring upstream: {}", upstream.id);
-            match ProxyUpstream::new_with_shared_health_check(upstream.clone()) {
-                Ok(proxy_upstream) => Ok(Arc::new(proxy_upstream)),
-                Err(e) => {
-                    log::error!("Failed to configure upstream {}: {}", upstream.id, e);
-                    Err(e)
-                }
-            }
-        })
-        .collect::<ProxyResult<Vec<_>>>()?;
-
-    let upstream_count = proxy_upstreams.len();
-
-    // Insert all ProxyUpstream instances into the global map.
-    UPSTREAM_MAP.reload_resources(proxy_upstreams);
-
-    log::info!("Loaded {upstream_count} upstreams");
-    Ok(())
 }

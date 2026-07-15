@@ -176,20 +176,18 @@ pingsix:
 
 #### Hot Reload & Atomic Resource Swaps
 
-When etcd pushes an update the watcher pipeline performs the following steps:
+List, watch, and reconnect all share one control-plane path:
 
-1. Deserialize the new resource set (routes, upstreams, services, rules, SSLs) in-memory.
-2. Validate IDs and plugin payloads exactly the same way as the bootstrap path.
-3. Swap the active data structure via `ArcSwap::store` (`reload_resources()` on each registry).
-   Readers always operate on an `Arc` snapshot, so they never observe partial state.
-4. Update the shared health-check registry by unregistering removed upstream IDs before registering
-   new ones. The executor reacts to `RegistryUpdate` events so probes are restarted with the latest
-   options.
+1. Build a candidate `ResourceConfigSet` (full list, or watch events coalesced per key in etcd order).
+2. Validate and compile a `CandidateSnapshot` in dependency order
+   (upstreams → services → global rules → routes → SSL matchers).
+3. Publish a single immutable `RuntimeSnapshot` to the data plane.
+4. Incrementally reconcile health checks (unchanged upstream fingerprints are not restarted).
 
-If validation fails at any step the old snapshot stays in place and the error is logged—no reload
-occurs until etcd provides a valid payload. This gives PingSIX an implicit rollback strategy where
-operators simply fix the broken config and re-publish; traffic continues to flow using the previous
-revision throughout the failure window.
+Formal control-plane state and the published runtime snapshot are updated only after every step
+succeeds. On failure the previous snapshot keeps serving traffic (last-known-good). Watch apply
+failures interrupt the watch stream and force a full relist so rejected revisions are not skipped.
+Empty watch batches do not publish.
 
 ## Docker Deployment
 
@@ -200,12 +198,12 @@ PingSIX provides a multi-stage Docker build for efficient containerized deployme
 Build the PingSIX Docker image from the project root:
 
 ```bash
-# Build the Docker image
+# Build the Docker image for the host architecture
 docker build -t pingsix:latest .
-
-# Build for multiple architectures (if using buildx)
-docker buildx build --platform linux/amd64,linux/arm64 -t pingsix:latest .
 ```
+
+The published Dockerfile targets a single architecture (the builder host). Multi-arch
+`buildx` images are not claimed or verified by default.
 
 ### Docker Image Features
 
@@ -215,7 +213,8 @@ The PingSIX Docker image includes:
 - **Minimal runtime**: Based on Debian Bookworm Slim for security and size
 - **Non-root user**: Runs as `pingsix` user for enhanced security
 - **Pre-configured directories**: Logging and runtime directories with proper permissions
-- **Exposed ports**: 8080 (HTTP), 9091 (Prometheus), 9181 (Admin API)
+- **Exposed ports**: 8080 (HTTP proxy), 9091 (Prometheus). Status listens on `127.0.0.1:7085`
+  inside the container; Admin is not enabled in the default image config.
 
 ### Running PingSIX with Docker
 
@@ -226,7 +225,6 @@ The PingSIX Docker image includes:
 docker run -d --name pingsix \
   -p 8080:8080 \
   -p 9091:9091 \
-  -p 9181:9181 \
   pingsix:latest
 
 # Run with custom configuration
@@ -259,7 +257,7 @@ services:
       - "80:8080"      # HTTP traffic
       - "443:8443"     # HTTPS traffic (if configured)
       - "9091:9091"    # Prometheus metrics
-      - "9181:9181"    # Admin API
+      # Admin is opt-in via config (etcd + admin); default bind should be loopback.
     volumes:
       - ./config.yaml:/app/config.yaml:ro
       - ./ssl:/etc/ssl:ro                    # SSL certificates
@@ -559,7 +557,7 @@ pingsix:
   admin:
     enabled: true
     apiKey: "your-secure-api-key"
-    address: "0.0.0.0:9181"
+    address: "127.0.0.1:9181"
   
   prometheus:
     enabled: true
@@ -1217,10 +1215,15 @@ plugins:
       - "192.168.1.100"
       - "172.16.0.0/12"
     message: "Access denied"       # Custom rejection message
-    use_forwarded_headers: true    # Trust X-Forwarded-For headers
-    trusted_proxies:               # Trusted proxy networks
+    use_forwarded_headers: true    # Parse forwarded headers only from a trusted direct proxy
+    trusted_proxies:               # Trusted proxy networks; X-Forwarded-For is walked right-to-left
       - "10.0.0.0/8"
+    # If XFF is present but illegal: `direct` (default) uses the peer IP; `deny` rejects the request.
+    # Illegal XFF never falls back to an unverified X-Real-IP. X-Real-IP is only used when XFF is absent.
+    forwarded_header_error_policy: direct
 ```
+
+When every hop in XFF is trusted, PingSIX returns the leftmost address (farthest trusted source).
 
 #### CORS (Cross-Origin Resource Sharing)
 ```yaml
@@ -1315,7 +1318,12 @@ plugins:
 - **Conditional Routing**: Match requests based on query parameters, headers, or cookies
 - **Variable Matching**: Support for `==` (equals) and `!=` (not equals) operators
 - **Inline or Referenced Upstreams**: Use `upstream_id` to reference existing upstreams or define inline
-- **Default Fallback**: If weight doesn't specify an upstream, falls back to route's default upstream
+- **Pass-through targets (APISIX-compatible)**: A weighted entry with `weight > 0` but neither
+  `upstream_id` nor inline `upstream` keeps the route's default upstream for that weight interval
+- **Weight rules**: Weight `0` does not participate in selection; total weight must be `> 0`;
+  named upstreams must exist; weight sums use checked `u64` arithmetic
+- **Inline health checks**: Inline upstreams get independent health-check tasks
+- **Retry / Host rewrite**: Uses the actually selected upstream; pass-through uses the route default
 
 **Common Use Cases:**
 - A/B testing different backend versions
@@ -1485,6 +1493,11 @@ plugins:
     max_file_size_bytes: 1048576  # Max cacheable response size (bytes, 0 = no limit)
     stale_while_revalidate_secs: 60  # Serve stale content while revalidating (optional)
     respect_s_maxage: true        # Respect Cache-Control s-maxage directive (default: true)
+    # Disabled by default: shared caching skips requests with Authorization/Cookie
+    # headers and responses with Set-Cookie to prevent cross-user reuse.
+    cache_authenticated_requests: false
+    # Separate high-risk opt-in; remains false even when authenticated caching is enabled.
+    cache_set_cookie_responses: false
 ```
 
 **Cache Plugin Features:**
@@ -1494,6 +1507,12 @@ plugins:
 - **Selective Caching**: Control which HTTP methods and status codes are cacheable
 - **Pattern-Based Exclusion**: Use regex patterns to exclude specific URIs from caching
 - **Size Limits**: Prevent memory exhaustion by limiting cacheable response size
+- **Credential Safety**: Requests with `Authorization`, `Proxy-Authorization`, or `Cookie`, and any
+  request where `basic-auth` / `key-auth` / `jwt-auth` observed credentials (custom header, query,
+  or cookie carriers), bypass the shared cache by default—even if plugins later strip those
+  headers. Set `cache_authenticated_requests: true` only when responses are safely partitioned by
+  an explicit cache key.
+- **Cookie Safety**: Responses with `Set-Cookie` bypass caching independently. Enabling authenticated request caching does not enable cookie-response caching; `cache_set_cookie_responses: true` is a separate high-risk opt-in that can replay cookies across shared-cache clients.
 - **Vary Support**: Generate cache keys based on specified request headers
 
 **Common Use Cases:**
@@ -1612,9 +1631,22 @@ pingsix:
     prefix: /pingsix
   
   admin:
-    address: "0.0.0.0:9181"
+    address: "127.0.0.1:9181"   # Non-loopback plaintext binds are rejected by default
     api_key: "your-secure-api-key"
+    # allow_insecure_remote: true  # Required for intentional non-loopback cleartext binds
+    # Note: Admin has no TLS listener; remote binds must use allow_insecure_remote or stay on loopback.
+
+  status:
+    address: "127.0.0.1:7085"
+    config_stale_after: 300
+    fail_readiness_when_stale: false
 ```
+
+Status endpoints: `/status/live`, `/status/ready`, `/status/config`.
+`/status/config` reports `observed_revision` (last successful etcd list/watch cursor),
+`published_revision` (runtime snapshot revision), plus source/connected/last sync/degraded reason.
+`revision` remains an alias of `observed_revision` for compatibility. Stale readiness only applies
+to etcd-backed configs.
 
 ### API Endpoints
 
@@ -2146,7 +2178,7 @@ pingsix:
     prefix: /pingsix
   
   admin:
-    address: "0.0.0.0:9181"
+    address: "127.0.0.1:9181"
     api_key: "secure-admin-key"
 
 upstreams:

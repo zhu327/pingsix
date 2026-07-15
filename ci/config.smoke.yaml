@@ -1,0 +1,22 @@
+# Minimal smoke config: proxy to a local mock upstream (host.docker.internal).
+pingora:
+  version: 1
+  threads: 1
+  pid_file: /var/run/pingsix/pingora.pid
+  upgrade_sock: /tmp/pingora_upgrade.sock
+
+pingsix:
+  listeners:
+    - address: 0.0.0.0:8080
+  status:
+    address: 127.0.0.1:7085
+  prometheus:
+    address: 0.0.0.0:9091
+
+routes:
+  - id: smoke
+    uri: /
+    upstream:
+      nodes:
+        "host.docker.internal:18080": 1
+      type: roundrobin

@@ -1,10 +1,7 @@
-use std::sync::Arc;
 use std::time::Duration;
+use std::{collections::HashMap, sync::Arc};
 
-use arc_swap::{ArcSwap, ArcSwapOption};
-use dashmap::DashMap;
 use matchit::{InsertError, Router as MatchRouter};
-use once_cell::sync::Lazy;
 use pingora_core::upstreams::peer::HttpPeer;
 use pingora_error::Result;
 use pingora_proxy::Session;
@@ -15,15 +12,11 @@ use crate::{
         sort_plugins_by_priority_desc, ErrorContext, ProxyError, ProxyPlugin, ProxyPluginExecutor,
         ProxyResult, RouteContext, UpstreamSelector,
     },
-    plugins::build_plugin,
+    plugins::build_plugin_with_upstreams,
     utils::request::get_request_host,
 };
 
-use super::{
-    service::service_fetch,
-    upstream::{upstream_fetch, ProxyUpstream},
-    MapOperations,
-};
+use super::{service::ProxyService, upstream::ProxyUpstream};
 
 fn build_plugin_name_index(plugins: &[Arc<dyn ProxyPlugin>]) -> Vec<String> {
     let mut names: Vec<String> = plugins.iter().map(|p| p.name().to_string()).collect();
@@ -94,26 +87,14 @@ fn merge_route_and_service_plugins(
 /// Type alias for route match result: (params, route)
 type RouteMatchResult = Option<(Vec<(String, String)>, Arc<ProxyRoute>)>;
 
-/// Proxy route with upstream and plugin configuration.
-///
-/// Routes are compiled at startup and cached for high-performance request matching.
-/// Plugin executors are cached for routes without service_id (static plugins),
-/// and dynamically built for routes with service_id (to reflect service updates).
-struct ServicePluginExecutor {
-    service: Arc<super::service::ProxyService>,
-    executor: Arc<ProxyPluginExecutor>,
-}
-
+/// Proxy route with all service and upstream dependencies bound at build time.
 pub struct ProxyRoute {
     pub inner: config::Route,
-    pub upstream: Option<Arc<ProxyUpstream>>,
     pub plugins: Vec<Arc<dyn ProxyPlugin>>,
-    /// Sorted index of route plugin names for fast "route overrides service" checks.
-    plugin_name_index: Vec<String>,
-    /// Cached executor for routes without services.
-    cached_executor: Option<Arc<ProxyPluginExecutor>>,
-    /// Executor merged with the currently published service configuration.
-    service_executor: ArcSwapOption<ServicePluginExecutor>,
+    resolved_upstream: Option<Arc<dyn UpstreamSelector>>,
+    effective_hosts: Vec<String>,
+    plugin_executor: Arc<ProxyPluginExecutor>,
+    pub inline_upstream: Option<Arc<ProxyUpstream>>,
 }
 
 impl Identifiable for ProxyRoute {
@@ -127,74 +108,88 @@ impl Identifiable for ProxyRoute {
 }
 
 impl ProxyRoute {
-    pub fn new_with_upstream_and_plugins(route: config::Route) -> ProxyResult<Self> {
-        let mut proxy_route = ProxyRoute {
-            inner: route.clone(),
-            upstream: None,
-            plugins: Vec::with_capacity(route.plugins.len()),
-            plugin_name_index: Vec::new(),
-            cached_executor: None,
-            service_executor: ArcSwapOption::empty(),
+    pub(crate) fn build(
+        route: config::Route,
+        upstreams: &HashMap<String, Arc<ProxyUpstream>>,
+        services: &HashMap<String, Arc<ProxyService>>,
+    ) -> ProxyResult<Self> {
+        let service = route
+            .service_id
+            .as_deref()
+            .map(|id| {
+                services.get(id).cloned().ok_or_else(|| {
+                    ProxyError::Configuration(format!(
+                        "Route '{}' references missing service '{}'",
+                        route.id, id
+                    ))
+                })
+            })
+            .transpose()?;
+
+        let inline_upstream = if let Some(upstream_config) = route.upstream.clone() {
+            Some(Arc::new(
+                ProxyUpstream::build(upstream_config).with_context(&format!(
+                    "Failed to create upstream for route '{}'",
+                    route.id
+                ))?,
+            ))
+        } else {
+            None
+        };
+        let resolved_upstream = if let Some(proxy_upstream) = &inline_upstream {
+            Some(proxy_upstream.clone() as Arc<dyn UpstreamSelector>)
+        } else if let Some(id) = route.upstream_id.as_deref() {
+            Some(upstreams.get(id).cloned().ok_or_else(|| {
+                ProxyError::Configuration(format!(
+                    "Route '{}' references missing upstream '{}'",
+                    route.id, id
+                ))
+            })? as Arc<dyn UpstreamSelector>)
+        } else {
+            service.as_ref().and_then(|s| s.resolve_upstream())
         };
 
-        // Configure upstream
-        if let Some(upstream_config) = route.upstream {
-            let proxy_upstream =
-                ProxyUpstream::new_with_shared_health_check(upstream_config).with_context(
-                    &format!("Failed to create upstream for route '{}'", route.id),
-                )?;
-            proxy_route.upstream = Some(Arc::new(proxy_upstream));
-        }
-
-        // Load plugins
-        for (name, value) in route.plugins {
-            let plugin = build_plugin(&name, value)
-                .map_err(|e| ProxyError::Plugin(format!("Failed to build plugin '{name}': {e}")))?;
-            proxy_route.plugins.push(plugin);
-        }
-
-        // Pre-sort plugins once at build-time to avoid per-request sorting.
-        sort_plugins_by_priority_desc(proxy_route.plugins.as_mut_slice());
-        proxy_route.plugin_name_index = build_plugin_name_index(&proxy_route.plugins);
-
-        // Optimization: Pre-build executor for routes without service_id (static plugins).
-        // Use shared empty executor to avoid allocations when no plugins are configured.
-        if route.service_id.is_none() {
-            let executor = if proxy_route.plugins.is_empty() {
-                ProxyPluginExecutor::default_shared()
-            } else {
-                Arc::new(ProxyPluginExecutor::new(proxy_route.plugins.clone()))
-            };
-            proxy_route.cached_executor = Some(executor);
-        }
-
-        Ok(proxy_route)
-    }
-
-    /// Gets the list of hosts for the route.
-    /// Falls back to service hosts if the route has no hosts configured.
-    fn get_hosts(&self) -> Vec<&str> {
-        let hosts = self.inner.get_hosts();
-        if !hosts.is_empty() {
-            return hosts;
-        }
-        // Cannot return references to service hosts (different lifetime),
-        // so check emptiness and return empty slice
-        vec![]
-    }
-
-    /// Gets service hosts when route hosts are empty (requires owned strings).
-    fn get_service_hosts(&self) -> Vec<String> {
-        if let Some(service) = self
-            .inner
-            .service_id
-            .as_ref()
-            .and_then(|id| service_fetch(id.as_str()))
-        {
-            service.inner.hosts.clone()
+        let effective_hosts = if !route.get_hosts().is_empty() {
+            route.get_hosts().into_iter().map(str::to_string).collect()
         } else {
-            vec![]
+            service
+                .as_ref()
+                .map(|s| s.inner.hosts.clone())
+                .unwrap_or_default()
+        };
+
+        let mut plugins = Vec::with_capacity(route.plugins.len());
+        for (name, value) in route.plugins.clone() {
+            let plugin = build_plugin_with_upstreams(&name, value, upstreams)
+                .map_err(|e| ProxyError::Plugin(format!("Failed to build plugin '{name}': {e}")))?;
+            plugins.push(plugin);
         }
+        sort_plugins_by_priority_desc(plugins.as_mut_slice());
+
+        let plugin_names = build_plugin_name_index(&plugins);
+        let merged_plugins = if let Some(service) = &service {
+            merge_route_and_service_plugins(&plugins, &service.plugins, &plugin_names)
+        } else {
+            plugins.clone()
+        };
+        let plugin_executor = if merged_plugins.is_empty() {
+            ProxyPluginExecutor::default_shared()
+        } else {
+            Arc::new(ProxyPluginExecutor::new(merged_plugins))
+        };
+
+        Ok(Self {
+            inner: route,
+            plugins,
+            resolved_upstream,
+            effective_hosts,
+            plugin_executor,
+            inline_upstream,
+        })
+    }
+
+    fn get_hosts(&self) -> Vec<&str> {
+        self.effective_hosts.iter().map(String::as_str).collect()
     }
 }
 
@@ -238,69 +233,11 @@ impl RouteContext for ProxyRoute {
     }
 
     fn build_plugin_executor(&self) -> Arc<ProxyPluginExecutor> {
-        // Check if the executor is already cached
-        if let Some(executor) = &self.cached_executor {
-            return executor.clone();
-        }
-
-        // Fetch the published service. Cache validity is tied to the Arc identity: dynamic
-        // configuration updates publish a new ProxyService Arc, so a changed service rebuilds
-        // the merged executor once and subsequent requests reuse it.
-        let service = self.inner.service_id.as_deref().and_then(service_fetch);
-
-        let Some(current_service) = service else {
-            // No service found (might be deleted or misconfigured)
-            // Fallback to route-only plugins
-            let executor = if self.plugins.is_empty() {
-                ProxyPluginExecutor::default_shared()
-            } else {
-                Arc::new(ProxyPluginExecutor::new(self.plugins.clone()))
-            };
-            return executor;
-        };
-
-        if let Some(cached) = self.service_executor.load_full() {
-            if Arc::ptr_eq(&cached.service, &current_service) {
-                return cached.executor.clone();
-            }
-        }
-
-        let merged_plugins = merge_route_and_service_plugins(
-            &self.plugins,
-            current_service.plugins.as_slice(),
-            &self.plugin_name_index,
-        );
-        let executor = if merged_plugins.is_empty() {
-            ProxyPluginExecutor::default_shared()
-        } else {
-            Arc::new(ProxyPluginExecutor::new(merged_plugins))
-        };
-
-        self.service_executor
-            .store(Some(Arc::new(ServicePluginExecutor {
-                service: current_service,
-                executor: executor.clone(),
-            })));
-        executor
+        self.plugin_executor.clone()
     }
 
     fn resolve_upstream(&self) -> Option<Arc<dyn UpstreamSelector>> {
-        self.upstream
-            .clone()
-            .map(|u| u as Arc<dyn UpstreamSelector>)
-            .or_else(|| {
-                self.inner
-                    .upstream_id
-                    .as_ref()
-                    .and_then(|id| upstream_fetch(id.as_str()))
-                    .map(|u| u as Arc<dyn UpstreamSelector>)
-            })
-            .or_else(|| {
-                self.inner
-                    .service_id
-                    .as_ref()
-                    .and_then(|id| service_fetch(id).and_then(|s| s.resolve_upstream()))
-            })
+        self.resolved_upstream.clone()
     }
 }
 
@@ -329,6 +266,21 @@ pub struct MatchEntry {
 }
 
 impl MatchEntry {
+    pub(crate) fn build(
+        routes: &std::collections::HashMap<String, Arc<ProxyRoute>>,
+    ) -> ProxyResult<Self> {
+        let mut matcher = Self::default();
+        for route in routes.values() {
+            matcher.insert_route(route.clone()).map_err(|e| {
+                ProxyError::Configuration(format!(
+                    "Failed to build route matcher for '{}': {e}",
+                    route.inner.id
+                ))
+            })?;
+        }
+        Ok(matcher)
+    }
+
     /// Converts host to reversed matchit-compatible pattern.
     /// Wildcard "*.example.com" becomes "moc.elpmaxe.{*subdomain}".
     /// Exact "api.example.com" becomes "moc.elpmaxe.ipa".
@@ -374,22 +326,11 @@ impl MatchEntry {
         let route_hosts = proxy_route.get_hosts();
         let uris = proxy_route.inner.get_uris();
 
-        // Try route hosts first, fall back to service hosts
         let has_hosts = if !route_hosts.is_empty() {
             self.insert_host_uris(route_hosts.iter().copied(), &uris, &proxy_route)?;
             true
         } else {
-            let service_hosts = proxy_route.get_service_hosts();
-            if !service_hosts.is_empty() {
-                self.insert_host_uris(
-                    service_hosts.iter().map(|s| s.as_str()),
-                    &uris,
-                    &proxy_route,
-                )?;
-                true
-            } else {
-                false
-            }
+            false
         };
 
         if !has_hosts {
@@ -431,7 +372,7 @@ impl MatchEntry {
     }
 
     /// Matches a request to a route.
-    pub fn match_request(&self, session: &mut Session) -> RouteMatchResult {
+    pub(crate) fn match_request(&self, session: &mut Session) -> RouteMatchResult {
         let host = get_request_host(session.req_header());
         let uri = session.req_header().uri.path();
         let method = session.req_header().method.as_str();
@@ -480,53 +421,6 @@ impl MatchEntry {
         }
         None
     }
-}
-
-/// Global map to store global rules, initialized lazily.
-pub static ROUTE_MAP: Lazy<DashMap<String, Arc<ProxyRoute>>> = Lazy::new(DashMap::new);
-static GLOBAL_ROUTE_MATCH: Lazy<ArcSwap<MatchEntry>> =
-    Lazy::new(|| ArcSwap::new(Arc::new(MatchEntry::default())));
-
-pub fn global_route_match_fetch() -> Arc<MatchEntry> {
-    GLOBAL_ROUTE_MATCH.load().clone()
-}
-
-pub fn reload_global_route_match() {
-    let mut matcher = MatchEntry::default();
-
-    for route in ROUTE_MAP.iter() {
-        log::debug!("Inserting route: {}", route.inner.id);
-        if let Err(e) = matcher.insert_route(route.clone()) {
-            log::error!("Failed to insert route {}: {}", route.inner.id, e);
-            // Continue with other routes to avoid partial failures stopping the process
-        }
-    }
-
-    GLOBAL_ROUTE_MATCH.store(Arc::new(matcher));
-}
-
-/// Loads routes from the given configuration.
-pub fn load_static_routes(config: &config::Config) -> ProxyResult<()> {
-    let proxy_routes: Vec<Arc<ProxyRoute>> = config
-        .routes
-        .iter()
-        .map(|route| {
-            log::info!("Configuring Route: {}", route.id);
-            match ProxyRoute::new_with_upstream_and_plugins(route.clone()) {
-                Ok(proxy_route) => Ok(Arc::new(proxy_route)),
-                Err(e) => {
-                    log::error!("Failed to configure Route {}: {}", route.id, e);
-                    Err(e)
-                }
-            }
-        })
-        .collect::<ProxyResult<Vec<_>>>()?;
-
-    ROUTE_MAP.reload_resources(proxy_routes);
-
-    reload_global_route_match();
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -713,12 +607,14 @@ mod tests {
             priority: 0,
             plugins: HashMap::<String, JsonValue>::new(),
             upstream: None,
-            upstream_id: Some("u1".to_string()),
+            upstream_id: None,
             service_id: None,
             timeout: None,
         };
 
-        let proxy_route = ProxyRoute::new_with_upstream_and_plugins(route_cfg).unwrap();
+        let upstreams = HashMap::new();
+        let services = HashMap::new();
+        let proxy_route = ProxyRoute::build(route_cfg, &upstreams, &services).unwrap();
         let exec = proxy_route.build_plugin_executor();
         assert!(Arc::ptr_eq(&exec, &ProxyPluginExecutor::default_shared()));
     }

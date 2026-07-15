@@ -10,13 +10,11 @@ use tokio::{
 };
 
 use super::Etcd;
-use crate::core::{ProxyError, ProxyResult};
+use crate::core::{status, ProxyError, ProxyResult};
 
 // Retry delay constants
 const LIST_RETRY_DELAY: Duration = Duration::from_secs(3);
 const WATCH_RETRY_DELAY: Duration = Duration::from_secs(1);
-
-// EtcdError is now replaced by ProxyError::Etcd variant
 
 /// Service responsible for syncing and watching etcd configuration changes.
 pub struct EtcdConfigSync {
@@ -28,8 +26,6 @@ pub struct EtcdConfigSync {
 
 impl EtcdConfigSync {
     pub fn new(config: Etcd, handler: Box<dyn EtcdEventHandler + Send + Sync>) -> Self {
-        // Prefix validation is now handled by the validator in config::Etcd
-        // No need for runtime assertion
         Self {
             config,
             client: None,
@@ -71,7 +67,8 @@ impl EtcdConfigSync {
             ));
         }
 
-        self.handler.handle_list_response(&response);
+        self.handler.handle_list_response(&response)?;
+        status::record_sync_success(self.revision);
         Ok(())
     }
 
@@ -81,7 +78,10 @@ impl EtcdConfigSync {
         let start_revision = self.revision + 1;
         let options = WatchOptions::new()
             .with_start_revision(start_revision)
-            .with_prefix();
+            .with_prefix()
+            // Idle watches must still refresh liveness; without progress notify a healthy
+            // connection with no config changes looks stale to readiness probes.
+            .with_progress_notify();
 
         let client = self.get_client().await?;
 
@@ -92,17 +92,49 @@ impl EtcdConfigSync {
                 ProxyError::etcd_error_with_cause(format!("Failed to watch key '{prefix}'"), e)
             })?;
 
-        while let Some(response) = stream
-            .message()
-            .await
-            .map_err(|e| ProxyError::etcd_error_with_cause("Failed to receive watch message", e))?
-        {
-            if response.canceled() {
-                log::debug!("Watch stream for prefix '{prefix}' was canceled");
-                break;
-            }
+        status::mark_etcd_connected(true);
 
-            self.handler.handle_events(response.events());
+        // Periodically request progress so last_success advances even when the server
+        // is quiet and its own progress interval is longer than config_stale_after.
+        let mut progress_interval = tokio::time::interval(Duration::from_secs(30));
+        progress_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Skip the immediate first tick; list() already recorded success.
+        progress_interval.tick().await;
+
+        loop {
+            tokio::select! {
+                result = stream.message() => {
+                    let response = result.map_err(|e| {
+                        ProxyError::etcd_error_with_cause("Failed to receive watch message", e)
+                    })?;
+                    let Some(response) = response else {
+                        break;
+                    };
+
+                    if response.canceled() {
+                        log::debug!("Watch stream for prefix '{prefix}' was canceled");
+                        break;
+                    }
+
+                    // Propagate handler failures so the sync loop relists instead of
+                    // silently advancing past a rejected revision.
+                    // Progress responses have no events; handle_events is a no-op for them.
+                    self.handler.handle_events(response.events())?;
+
+                    if let Some(header) = response.header() {
+                        self.revision = header.revision();
+                        status::record_sync_success(self.revision);
+                    }
+                }
+                _ = progress_interval.tick() => {
+                    if let Err(e) = stream.request_progress().await {
+                        return Err(ProxyError::etcd_error_with_cause(
+                            "Failed to request etcd watch progress",
+                            e,
+                        ));
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -111,14 +143,14 @@ impl EtcdConfigSync {
     fn reset_client(&mut self) {
         log::debug!("Resetting etcd client for prefix '{}'", self.config.prefix);
         self.client = None;
+        status::mark_etcd_connected(false);
     }
 
     /// Main task loop for synchronization.
     async fn run_sync_loop(&mut self, mut shutdown: ShutdownWatch) {
         loop {
             tokio::select! {
-                biased; // Prioritize shutdown signal
-                // Shutdown signal handling
+                biased;
                 _ = shutdown.changed() => {
                     if *shutdown.borrow() {
                         log::debug!("Shutdown signal received, stopping etcd config sync for prefix '{}'", self.config.prefix);
@@ -126,20 +158,21 @@ impl EtcdConfigSync {
                     }
                 },
 
-                // Perform list operation
                 result = self.list() => {
                     if let Err(err) = result {
                         log::error!("List operation failed for prefix '{}': {:?}", self.config.prefix, err);
+                        status::record_sync_error(err.to_string());
                         self.reset_client();
-                        sleep(LIST_RETRY_DELAY).await;
+                        if sleep_or_shutdown(LIST_RETRY_DELAY, &shutdown).await {
+                            return;
+                        }
                         continue;
                     }
                 }
             }
 
             tokio::select! {
-                biased; // Prioritize shutdown signal
-                // Shutdown signal handling during watch
+                biased;
                 _ = shutdown.changed() => {
                     if *shutdown.borrow() {
                         log::debug!("Shutdown signal received, stopping etcd config sync for prefix '{}'", self.config.prefix);
@@ -147,12 +180,15 @@ impl EtcdConfigSync {
                     }
                 },
 
-                // Perform watch operation
                 result = self.watch() => {
                     if let Err(err) = result {
                         log::error!("Watch operation failed for prefix '{}': {:?}", self.config.prefix, err);
+                        status::record_sync_error(err.to_string());
                         self.reset_client();
-                        sleep(WATCH_RETRY_DELAY).await;
+                        if sleep_or_shutdown(WATCH_RETRY_DELAY, &shutdown).await {
+                            return;
+                        }
+                        // Loop continues to list() — full resync after watch failure.
                     }
                 }
             }
@@ -181,17 +217,26 @@ impl Service for EtcdConfigSync {
 }
 
 pub trait EtcdEventHandler {
-    fn handle_event(&self, event: &Event);
+    /// Apply all events from one etcd watch response.
+    ///
+    /// On `Err`, the sync loop must reset and relist so failed updates are not lost.
+    fn handle_events(&self, events: &[Event]) -> ProxyResult<()>;
 
-    /// Apply all events from one etcd watch response. Implementations can
-    /// coalesce expensive derived-state rebuilds after the batch is complete.
-    fn handle_events(&self, events: &[Event]) {
-        for event in events {
-            self.handle_event(event);
+    fn handle_list_response(&self, response: &GetResponse) -> ProxyResult<()>;
+}
+
+/// Sleep for `delay`, but return `true` immediately if shutdown is requested.
+async fn sleep_or_shutdown(delay: Duration, shutdown: &ShutdownWatch) -> bool {
+    let mut shutdown = shutdown.clone();
+    tokio::select! {
+        _ = sleep(delay) => false,
+        result = shutdown.changed() => {
+            match result {
+                Ok(()) => *shutdown.borrow(),
+                Err(_) => true,
+            }
         }
     }
-
-    fn handle_list_response(&self, response: &GetResponse);
 }
 
 async fn create_client(cfg: &Etcd) -> ProxyResult<Client> {
@@ -220,7 +265,6 @@ pub fn json_to_resource<T>(value: &[u8]) -> ProxyResult<T>
 where
     T: serde::de::DeserializeOwned,
 {
-    // Direct, efficient deserialization from JSON bytes
     let resource: T = serde_json::from_slice(value)
         .map_err(|e| ProxyError::serialization_error("Failed to deserialize JSON", e))?;
     Ok(resource)

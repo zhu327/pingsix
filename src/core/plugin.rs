@@ -65,6 +65,21 @@ pub trait RouteContext: Send + Sync {
 }
 
 // =============================================================================
+// HEALTH CHECK SPECS (shared by plugins and runtime reconcile)
+// =============================================================================
+
+/// Stable fingerprint of health-check-relevant configuration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct HealthCheckFingerprint(pub u64);
+
+/// Spec used to reconcile background health checks without restarting unchanged ones.
+pub struct HealthCheckSpec {
+    pub key: String,
+    pub fingerprint: HealthCheckFingerprint,
+    pub service: Arc<dyn pingora_core::services::background::BackgroundService + Send + Sync>,
+}
+
+// =============================================================================
 // PROXY CONTEXT (in plugin to avoid context<->plugin circular dependency)
 // =============================================================================
 
@@ -81,6 +96,8 @@ pub struct ProxyContext {
     pub route_params: Option<Vec<(String, String)>>,
     /// The upstream override selected by the traffic-split plugin.
     pub upstream_override: Option<Arc<dyn UpstreamSelector>>,
+    /// The actual upstream used for this request. All retry and host-rewrite decisions must use it.
+    pub selected_upstream: Option<Arc<dyn UpstreamSelector>>,
     // Selected HTTP peer for the upstream request.
     pub peer: Option<Box<HttpPeer>>,
     /// Number of retry attempts so far.
@@ -93,6 +110,13 @@ pub struct ProxyContext {
     pub request_start: Instant,
     /// Unique request identifier, set by request-id plugin if enabled.
     pub request_id: Option<String>,
+    /// Whether the original downstream request contained authentication/session credentials.
+    /// Captured before plugins can remove or rewrite headers (Authorization, Proxy-Authorization, Cookie).
+    pub original_request_had_credentials: bool,
+    /// Set when any auth plugin observes credentials (including custom headers/query).
+    pub request_has_credentials: bool,
+    /// Optional authenticated identity established by an auth plugin.
+    pub authenticated_identity: Option<String>,
     /// Custom variables available to plugins (type-erased, thread-safe).
     /// Lazily allocated because many requests never store plugin variables.
     pub vars: Option<HashMap<String, Box<dyn Any + Send + Sync>>>,
@@ -104,12 +128,16 @@ impl Default for ProxyContext {
             route: None,
             route_params: None,
             upstream_override: None,
+            selected_upstream: None,
             peer: None,
             tries: 0,
             plugin: ProxyPluginExecutor::default_shared(),
             global_plugin: ProxyPluginExecutor::default_shared(),
             request_start: Instant::now(),
             request_id: None,
+            original_request_had_credentials: false,
+            request_has_credentials: false,
+            authenticated_identity: None,
             vars: None,
         }
     }
@@ -117,6 +145,12 @@ impl Default for ProxyContext {
 
 #[allow(dead_code)]
 impl ProxyContext {
+    /// Mark that the request carried credentials (regardless of auth success).
+    pub fn mark_request_has_credentials(&mut self) {
+        self.request_has_credentials = true;
+        self.original_request_had_credentials = true;
+    }
+
     /// Get a route parameter by key.
     /// Returns None if no params exist or the key is not found.
     pub fn get_param(&self, key: &str) -> Option<&str> {
@@ -203,6 +237,22 @@ pub trait ProxyPlugin: Send + Sync {
 
     /// Return the priority of this plugin
     fn priority(&self) -> i32;
+
+    /// Return health-check targets owned by this plugin. Registration happens only when the
+    /// containing runtime snapshot is published.
+    fn health_check_targets(
+        &self,
+    ) -> Vec<(
+        String,
+        Arc<dyn pingora_core::services::background::BackgroundService + Send + Sync>,
+    )> {
+        Vec::new()
+    }
+
+    /// Optional typed health-check specs with stable fingerprints for incremental reconcile.
+    fn health_check_specs(&self) -> Option<Vec<HealthCheckSpec>> {
+        None
+    }
 
     /// Handle the incoming request in the access phase.
     ///

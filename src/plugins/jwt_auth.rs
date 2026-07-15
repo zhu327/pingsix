@@ -186,6 +186,9 @@ impl ProxyPlugin for PluginJWTAuth {
 
     async fn request_filter(&self, session: &mut Session, ctx: &mut ProxyContext) -> Result<bool> {
         let token = self.extract_token(session, ctx);
+        if token.is_some() {
+            ctx.mark_request_has_credentials();
+        }
         let token = match token {
             Some(t) => t,
             None => {

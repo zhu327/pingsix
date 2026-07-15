@@ -110,12 +110,17 @@ impl Config {
 
     /// Parses YAML configuration string with comprehensive validation.
     pub fn from_yaml(conf_str: &str) -> Result<Self> {
-        log::trace!("Read conf file: {conf_str}");
-        let conf: Config = serde_yaml::from_str(conf_str).or_err_with(ReadError, || {
-            format!("Unable to parse yaml conf {conf_str}")
-        })?;
+        let conf: Config = serde_yaml::from_str(conf_str)
+            .or_err_with(ReadError, || "Unable to parse yaml configuration")?;
 
-        log::trace!("Loaded conf: {conf:?}");
+        log::debug!(
+            "Loaded configuration with {} routes, {} upstreams, {} services, {} global rules, and {} SSL entries",
+            conf.routes.len(),
+            conf.upstreams.len(),
+            conf.services.len(),
+            conf.global_rules.len(),
+            conf.ssls.len(),
+        );
 
         // Validate configuration structure and constraints
         conf.validate()
@@ -253,6 +258,9 @@ pub struct Admin {
     pub address: SocketAddr,
     #[validate(length(min = 1), custom(function = "Admin::validate_api_key"))]
     pub api_key: String,
+    /// Allow binding Admin to a non-loopback address without TLS (default: false).
+    #[serde(default)]
+    pub allow_insecure_remote: bool,
 }
 
 impl Admin {
@@ -262,11 +270,38 @@ impl Admin {
         }
         Ok(())
     }
+
+    /// Admin has no TLS listener today: non-loopback binds require an explicit insecure opt-in.
+    pub fn validate_bind_safety(&self) -> Result<(), String> {
+        if self.address.ip().is_loopback() {
+            return Ok(());
+        }
+        if self.allow_insecure_remote {
+            log::warn!(
+                "Admin API is bound to non-loopback address {} with allow_insecure_remote=true. \
+                 API key may be transmitted in cleartext. Admin TLS binding is not supported.",
+                self.address
+            );
+            return Ok(());
+        }
+        Err(format!(
+            "Admin API refuses non-loopback plaintext bind at {}. \
+             Use a loopback address (recommended) or set allow_insecure_remote: true. \
+             Admin TLS binding is not supported.",
+            self.address
+        ))
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Validate)]
 pub struct Status {
     pub address: SocketAddr,
+    /// Seconds after which an etcd sync is considered stale (default: 300).
+    #[serde(default)]
+    pub config_stale_after: Option<u64>,
+    /// When true, readiness returns 503 if config sync is stale.
+    #[serde(default)]
+    pub fail_readiness_when_stale: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Validate)]
@@ -1153,5 +1188,32 @@ upstreams:
         let upstream_tls = upstream.tls.as_ref().unwrap();
         assert!(upstream_tls.client_cert.contains("BEGIN CERTIFICATE"));
         assert!(upstream_tls.client_key.contains("BEGIN EC PRIVATE KEY"));
+    }
+
+    #[test]
+    fn admin_bind_rejects_non_loopback_without_insecure_flag() {
+        let admin = Admin {
+            address: "0.0.0.0:9181".parse().unwrap(),
+            api_key: "secret".into(),
+            allow_insecure_remote: false,
+        };
+        assert!(admin.validate_bind_safety().is_err());
+    }
+
+    #[test]
+    fn admin_bind_allows_loopback_and_explicit_insecure_remote() {
+        let loopback = Admin {
+            address: "127.0.0.1:9181".parse().unwrap(),
+            api_key: "secret".into(),
+            allow_insecure_remote: false,
+        };
+        assert!(loopback.validate_bind_safety().is_ok());
+
+        let remote = Admin {
+            address: "0.0.0.0:9181".parse().unwrap(),
+            api_key: "secret".into(),
+            allow_insecure_remote: true,
+        };
+        assert!(remote.validate_bind_safety().is_ok());
     }
 }

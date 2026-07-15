@@ -105,9 +105,13 @@ impl ProxyPlugin for PluginBasicAuth {
         PRIORITY
     }
 
-    async fn request_filter(&self, session: &mut Session, _ctx: &mut ProxyContext) -> Result<bool> {
+    async fn request_filter(&self, session: &mut Session, ctx: &mut ProxyContext) -> Result<bool> {
         let auth_header =
             request::get_req_header_value(session.req_header(), header::AUTHORIZATION.as_str());
+
+        if auth_header.is_some() {
+            ctx.mark_request_has_credentials();
+        }
 
         let is_valid = match auth_header {
             Some(val) => self.validate_credentials(val),

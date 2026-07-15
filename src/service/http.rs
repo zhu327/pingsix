@@ -2,7 +2,10 @@ use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use http::{header::VARY, StatusCode};
+use http::{
+    header::{SET_COOKIE, VARY},
+    StatusCode,
+};
 use once_cell::sync::Lazy;
 use pingora::modules::http::{
     HttpModules,
@@ -26,8 +29,15 @@ use crate::{
     config,
     core::{ProxyContext, ProxyError, ProxyPlugin, RouteContext},
     plugins::cache::{CacheSettings, CTX_KEY_CACHE_SETTINGS},
-    proxy::{global_rule::global_plugin_fetch, route::global_route_match_fetch},
+    proxy::runtime::RUNTIME,
 };
+
+/// Headers that imply credentials for shared-cache safety (checked before plugins mutate them).
+pub(crate) fn headers_indicate_shared_cache_credentials(headers: &http::HeaderMap) -> bool {
+    headers.contains_key("authorization")
+        || headers.contains_key("proxy-authorization")
+        || headers.contains_key("cookie")
+}
 
 // --- START: Global Cache Infrastructure ---
 // 1. Cache backend: In-memory cache for high performance
@@ -72,13 +82,20 @@ impl ProxyHttp for HttpService {
 
     /// Handle the incoming request before any downstream module is executed.
     async fn early_request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<()> {
-        // Match request to pipeline
-        if let Some((route_params, route)) = global_route_match_fetch().match_request(session) {
+        let original_headers = &session.req_header().headers;
+        ctx.original_request_had_credentials =
+            headers_indicate_shared_cache_credentials(original_headers);
+        if ctx.original_request_had_credentials {
+            ctx.request_has_credentials = true;
+        }
+
+        // Load one immutable runtime snapshot for all data-plane configuration used here.
+        let runtime = RUNTIME.load();
+        ctx.global_plugin = runtime.global_plugins.clone();
+        if let Some((route_params, route)) = runtime.route_matcher.match_request(session) {
             ctx.route_params = Some(route_params);
             ctx.plugin = route.build_plugin_executor();
             ctx.route = Some(route);
-
-            ctx.global_plugin = global_plugin_fetch();
         }
 
         // Execute global rule plugins
@@ -120,23 +137,25 @@ impl ProxyHttp for HttpService {
         session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
-        let peer = if let Some(ups_override) = ctx.upstream_override.as_ref() {
-            let mut backend = ups_override.select_backend(session).ok_or_else(|| {
+        let (peer, selected_upstream) = if let Some(upstream) = ctx.upstream_override.clone() {
+            let mut backend = upstream.select_backend(session).ok_or_else(|| {
                 ProxyError::UpstreamSelection("Traffic-split selected no backend".to_string())
             })?;
-
-            backend
+            let peer = backend
                 .ext
                 .get_mut::<HttpPeer>()
                 .ok_or_else(|| ProxyError::Internal("Peer missing".into()))
-                .map(|p| Box::new(p.clone()))?
+                .map(|p| Box::new(p.clone()))?;
+            (peer, Some(upstream))
         } else {
-            ctx.route
+            let route = ctx
+                .route
                 .as_ref()
-                .ok_or_else(|| ProxyError::Internal("Route not found".into()))
-                .and_then(|r| r.select_http_peer(session))?
+                .ok_or_else(|| ProxyError::Internal("Route not found".into()))?;
+            (route.select_http_peer(session)?, route.resolve_upstream())
         };
 
+        ctx.selected_upstream = selected_upstream;
         ctx.peer = Some(peer.clone());
         Ok(peer)
     }
@@ -162,13 +181,7 @@ impl ProxyHttp for HttpService {
 
         // Rewrite host header
         // Priority: upstream_override > route upstream
-        let upstream = ctx
-            .upstream_override
-            .as_ref()
-            .map(|u| u.clone() as Arc<dyn crate::core::UpstreamSelector>)
-            .or_else(|| ctx.route.as_ref().and_then(|r| r.resolve_upstream()));
-
-        if let Some(upstream) = upstream {
+        if let Some(upstream) = ctx.selected_upstream.as_ref() {
             match upstream.get_pass_host() {
                 config::UpstreamPassHost::PASS => {
                     // Do nothing, preserve original host
@@ -262,8 +275,14 @@ impl ProxyHttp for HttpService {
             }
         }
 
-        // Check for cache settings from plugin configuration
+        // Check for cache settings from plugin configuration.
+        // Re-check credentials here: global cache may run before route auth plugins mark them.
         if let Some(settings) = ctx.get::<Arc<CacheSettings>>(CTX_KEY_CACHE_SETTINGS) {
+            if crate::plugins::cache::should_bypass_authenticated_request(settings, ctx) {
+                log::debug!("Skipping shared cache: request has credentials");
+                return Ok(());
+            }
+
             log::debug!("Cache settings found, enabling Pingora cache.");
 
             // Enable caching with configured backend and eviction manager
@@ -351,7 +370,15 @@ impl ProxyHttp for HttpService {
             return Ok(RespCacheable::Uncacheable(NoCacheReason::NeverEnabled));
         };
 
+        if crate::plugins::cache::should_bypass_authenticated_request(settings, ctx) {
+            return Ok(RespCacheable::Uncacheable(NoCacheReason::NeverEnabled));
+        }
+
         if !settings.statuses.contains(&resp.status.as_u16()) {
+            return Ok(RespCacheable::Uncacheable(NoCacheReason::NeverEnabled));
+        }
+
+        if !settings.cache_set_cookie_responses && resp.headers.contains_key(SET_COOKIE) {
             return Ok(RespCacheable::Uncacheable(NoCacheReason::NeverEnabled));
         }
 
@@ -382,18 +409,16 @@ impl ProxyHttp for HttpService {
         ctx: &mut Self::CTX,
         mut e: Box<Error>,
     ) -> Box<Error> {
-        if let Some(route) = ctx.route.as_ref() {
-            if let Some(upstream) = route.resolve_upstream() {
-                if let Some(retries) = upstream.get_retries() {
-                    if retries > 0 && ctx.tries < retries {
-                        let within_timeout = match upstream.get_retry_timeout() {
-                            Some(timeout) => ctx.elapsed_ms() <= (timeout * 1000) as u128,
-                            None => true,
-                        };
-                        if within_timeout {
-                            ctx.tries += 1;
-                            e.set_retry(true);
-                        }
+        if let Some(upstream) = ctx.selected_upstream.as_ref() {
+            if let Some(retries) = upstream.get_retries() {
+                if retries > 0 && ctx.tries < retries {
+                    let within_timeout = match upstream.get_retry_timeout() {
+                        Some(timeout) => ctx.elapsed_ms() <= (timeout * 1000) as u128,
+                        None => true,
+                    };
+                    if within_timeout {
+                        ctx.tries += 1;
+                        e.set_retry(true);
                     }
                 }
             }
@@ -479,5 +504,27 @@ fn ensure_max_age(cc: Option<CacheControl>, settings: &CacheSettings) -> Option<
 
             Some(CacheControl { directives })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_cache_credential_headers_include_proxy_authorization() {
+        let mut headers = http::HeaderMap::new();
+        assert!(!headers_indicate_shared_cache_credentials(&headers));
+
+        headers.insert("authorization", "Basic x".parse().unwrap());
+        assert!(headers_indicate_shared_cache_credentials(&headers));
+
+        headers.clear();
+        headers.insert("proxy-authorization", "Basic x".parse().unwrap());
+        assert!(headers_indicate_shared_cache_credentials(&headers));
+
+        headers.clear();
+        headers.insert("cookie", "a=b".parse().unwrap());
+        assert!(headers_indicate_shared_cache_credentials(&headers));
     }
 }

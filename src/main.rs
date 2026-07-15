@@ -1,12 +1,3 @@
-mod admin;
-mod config;
-mod core;
-mod logging;
-mod plugins;
-mod proxy;
-mod service;
-mod utils;
-
 use std::ops::DerefMut;
 
 use pingora::services::listening::Service;
@@ -18,18 +9,15 @@ use pingora_core::{
 use pingora_proxy::{http_proxy_service_with_name, HttpProxy};
 use sentry::IntoDsn;
 
-use admin::AdminHttpApp;
-use config::{etcd::EtcdConfigSync, Config};
-use logging::Logger;
-use proxy::{
-    event::ProxyEventHandler,
-    global_rule::load_static_global_rules,
-    route::load_static_routes,
-    service::load_static_services,
-    ssl::{load_static_ssls, DynamicCert},
-    upstream::{load_static_upstreams, SHARED_HEALTH_CHECK_SERVICE},
+use pingsix::admin::AdminHttpApp;
+use pingsix::config::{self, etcd::EtcdConfigSync, Config};
+use pingsix::core;
+use pingsix::logging::Logger;
+use pingsix::proxy::{
+    control_plane::load_static_configurations, event::ProxyEventHandler, ssl::DynamicCert,
+    upstream::SHARED_HEALTH_CHECK_SERVICE,
 };
-use service::{http::HttpService, status::StatusHttpApp};
+use pingsix::service::{http::HttpService, status::StatusHttpApp};
 
 // Service name constants
 const PINGSIX_SERVICE: &str = "pingsix";
@@ -72,9 +60,6 @@ fn main() {
             log::error!("Failed to load static configurations: {e}");
             std::process::exit(1);
         }
-
-        // Mark service as ready after all static configurations are loaded
-        core::status::mark_ready(core::status::ConfigSource::Yaml);
         None
     };
 
@@ -167,66 +152,48 @@ fn add_listeners(
     Ok(())
 }
 
-/// Loads all static configurations from YAML config file.
-///
-/// This includes SSLs, upstreams, services, global rules, and routes.
-/// All configurations must load successfully or the function returns an error.
-fn load_static_configurations(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
-    load_static_ssls(config)?;
-    load_static_upstreams(config)?;
-    load_static_services(config)?;
-    load_static_global_rules(config)?;
-    load_static_routes(config)?;
-
-    log::info!("All static configurations loaded successfully");
-    Ok(())
-}
-
 /// Conditionally enables monitoring and admin services based on configuration.
 ///
-/// Sentry integration requires valid DSN to prevent silent failures in production.
-/// Admin interface is only available when etcd is enabled for security reasons.
+/// Invalid Sentry configuration only disables Sentry; Admin/Status/Prometheus still start.
+/// Admin interface is only available when etcd is enabled.
 fn add_optional_services(server: &mut Server, cfg: &config::Pingsix) {
     if let Some(sentry_cfg) = &cfg.sentry {
         log::debug!("Configuring Sentry monitoring");
-        let dsn = match sentry_cfg.dsn.clone().into_dsn() {
-            Ok(Some(dsn)) => dsn,
+        match sentry_cfg.dsn.clone().into_dsn() {
+            Ok(Some(dsn)) => {
+                server.set_sentry_config(sentry::ClientOptions {
+                    dsn: Some(dsn),
+                    ..Default::default()
+                });
+                log::info!("Sentry monitoring enabled");
+            }
             Ok(None) => {
-                log::warn!("Sentry DSN is empty, monitoring disabled");
-                return;
+                log::warn!("Sentry DSN is empty, Sentry monitoring disabled");
             }
             Err(e) => {
-                log::error!("Invalid Sentry DSN configuration: {e}");
-                return; // Fail fast on invalid DSN to avoid silent monitoring failures
-            }
-        };
-        server.set_sentry_config(sentry::ClientOptions {
-            dsn: Some(dsn),
-            ..Default::default()
-        });
-        log::info!("Sentry monitoring enabled");
-    }
-
-    // Admin interface requires etcd for config validation and security
-    if cfg.etcd.is_some() && cfg.admin.is_some() {
-        if let Some(admin_cfg) = &cfg.admin {
-            if !admin_cfg.address.ip().is_loopback() {
-                log::warn!(
-                    "Admin API is bound to non-loopback address {}. \
-                     API key will be transmitted in cleartext. \
-                     Consider binding to 127.0.0.1 or using a TLS-terminating reverse proxy.",
-                    admin_cfg.address
-                );
+                log::error!("Invalid Sentry DSN configuration, Sentry disabled: {e}");
             }
         }
-        log::debug!("Configuring admin HTTP interface");
-        let admin_service_http = AdminHttpApp::admin_http_service(cfg);
-        server.add_service(admin_service_http);
-        log::info!("Admin HTTP interface enabled");
     }
 
-    // Status/health check endpoint - independent of admin API
+    if cfg.etcd.is_some() && cfg.admin.is_some() {
+        if let Some(admin_cfg) = &cfg.admin {
+            if let Err(e) = validate_admin_bind(admin_cfg) {
+                log::error!("{e}");
+                std::process::exit(1);
+            }
+            log::debug!("Configuring admin HTTP interface");
+            let admin_service_http = AdminHttpApp::admin_http_service(cfg);
+            server.add_service(admin_service_http);
+            log::info!("Admin HTTP interface enabled");
+        }
+    }
+
     if let Some(status_cfg) = &cfg.status {
+        core::status::configure_status_policy(
+            status_cfg.config_stale_after.unwrap_or(300),
+            status_cfg.fail_readiness_when_stale.unwrap_or(false),
+        );
         log::debug!("Configuring status HTTP endpoint on {}", status_cfg.address);
         let status_service_http = StatusHttpApp::status_http_service(status_cfg);
         server.add_service(status_service_http);
@@ -246,4 +213,8 @@ fn add_optional_services(server: &mut Server, cfg: &config::Pingsix) {
             prometheus_cfg.address
         );
     }
+}
+
+fn validate_admin_bind(admin_cfg: &config::Admin) -> Result<(), String> {
+    admin_cfg.validate_bind_safety()
 }

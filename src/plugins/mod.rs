@@ -24,7 +24,10 @@ use std::{collections::HashMap, sync::Arc};
 use once_cell::sync::Lazy;
 use serde_json::Value as JsonValue;
 
-use crate::core::{PluginCreateFn, ProxyError, ProxyPlugin, ProxyResult};
+use crate::{
+    core::{PluginCreateFn, ProxyError, ProxyPlugin, ProxyResult},
+    proxy::upstream::ProxyUpstream,
+};
 
 /// Global registry mapping plugin names to their factory functions.
 ///
@@ -100,6 +103,17 @@ static PLUGIN_BUILDER_REGISTRY: Lazy<HashMap<&'static str, PluginCreateFn>> = La
 ///
 /// # Errors
 /// Returns `ReadError` for unknown plugin names or configuration parsing failures
+pub fn build_plugin_with_upstreams(
+    name: &str,
+    cfg: JsonValue,
+    upstreams: &HashMap<String, Arc<ProxyUpstream>>,
+) -> ProxyResult<Arc<dyn ProxyPlugin>> {
+    if name == traffic_split::PLUGIN_NAME {
+        return traffic_split::create_traffic_split_plugin_with_upstreams(cfg, upstreams);
+    }
+    build_plugin(name, cfg)
+}
+
 pub fn build_plugin(name: &str, cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyPlugin>> {
     let builder = PLUGIN_BUILDER_REGISTRY
         .get(name)

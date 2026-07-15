@@ -134,7 +134,7 @@ impl ProxyPlugin for PluginKeyAuth {
         PRIORITY
     }
 
-    async fn request_filter(&self, session: &mut Session, _ctx: &mut ProxyContext) -> Result<bool> {
+    async fn request_filter(&self, session: &mut Session, ctx: &mut ProxyContext) -> Result<bool> {
         // Try to extract key from header or query
         let (value, source) =
             request::get_req_header_value(session.req_header(), &self.config.header)
@@ -144,6 +144,10 @@ impl ProxyPlugin for PluginKeyAuth {
                         .map(|val| (val, KeySource::Query))
                 })
                 .unwrap_or(("", KeySource::None));
+
+        if source != KeySource::None {
+            ctx.mark_request_has_credentials();
+        }
 
         // Validate key using constant-time comparison
         if value.is_empty() || !self.is_valid_key(value) {

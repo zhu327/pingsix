@@ -21,7 +21,8 @@ use crate::{
         Admin, Identifiable, Pingsix,
     },
     core::{constant_time_eq, ProxyError},
-    plugins::build_plugin,
+    plugins::{build_plugin, traffic_split},
+    proxy::ssl::ProxySSL,
     utils::response::{CommonErrors, ResponseBuilder},
 };
 
@@ -68,9 +69,11 @@ impl ApiError {
     fn into_response(self) -> ApiResponse {
         use ApiError::*;
         match self {
-            EtcdGetError(_) | RequestBodyReadError(_) => {
-                CommonErrors::internal_server_error(&self.to_string())
+            EtcdGetError(msg) => {
+                log::error!("Admin etcd get error: {msg}");
+                CommonErrors::internal_server_error("Backend configuration store unavailable")
             }
+            RequestBodyReadError(_) => CommonErrors::bad_request("Failed to read request body"),
             ValidationError(_) | MissingParameter(_) | InvalidRequest(_) => {
                 CommonErrors::bad_request(&self.to_string())
             }
@@ -106,7 +109,15 @@ impl ApiError {
             ProxyError::Validation(_) | ProxyError::Configuration(_) => {
                 CommonErrors::bad_request(&proxy_err.to_string())
             }
-            _ => CommonErrors::internal_server_error(&proxy_err.to_string()),
+            ProxyError::Etcd(_) => {
+                // Do not echo etcd endpoints/keys in client responses.
+                log::error!("Admin etcd error: {proxy_err}");
+                CommonErrors::internal_server_error("Backend configuration store unavailable")
+            }
+            _ => {
+                log::error!("Admin internal error: {proxy_err}");
+                CommonErrors::internal_server_error("Internal server error")
+            }
         }
     }
 }
@@ -149,6 +160,13 @@ trait AdminResource: DeserializeOwned + Validate + Identifiable + Send + Sync + 
 // Implement AdminResource for all supported configuration types
 fn validate_plugins(plugins: &HashMap<String, serde_json::Value>) -> ApiResult<()> {
     for (name, value) in plugins {
+        if name == "traffic-split" {
+            // Do not resolve named upstreams against the live runtime; Candidate publish owns that.
+            traffic_split::validate_traffic_split_config(value).map_err(|e| {
+                ApiError::ValidationError(format!("Failed to validate plugin '{name}': {e}"))
+            })?;
+            continue;
+        }
         build_plugin(name, value.clone()).map_err(|e| {
             ApiError::ValidationError(format!("Failed to build plugin '{name}': {e}"))
         })?;
@@ -186,6 +204,12 @@ impl AdminResource for config::GlobalRule {
 
 impl AdminResource for config::SSL {
     const RESOURCE_TYPE: &'static str = "ssls";
+
+    fn validate_plugins_if_supported(resource: &Self) -> ApiResult<()> {
+        ProxySSL::try_from(resource.clone())
+            .map_err(|e| ApiError::ValidationError(format!("Invalid SSL certificate/key: {e}")))?;
+        Ok(())
+    }
 }
 
 macro_rules! admin_handler {
@@ -474,7 +498,7 @@ impl AdminSessionExt for ServerSession {
         match self.get_header(header::CONTENT_TYPE) {
             Some(content_type) => {
                 let ct_str = content_type.to_str().unwrap_or("");
-                if ct_str.starts_with("application/json") {
+                if is_json_content_type(ct_str) {
                     Ok(())
                 } else {
                     Err(ApiError::InvalidRequest(
@@ -487,6 +511,14 @@ impl AdminSessionExt for ServerSession {
             )),
         }
     }
+}
+
+fn is_json_content_type(ct_str: &str) -> bool {
+    ct_str
+        .split(';')
+        .next()
+        .map(str::trim)
+        .is_some_and(|media_type| media_type.eq_ignore_ascii_case("application/json"))
 }
 
 async fn read_request_body(http_session: &mut ServerSession) -> Result<Vec<u8>, ApiError> {
@@ -503,4 +535,34 @@ async fn read_request_body(http_session: &mut ServerSession) -> Result<Vec<u8>, 
         body_data.extend_from_slice(&bytes);
     }
     Ok(body_data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn content_type_accepts_json_with_charset() {
+        assert!(is_json_content_type("application/json"));
+        assert!(is_json_content_type("application/json; charset=utf-8"));
+        assert!(is_json_content_type("Application/JSON;charset=UTF-8"));
+    }
+
+    #[test]
+    fn content_type_rejects_near_misses() {
+        assert!(!is_json_content_type("application/json-malformed"));
+        assert!(!is_json_content_type("text/json"));
+        assert!(!is_json_content_type(""));
+    }
+
+    #[test]
+    fn empty_api_key_config_is_rejected_by_validator() {
+        use validator::Validate;
+        let admin = config::Admin {
+            address: "127.0.0.1:9181".parse().unwrap(),
+            api_key: "   ".into(),
+            allow_insecure_remote: false,
+        };
+        assert!(admin.validate().is_err());
+    }
 }

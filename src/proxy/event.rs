@@ -1,94 +1,13 @@
-use std::sync::Arc;
+//! Etcd event handler that delegates to the unified ControlPlane.
 
 use etcd_client::{Event, GetResponse};
 
 use crate::{
-    config::{
-        etcd::{json_to_resource, EtcdEventHandler},
-        GlobalRule, Identifiable, Route, Service, Upstream, SSL,
-    },
-    core::status,
+    config::etcd::EtcdEventHandler,
+    core::{status, ProxyResult},
 };
 
-use super::{
-    global_rule::{reload_global_plugin, ProxyGlobalRule, GLOBAL_RULE_MAP},
-    route::{reload_global_route_match, ProxyRoute, ROUTE_MAP},
-    service::{ProxyService, SERVICE_MAP},
-    ssl::{reload_global_ssl_match, ProxySSL, SSL_MAP},
-    upstream::{ProxyUpstream, UPSTREAM_MAP},
-    MapOperations,
-};
-
-// Adapter functions to convert ProxyResult to pingora Result
-fn create_proxy_route(route: Route) -> pingora_error::Result<ProxyRoute> {
-    ProxyRoute::new_with_upstream_and_plugins(route).map_err(|e| e.into())
-}
-
-fn create_proxy_upstream(upstream: Upstream) -> pingora_error::Result<ProxyUpstream> {
-    ProxyUpstream::new_with_shared_health_check(upstream).map_err(|e| e.into())
-}
-
-fn create_proxy_service(service: Service) -> pingora_error::Result<ProxyService> {
-    ProxyService::new_with_upstream_and_plugins(service).map_err(|e| e.into())
-}
-
-fn create_proxy_global_rule(rule: GlobalRule) -> pingora_error::Result<ProxyGlobalRule> {
-    ProxyGlobalRule::new_with_plugins(rule).map_err(|e| e.into())
-}
-
-// Note: The following types must implement `Identifiable` in `crate::config`:
-// - Route
-// - Upstream
-// - Service
-// - GlobalRule
-// - SSL
-// Example implementation (add to `src/config/mod.rs` or relevant module):
-/*
-impl Identifiable for Route {
-    fn id(&self) -> String {
-        self.id.clone()
-    }
-    fn set_id(&mut self, id: String) {
-        self.id = id;
-    }
-}
-// Repeat for Upstream, Service, GlobalRule, SSL
-*/
-
-// Trait to compare proxy types with their inner configuration types
-trait InnerComparable<T> {
-    fn inner_equals(&self, other: &T) -> bool;
-}
-
-impl InnerComparable<Route> for ProxyRoute {
-    fn inner_equals(&self, other: &Route) -> bool {
-        self.inner == *other
-    }
-}
-
-impl InnerComparable<Upstream> for ProxyUpstream {
-    fn inner_equals(&self, other: &Upstream) -> bool {
-        self.inner == *other
-    }
-}
-
-impl InnerComparable<Service> for ProxyService {
-    fn inner_equals(&self, other: &Service) -> bool {
-        self.inner == *other
-    }
-}
-
-impl InnerComparable<GlobalRule> for ProxyGlobalRule {
-    fn inner_equals(&self, other: &GlobalRule) -> bool {
-        self.inner == *other
-    }
-}
-
-impl InnerComparable<SSL> for ProxySSL {
-    fn inner_equals(&self, other: &SSL) -> bool {
-        self.inner == *other
-    }
-}
+use super::control_plane::{ResourceConfigSet, CONTROL_PLANE};
 
 pub struct ProxyEventHandler;
 
@@ -102,317 +21,35 @@ impl ProxyEventHandler {
     pub fn new() -> Self {
         ProxyEventHandler
     }
-
-    /// Generic function to handle list responses for different resource types.
-    fn handle_list_resource<T, P>(
-        &self,
-        response: &GetResponse,
-        key_type: &str,
-        map: &impl MapOperations<P>,
-        create_proxy: fn(T) -> pingora_error::Result<P>,
-        reload_fn: Option<fn()>,
-    ) where
-        T: serde::de::DeserializeOwned + Clone + Identifiable,
-        P: Identifiable + InnerComparable<T>,
-    {
-        let resources: Vec<T> = response
-            .kvs()
-            .iter()
-            .filter_map(|kv| match parse_key(kv.key()) {
-                Ok((id, parsed_key_type)) if parsed_key_type == key_type => {
-                    match json_to_resource::<T>(kv.value()) {
-                        Ok(mut resource) => {
-                            resource.set_id(id);
-                            Some(resource)
-                        }
-                        Err(e) => {
-                            log::error!("Failed to load etcd {key_type}: {id} {e}");
-                            None
-                        }
-                    }
-                }
-                _ => None,
-            })
-            .collect();
-
-        let proxy_resources: Vec<Arc<P>> = resources
-            .iter()
-            .filter_map(|resource| {
-                if let Some(proxy_res) = map.get(resource.id()) {
-                    if proxy_res.inner_equals(resource) {
-                        return Some(proxy_res.clone());
-                    }
-                }
-
-                log::info!("Configuring {}: {}", key_type, resource.id());
-                match create_proxy(resource.clone()) {
-                    Ok(proxy) => Some(Arc::new(proxy)),
-                    Err(e) => {
-                        log::error!(
-                            "Failed to create proxy for {} {}: {}",
-                            key_type,
-                            resource.id(),
-                            e
-                        );
-                        None
-                    }
-                }
-            })
-            .collect();
-
-        map.reload_resources(proxy_resources);
-        if let Some(reload) = reload_fn {
-            reload();
-        }
-    }
-
-    fn handle_routes(&self, response: &GetResponse) {
-        self.handle_list_resource(
-            response,
-            "routes",
-            &*ROUTE_MAP,
-            create_proxy_route,
-            Some(reload_global_route_match),
-        );
-    }
-
-    fn handle_upstreams(&self, response: &GetResponse) {
-        self.handle_list_resource(
-            response,
-            "upstreams",
-            &*UPSTREAM_MAP,
-            create_proxy_upstream,
-            None,
-        );
-    }
-
-    fn handle_services(&self, response: &GetResponse) {
-        self.handle_list_resource(
-            response,
-            "services",
-            &*SERVICE_MAP,
-            create_proxy_service,
-            None,
-        );
-    }
-
-    fn handle_global_rules(&self, response: &GetResponse) {
-        self.handle_list_resource(
-            response,
-            "global_rules",
-            &*GLOBAL_RULE_MAP,
-            create_proxy_global_rule,
-            Some(reload_global_plugin),
-        );
-    }
-
-    fn handle_ssls(&self, response: &GetResponse) {
-        self.handle_list_resource(
-            response,
-            "ssls",
-            &*SSL_MAP,
-            |ssl| Ok(ProxySSL::from(ssl)),
-            Some(reload_global_ssl_match),
-        );
-    }
-
-    fn handle_resource<T, P, F>(
-        &self,
-        event: &Event,
-        key_type: &str,
-        map: &impl MapOperations<P>,
-        create_proxy: F,
-    ) where
-        T: serde::de::DeserializeOwned + Clone + Identifiable,
-        P: Identifiable + InnerComparable<T>,
-        F: Fn(T) -> pingora_error::Result<P>,
-    {
-        // Handle missing kv gracefully instead of panicking
-        let kv = match event.kv() {
-            Some(kv) => kv,
-            None => {
-                log::error!("Event missing key-value pair in handle_resource");
-                return;
-            }
-        };
-        let key = kv.key();
-        match parse_key(key) {
-            Ok((id, parsed_key_type)) if parsed_key_type == key_type => {
-                match json_to_resource::<T>(kv.value()) {
-                    Ok(mut resource) => {
-                        // CRITICAL FIX: Set the ID from the etcd key to ensure correct DashMap insertion
-                        resource.set_id(id.clone());
-                        log::info!("Handling {key_type}: {id}");
-                        if let Ok(proxy) = create_proxy(resource) {
-                            map.insert_resource(Arc::new(proxy));
-                        } else {
-                            log::error!("Failed to create proxy for {key_type} {id}");
-                        }
-                    }
-                    Err(e) => {
-                        log::error!("Failed to deserialize resource of type {key_type}: {e}");
-                    }
-                }
-            }
-            _ => {
-                log::warn!(
-                    "Failed to parse key or incorrect key type for {} event: {}",
-                    key_type,
-                    String::from_utf8_lossy(key)
-                );
-            }
-        }
-    }
-
-    fn handle_route_event(&self, event: &Event) {
-        self.handle_resource(event, "routes", &*ROUTE_MAP, create_proxy_route);
-    }
-
-    fn handle_upstream_event(&self, event: &Event) {
-        self.handle_resource(event, "upstreams", &*UPSTREAM_MAP, create_proxy_upstream);
-    }
-
-    fn handle_service_event(&self, event: &Event) {
-        self.handle_resource(event, "services", &*SERVICE_MAP, create_proxy_service);
-    }
-
-    fn handle_global_rule_event(&self, event: &Event) {
-        self.handle_resource(
-            event,
-            "global_rules",
-            &*GLOBAL_RULE_MAP,
-            create_proxy_global_rule,
-        );
-        reload_global_plugin();
-    }
-
-    fn handle_ssl_event(&self, event: &Event) {
-        self.handle_resource(event, "ssls", &*SSL_MAP, |ssl| Ok(ProxySSL::from(ssl)));
-        reload_global_ssl_match();
-    }
-}
-
-// When resource creation fails during etcd sync, the gateway logs and skips.
-// This may cause state inconsistency. A failed route creation means traffic that
-// etcd expects to be routed will receive 404s instead. For production deployments,
-// monitor the "Failed to create proxy" error logs and consider adding health metrics.
-impl ProxyEventHandler {
-    /// Apply a single event's resource updates without rebuilding the global
-    /// route match table. Returns `true` when the event touched routes or
-    /// services, signaling the caller to rebuild route matching.
-    fn apply_event(&self, event: &Event) -> bool {
-        let kv = match event.kv() {
-            Some(kv) => kv,
-            None => {
-                log::warn!("Event does not contain a key-value pair");
-                return false;
-            }
-        };
-
-        let key = String::from_utf8_lossy(kv.key());
-        let mut needs_route_reload = false;
-        match event.event_type() {
-            etcd_client::EventType::Put => match parse_key(kv.key()) {
-                Ok((_, key_type)) => {
-                    log::info!("Processing PUT event for key: {key}");
-                    match key_type.as_str() {
-                        "routes" => {
-                            self.handle_route_event(event);
-                            needs_route_reload = true;
-                        }
-                        "upstreams" => self.handle_upstream_event(event),
-                        "services" => {
-                            self.handle_service_event(event);
-                            needs_route_reload = true;
-                        }
-                        "global_rules" => self.handle_global_rule_event(event),
-                        "ssls" => self.handle_ssl_event(event),
-                        _ => log::warn!("Unhandled PUT event for key type: {key_type}"),
-                    }
-                }
-                Err(e) => log::error!("Failed to parse key during PUT event: {key}: {e}"),
-            },
-            etcd_client::EventType::Delete => match parse_key(kv.key()) {
-                Ok((id, key_type)) => {
-                    log::info!("Processing DELETE event for {key_type}: {id}");
-                    match key_type.as_str() {
-                        "routes" => {
-                            ROUTE_MAP.remove(&id);
-                            needs_route_reload = true;
-                        }
-                        "upstreams" => {
-                            UPSTREAM_MAP.remove(&id);
-                        }
-                        "services" => {
-                            SERVICE_MAP.remove(&id);
-                            needs_route_reload = true;
-                        }
-                        "global_rules" => {
-                            GLOBAL_RULE_MAP.remove(&id);
-                            reload_global_plugin();
-                        }
-                        "ssls" => {
-                            SSL_MAP.remove(&id);
-                            reload_global_ssl_match();
-                        }
-                        _ => log::warn!("Unhandled DELETE event for key type: {key_type}"),
-                    }
-                }
-                Err(e) => log::error!("Failed to parse key during DELETE event: {key}: {e}"),
-            },
-        }
-        needs_route_reload
-    }
 }
 
 impl EtcdEventHandler for ProxyEventHandler {
-    fn handle_events(&self, events: &[Event]) {
-        // Coalesce route-match rebuilds: apply every event's resource update
-        // first, then rebuild the global route match table at most once for the
-        // whole batch.
-        let mut needs_route_reload = false;
-        for event in events {
-            if self.apply_event(event) {
-                needs_route_reload = true;
-            }
+    fn handle_events(&self, events: &[Event]) -> ProxyResult<()> {
+        if events.is_empty() {
+            return Ok(());
         }
-        if needs_route_reload {
-            reload_global_route_match();
-        }
+
+        // Use the highest revision observed in the batch when available.
+        let revision = events
+            .iter()
+            .filter_map(|event| event.kv().map(|kv| kv.mod_revision()))
+            .max()
+            .unwrap_or(0);
+
+        CONTROL_PLANE.apply_events(events, revision)?;
+        Ok(())
     }
 
-    fn handle_event(&self, event: &Event) {
-        if self.apply_event(event) {
-            reload_global_route_match();
-        }
-    }
+    fn handle_list_response(&self, response: &GetResponse) -> ProxyResult<()> {
+        let revision = response.header().map(|h| h.revision()).ok_or_else(|| {
+            crate::core::ProxyError::etcd_error("Failed to get header from list response")
+        })?;
 
-    fn handle_list_response(&self, response: &GetResponse) {
-        self.handle_ssls(response);
-        self.handle_upstreams(response);
-        self.handle_services(response);
-        self.handle_global_rules(response);
-        self.handle_routes(response);
-
-        // Mark service as ready after successfully loading all configurations from etcd
+        let resources = ResourceConfigSet::from_etcd_list(response)?;
+        CONTROL_PLANE.replace_all(resources, revision)?;
         status::mark_ready(status::ConfigSource::Etcd);
+        status::mark_etcd_connected(true);
+        status::set_revision(Some(revision));
+        Ok(())
     }
-}
-
-/// Parses etcd key in the format `/prefix/resource_type/id`.
-fn parse_key(key: &[u8]) -> Result<(String, String), Box<dyn std::error::Error>> {
-    let key = std::str::from_utf8(key)?;
-    let mut parts = key.rsplit('/');
-    let id = parts
-        .next()
-        .ok_or_else(|| format!("Invalid key format: {key}"))?;
-    let key_type = parts
-        .next()
-        .ok_or_else(|| format!("Invalid key format: {key}"))?;
-
-    if id.is_empty() || key_type.is_empty() || parts.next().is_none() {
-        return Err(format!("Invalid key format: {key}").into());
-    }
-
-    Ok((id.to_string(), key_type.to_string()))
 }

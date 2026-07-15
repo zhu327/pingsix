@@ -11,4 +11,4 @@ pub mod load_balancer;
 
 // Re-export commonly used items
 pub use health_check::SHARED_HEALTH_CHECK_SERVICE;
-pub use load_balancer::{load_static_upstreams, upstream_fetch, ProxyUpstream, UPSTREAM_MAP};
+pub use load_balancer::ProxyUpstream;

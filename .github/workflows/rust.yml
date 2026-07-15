@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: [ "main" ]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-Dwarnings"
@@ -13,9 +20,15 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
     - uses: actions/checkout@v4
+
+    - name: Install stable toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: clippy, rustfmt
 
     - name: Cache Cargo dependencies
       uses: actions/cache@v4
@@ -24,18 +37,79 @@ jobs:
           ~/.cargo/registry
           ~/.cargo/git
           target
-        key: cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+        key: cargo-${{ runner.os }}-stable-${{ hashFiles('Cargo.lock') }}
         restore-keys: |
-          cargo-${{ runner.os }}-
+          cargo-${{ runner.os }}-stable-
 
     - name: Install Protoc
       uses: arduino/setup-protoc@v3
 
+    - name: Check formatting
+      run: cargo +stable fmt --all -- --check
+
     - name: Build
-      run: cargo build --verbose
+      run: cargo +stable build --locked --all-targets --all-features --verbose
 
     - name: Run Clippy
-      run: cargo clippy --all-features
+      run: cargo +stable clippy --locked --all-targets --all-features -- -D warnings
 
     - name: Run tests
-      run: cargo test --verbose
+      run: cargo +stable test --locked --all-targets --all-features --verbose
+
+    - name: Security audit
+      run: |
+        cargo install cargo-audit --locked --version 0.21.2
+        cargo audit
+
+  container-smoke:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Start mock upstream
+      run: |
+        mkdir -p /tmp/mock-upstream
+        echo 'pingsix-smoke-ok' > /tmp/mock-upstream/index.html
+        python3 -m http.server 18080 --directory /tmp/mock-upstream &
+        for _ in {1..20}; do
+          if curl --fail --silent http://127.0.0.1:18080/ | grep -q pingsix-smoke-ok; then
+            exit 0
+          fi
+          sleep 0.5
+        done
+        exit 1
+
+    - name: Build image
+      run: docker build --tag pingsix:ci .
+
+    - name: Start image
+      run: |
+        docker run --detach --name pingsix-ci \
+          --add-host=host.docker.internal:host-gateway \
+          -p 8080:8080 \
+          -v "$PWD/ci/config.smoke.yaml:/app/config.yaml:ro" \
+          pingsix:ci
+
+    - name: Wait for readiness
+      run: |
+        for _ in {1..12}; do
+          if docker exec pingsix-ci curl --fail --silent http://127.0.0.1:7085/status/ready >/dev/null; then
+            exit 0
+          fi
+          sleep 5
+        done
+        docker logs pingsix-ci
+        exit 1
+
+    - name: Proxy smoke request
+      run: |
+        body=$(curl --silent --show-error --fail http://127.0.0.1:8080/)
+        echo "proxy body: $body"
+        echo "$body" | grep -q pingsix-smoke-ok
+
+    - name: Stop image
+      if: always()
+      run: docker rm --force pingsix-ci || true

@@ -32,7 +32,7 @@ PingSIX is a modern API gateway designed for cloud-native environments, offering
 
 ### Prerequisites
 
-- Rust 1.70 or later
+- Rust stable (MSRV 1.88); local toolchain via `rust-toolchain.toml` (`channel = "stable"`)
 - (Optional) etcd for dynamic configuration
 
 ### Installation

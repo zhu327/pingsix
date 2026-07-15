@@ -1,7 +1,4 @@
-FROM --platform=$BUILDPLATFORM rust:1.88-slim AS builder
-
-ARG TARGETPLATFORM
-ARG BUILDPLATFORM
+FROM rust:1.88-slim AS builder
 
 RUN apt-get update && apt-get install -y \
     pkg-config \
@@ -16,21 +13,22 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-COPY Cargo.toml ./
+COPY Cargo.toml Cargo.lock ./
 
 RUN mkdir src && \
     echo "fn main() {}" > src/main.rs && \
-    cargo build --release && \
+    cargo build --release --locked && \
     rm -rf src
 
 COPY src ./src
 
-RUN cargo build --release
+RUN cargo build --release --locked
 
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y \
     ca-certificates \
+    curl \
     libssl3 \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
@@ -44,10 +42,16 @@ COPY --from=builder /app/target/release/pingsix /usr/local/bin/pingsix
 COPY config.yaml /app/config.yaml
 
 RUN mkdir -p /var/log/pingsix /var/run/pingsix && \
+    sed -i \
+        -e 's|pid_file: /run/pingora.pid|pid_file: /var/run/pingsix/pingora.pid|' \
+        -e '/^  user: nobody$/d' \
+        -e '/^  group: webusers$/d' \
+        /app/config.yaml && \
     chown -R pingsix:pingsix /app /var/log/pingsix /var/run/pingsix
 
 USER pingsix
 
-EXPOSE 8080 9091 9181
+# Proxy listener and Prometheus. Status binds to 127.0.0.1 inside the container.
+EXPOSE 8080 9091
 
 CMD ["pingsix", "-c", "/app/config.yaml"]
