@@ -213,6 +213,24 @@ pub fn validate_traffic_split_config(cfg: &JsonValue) -> ProxyResult<()> {
     Ok(())
 }
 
+/// Collect named `upstream_id` references from a traffic-split config value.
+///
+/// Used by Admin/graph validation so route/service/global-rule plugins are
+/// checked against the same resource set as `CandidateSnapshot::build`.
+pub fn named_upstream_ids(cfg: &JsonValue) -> ProxyResult<Vec<String>> {
+    let config: PluginConfig = serde_json::from_value(cfg.clone())
+        .map_err(|e| ProxyError::Serialization(e.to_string()))?;
+    let mut ids = Vec::new();
+    for rule in &config.rules {
+        for wu in &rule.weighted_upstreams {
+            if let Some(id) = wu.upstream_id.as_ref() {
+                ids.push(id.clone());
+            }
+        }
+    }
+    Ok(ids)
+}
+
 pub(crate) fn create_traffic_split_plugin_with_upstreams(
     cfg: JsonValue,
     upstreams: &HashMap<String, Arc<ProxyUpstream>>,

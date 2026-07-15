@@ -25,6 +25,9 @@ pub enum ProxyError {
     Serialization(String),
     /// Etcd-related errors
     Etcd(String),
+    /// Compare-and-swap conflict: the key's mod_revision did not match the
+    /// expected value (another writer committed first). Maps to HTTP 409.
+    CasConflict(String),
     /// Authentication/authorization errors
     Auth(String),
     /// Rate limiting errors
@@ -59,6 +62,7 @@ impl std::fmt::Display for ProxyError {
             ProxyError::ValidationStructured(errors) => fmt_err!(f, "Validation error: ", errors),
             ProxyError::Serialization(msg) => fmt_err!(f, "Serialization error: ", msg),
             ProxyError::Etcd(msg) => fmt_err!(f, "Etcd error: ", msg),
+            ProxyError::CasConflict(msg) => fmt_err!(f, "CAS conflict: ", msg),
             ProxyError::Auth(msg) => fmt_err!(f, "Authentication error: ", msg),
             ProxyError::RateLimit(msg) => fmt_err!(f, "Rate limit error: ", msg),
             ProxyError::WithCause { message, cause } => write!(f, "{message}: {cause}"),
@@ -126,7 +130,8 @@ fn pingora_error_type(err: &ProxyError) -> pingora_error::ErrorType {
         | ProxyError::Validation(_)
         | ProxyError::ValidationStructured(_)
         | ProxyError::Serialization(_)
-        | ProxyError::Etcd(_) => ErrorType::InternalError,
+        | ProxyError::Etcd(_)
+        | ProxyError::CasConflict(_) => ErrorType::InternalError,
         ProxyError::DnsResolution(_) => ErrorType::ConnectNoRoute,
         ProxyError::Ssl(_) => ErrorType::TLSHandshakeFailure,
         ProxyError::Auth(_) => ErrorType::HTTPStatus(401),

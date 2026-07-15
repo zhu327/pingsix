@@ -81,7 +81,13 @@ impl ProxyUpstream {
     /// Test helper: select a backend without a full proxy session.
     #[cfg(test)]
     pub(crate) fn select_backend_for_test(&self) -> Option<Backend> {
-        with_lb!(&self.lb, |lb| lb.upstreams.select(b"", 256))
+        let mut backend = with_lb!(&self.lb, |lb| lb.upstreams.select(b"", 256));
+        if let Some(backend) = backend.as_mut() {
+            if let Some(peer) = backend.ext.get_mut::<HttpPeer>() {
+                self.set_timeout(peer);
+            }
+        }
+        backend
     }
 
     /// Sets the timeout for an `HttpPeer`.
@@ -91,8 +97,10 @@ impl ProxyUpstream {
             connect,
             read,
             send,
-        }) = self.inner.timeout
-        {
+        }) = config::resolve_upstream_timeout(
+            self.inner.timeout.clone(),
+            config::default_upstream_timeout(),
+        ) {
             p.options.connection_timeout = Some(Duration::from_secs(connect));
             p.options.read_timeout = Some(Duration::from_secs(read));
             p.options.write_timeout = Some(Duration::from_secs(send));
@@ -361,5 +369,89 @@ impl From<config::HealthCheck> for Box<HttpHealthCheck> {
 
         // Return the Boxed health check
         Box::new(health_check)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{
+        init_default_upstream_timeout, SelectionType, Timeout, UpstreamHashOn, UpstreamPassHost,
+        UpstreamScheme,
+    };
+    use std::collections::HashMap;
+
+    fn sample_upstream(id: &str, timeout: Option<Timeout>) -> config::Upstream {
+        let mut nodes = HashMap::new();
+        nodes.insert("127.0.0.1:18080".to_string(), 1);
+        config::Upstream {
+            id: id.to_string(),
+            retries: None,
+            retry_timeout: None,
+            timeout,
+            nodes,
+            r#type: SelectionType::RoundRobin,
+            checks: None,
+            hash_on: UpstreamHashOn::VARS,
+            key: "uri".into(),
+            scheme: UpstreamScheme::HTTP,
+            pass_host: UpstreamPassHost::PASS,
+            upstream_host: None,
+            tls: None,
+        }
+    }
+
+    #[test]
+    fn explicit_upstream_timeout_applied_to_peer() {
+        init_default_upstream_timeout(Some(Timeout {
+            connect: 5,
+            send: 5,
+            read: 5,
+        }));
+        let upstream = ProxyUpstream::build(sample_upstream(
+            "payments",
+            Some(Timeout {
+                connect: 30,
+                send: 30,
+                read: 30,
+            }),
+        ))
+        .unwrap();
+        let backend = upstream.select_backend_for_test().unwrap();
+        let peer = backend.ext.get::<HttpPeer>().unwrap();
+        assert_eq!(
+            peer.options.connection_timeout,
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(peer.options.read_timeout, Some(Duration::from_secs(30)));
+        assert_eq!(peer.options.write_timeout, Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn missing_upstream_timeout_uses_global_default() {
+        init_default_upstream_timeout(Some(Timeout {
+            connect: 5,
+            send: 5,
+            read: 5,
+        }));
+        // First-wins OnceCell: if a prior test already set a different value,
+        // resolve via whatever is currently configured.
+        let global = crate::config::default_upstream_timeout();
+        let upstream = ProxyUpstream::build(sample_upstream("plain", None)).unwrap();
+        let backend = upstream.select_backend_for_test().unwrap();
+        let peer = backend.ext.get::<HttpPeer>().unwrap();
+        if let Some(g) = global {
+            assert_eq!(
+                peer.options.connection_timeout,
+                Some(Duration::from_secs(g.connect))
+            );
+            assert_eq!(peer.options.read_timeout, Some(Duration::from_secs(g.read)));
+            assert_eq!(
+                peer.options.write_timeout,
+                Some(Duration::from_secs(g.send))
+            );
+        } else {
+            assert!(peer.options.connection_timeout.is_none());
+        }
     }
 }

@@ -121,9 +121,9 @@ fn validate_key(key: &str) -> Result<(), ValidationError> {
 }
 
 /// Rate Limit plugin implementation.
-/// Enforces request rate limiting using an in-memory counter.
-/// Note: This is a single-instance rate limiter. For distributed environments, consider using
-/// an external store like Redis or etcd for global rate limiting.
+///
+/// This is a per-instance in-memory rate limiter. In a multi-replica deployment,
+/// the effective limit is approximately `config.count * replica_count`.
 pub struct PluginRateLimit {
     config: PluginConfig,
     rate: Rate,
@@ -218,17 +218,13 @@ impl PluginRateLimit {
         current_count: isize,
         remaining: isize,
     ) -> Result<bool> {
-        let mut headers = Vec::new();
-
-        if self.config.show_limit_quota_header {
-            headers.push(("X-Rate-Limit-Limit", self.config.count.to_string()));
-            headers.push(("X-Rate-Limit-Remaining", remaining.to_string()));
-            headers.push(("X-Rate-Limit-Reset", self.config.time_window.to_string()));
-            // Add current usage for debugging
-            headers.push(("X-Rate-Limit-Used", current_count.to_string()));
-            // Add retry-after header
-            headers.push(("Retry-After", self.config.time_window.to_string()));
-        }
+        let headers = build_rate_limit_headers(
+            self.config.count,
+            remaining,
+            self.config.time_window,
+            current_count,
+            self.config.show_limit_quota_header,
+        );
 
         let headers_ref: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (&**k, &**v)).collect();
 
@@ -248,5 +244,51 @@ impl PluginRateLimit {
         .await?;
 
         Ok(true)
+    }
+}
+
+/// Build the rate-limit response headers for a rejected request.
+///
+/// `X-RateLimit-Scope: local` advertises that this limiter is per-instance/in-memory,
+/// so operators know the effective limit scales with replica count.
+fn build_rate_limit_headers(
+    count: u32,
+    remaining: isize,
+    time_window: u32,
+    current_count: isize,
+    show: bool,
+) -> Vec<(&'static str, String)> {
+    if !show {
+        return Vec::new();
+    }
+
+    vec![
+        ("X-Rate-Limit-Limit", count.to_string()),
+        ("X-Rate-Limit-Remaining", remaining.to_string()),
+        ("X-Rate-Limit-Reset", time_window.to_string()),
+        ("X-Rate-Limit-Used", current_count.to_string()),
+        ("Retry-After", time_window.to_string()),
+        ("X-RateLimit-Scope", "local".to_string()),
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rate_limit_response_includes_local_scope() {
+        let headers = build_rate_limit_headers(10, 3, 60, 7, true);
+        let scope = headers
+            .iter()
+            .find(|(name, _)| *name == "X-RateLimit-Scope")
+            .map(|(_, value)| value.as_str());
+        assert_eq!(scope, Some("local"));
+    }
+
+    #[test]
+    fn build_rate_limit_headers_respects_show_flag() {
+        let headers = build_rate_limit_headers(10, 3, 60, 7, false);
+        assert!(headers.is_empty());
     }
 }

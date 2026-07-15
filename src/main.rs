@@ -43,6 +43,10 @@ fn main() {
         None
     };
 
+    // Defaults must be initialized before any plugin/upstream build so static YAML
+    // snapshots bake in `pingsix.defaults` (cache object size, upstream timeout).
+    init_pingsix_defaults(&config.pingsix);
+
     // Choose config source: etcd for dynamic updates in distributed env, or static file for simple setups
     let etcd_sync = if let Some(etcd_cfg) = &config.pingsix.etcd {
         log::debug!(
@@ -158,20 +162,24 @@ fn add_listeners(
 /// Admin interface is only available when etcd is enabled.
 fn add_optional_services(server: &mut Server, cfg: &config::Pingsix) {
     if let Some(sentry_cfg) = &cfg.sentry {
-        log::debug!("Configuring Sentry monitoring");
-        match sentry_cfg.dsn.clone().into_dsn() {
-            Ok(Some(dsn)) => {
-                server.set_sentry_config(sentry::ClientOptions {
-                    dsn: Some(dsn),
-                    ..Default::default()
-                });
-                log::info!("Sentry monitoring enabled");
-            }
-            Ok(None) => {
-                log::warn!("Sentry DSN is empty, Sentry monitoring disabled");
-            }
-            Err(e) => {
-                log::error!("Invalid Sentry DSN configuration, Sentry disabled: {e}");
+        if is_example_sentry_dsn(&sentry_cfg.dsn) {
+            log::warn!("Ignoring example Sentry DSN, Sentry disabled");
+        } else {
+            log::debug!("Configuring Sentry monitoring");
+            match sentry_cfg.dsn.clone().into_dsn() {
+                Ok(Some(dsn)) => {
+                    server.set_sentry_config(sentry::ClientOptions {
+                        dsn: Some(dsn),
+                        ..Default::default()
+                    });
+                    log::info!("Sentry monitoring enabled");
+                }
+                Ok(None) => {
+                    log::warn!("Sentry DSN is empty, Sentry monitoring disabled");
+                }
+                Err(e) => {
+                    log::error!("Invalid Sentry DSN configuration, Sentry disabled: {e}");
+                }
             }
         }
     }
@@ -215,6 +223,43 @@ fn add_optional_services(server: &mut Server, cfg: &config::Pingsix) {
     }
 }
 
+/// Apply `pingsix.defaults` before any static/etcd resource graph is built.
+///
+/// Cache plugins and upstream peers resolve their fallbacks at construction time;
+/// initializing after `load_static_configurations` would leave the baked-in
+/// 1 MiB / absent-timeout fallbacks in place for the entire process lifetime.
+fn init_pingsix_defaults(cfg: &config::Pingsix) {
+    if let Some(cache) = cfg.defaults.as_ref().and_then(|d| d.cache.as_ref()) {
+        pingsix::service::http::init_cache_defaults(cache);
+    }
+    pingsix::config::init_default_upstream_timeout(
+        cfg.defaults
+            .as_ref()
+            .and_then(|d| d.upstream_timeout.clone()),
+    );
+}
+
 fn validate_admin_bind(admin_cfg: &config::Admin) -> Result<(), String> {
     admin_cfg.validate_bind_safety()
+}
+
+/// Returns true if the Sentry DSN is the well-known placeholder used in docs/examples.
+///
+/// Starting up with this DSN would still ship (empty) events to a real project, so we
+/// detect and ignore it to avoid accidental telemetry from default configs.
+fn is_example_sentry_dsn(dsn: &str) -> bool {
+    dsn.contains("examplePublicKey") || dsn.contains("o0.ingest.sentry.io/0")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_example_sentry_dsn_detected() {
+        assert!(is_example_sentry_dsn(
+            "https://examplePublicKey@o0.ingest.sentry.io/0"
+        ));
+        assert!(!is_example_sentry_dsn("https://real@o1.ingest.sentry.io/1"));
+    }
 }

@@ -12,10 +12,7 @@ use prometheus::{
 use regex::Regex;
 use serde_json::Value as JsonValue;
 
-use crate::{
-    core::{ProxyContext, ProxyError, ProxyPlugin, ProxyResult},
-    utils::request::get_request_host,
-};
+use crate::core::{ProxyContext, ProxyError, ProxyPlugin, ProxyResult};
 
 const DEFAULT_BUCKETS: &[f64] = &[
     1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0, 30000.0,
@@ -123,6 +120,12 @@ pub struct PrometheusConfig {
     /// Default: 1000
     #[serde(default = "PrometheusConfig::default_max_unique_paths")]
     pub max_unique_paths: usize,
+
+    /// Maximum number of unique `matched_host` label values to track.
+    /// If exceeded, additional hosts are collapsed to "*" to bound cardinality.
+    /// Default: 100
+    #[serde(default = "PrometheusConfig::default_max_unique_hosts")]
+    pub max_unique_hosts: usize,
 }
 
 impl PrometheusConfig {
@@ -133,6 +136,10 @@ impl PrometheusConfig {
     fn default_max_unique_paths() -> usize {
         1000
     }
+
+    fn default_max_unique_hosts() -> usize {
+        100
+    }
 }
 
 impl Default for PrometheusConfig {
@@ -140,6 +147,7 @@ impl Default for PrometheusConfig {
         Self {
             max_label_length: Self::default_max_label_length(),
             max_unique_paths: Self::default_max_unique_paths(),
+            max_unique_hosts: Self::default_max_unique_hosts(),
         }
     }
 }
@@ -156,6 +164,7 @@ pub fn create_prometheus_plugin(cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyPlug
     Ok(Arc::new(PluginPrometheus {
         config,
         seen_paths: Arc::new(DashMap::new()),
+        seen_hosts: Arc::new(DashMap::new()),
     }))
 }
 
@@ -164,6 +173,9 @@ pub struct PluginPrometheus {
     /// Set of unique normalized paths seen so far
     /// Used to implement max_unique_paths limit correctly
     seen_paths: Arc<DashMap<String, ()>>,
+    /// Set of unique `matched_host` label values seen so far
+    /// Used to implement max_unique_hosts limit correctly
+    seen_hosts: Arc<DashMap<String, ()>>,
 }
 
 #[async_trait]
@@ -193,9 +205,12 @@ impl ProxyPlugin for PluginPrometheus {
         // Use path template to avoid high cardinality issues
         let path_template = self.normalize_path_template(session, ctx);
 
-        // Extract host, falling back to empty string
-        let host = route.as_ref().map_or("", |_| {
-            get_request_host(session.req_header()).unwrap_or_default()
+        // Derive the matched_host label from the route's effective host
+        // configuration rather than the raw request Host, which is attacker
+        // controllable. Collapse multi-host / wildcard routes to "*" and bound
+        // the total number of distinct host labels via max_unique_hosts.
+        let host = route.as_ref().map_or(String::new(), |r| {
+            self.limit_host_label(select_host_label(r.effective_hosts()))
         });
 
         // Extract service, falling back to "unknown" if service_id is None
@@ -211,7 +226,14 @@ impl ProxyPlugin for PluginPrometheus {
 
         // Update Prometheus metrics with normalized path template
         STATUS
-            .with_label_values(&[code, route_id, &path_template, host, service, node.as_ref()])
+            .with_label_values(&[
+                code,
+                route_id,
+                &path_template,
+                &host,
+                service,
+                node.as_ref(),
+            ])
             .inc();
 
         // Record request latency
@@ -237,6 +259,23 @@ impl ProxyPlugin for PluginPrometheus {
         RESPONSE_SIZE
             .with_label_values(&[route_id, service])
             .observe(session.body_bytes_sent() as f64);
+    }
+}
+
+/// Select the `matched_host` label from a route's effective hosts.
+///
+/// - empty -> `""` (no host label)
+/// - single concrete host -> that host
+/// - multiple hosts, or a wildcard pattern (starts with `*`) -> `"*"`
+///
+/// This derives the label from route configuration rather than the raw
+/// request Host header, which is attacker-controllable.
+fn select_host_label(hosts: &[String]) -> String {
+    match hosts {
+        [] => String::new(),
+        [h] if h.starts_with('*') => "*".to_string(),
+        [h] => h.clone(),
+        _ => "*".to_string(),
     }
 }
 
@@ -316,25 +355,47 @@ impl PluginPrometheus {
         self.seen_paths.insert(normalized.clone(), ());
         normalized
     }
+
+    /// Enforce the `max_unique_hosts` limit for the `matched_host` label.
+    ///
+    /// Empty and `"*"` labels pass through unchanged. A new concrete host is
+    /// recorded up to `max_unique_hosts`; once that bound is reached, further
+    /// hosts collapse to `"*"` to bound cardinality.
+    fn limit_host_label(&self, host: String) -> String {
+        if host.is_empty() || host == "*" || self.seen_hosts.contains_key(&host) {
+            return host;
+        }
+        if self.seen_hosts.len() >= self.config.max_unique_hosts {
+            return "*".to_string();
+        }
+        self.seen_hosts.insert(host.clone(), ());
+        host
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn plugin(max_label_length: usize, max_unique_paths: usize) -> PluginPrometheus {
+    fn plugin(
+        max_label_length: usize,
+        max_unique_paths: usize,
+        max_unique_hosts: usize,
+    ) -> PluginPrometheus {
         PluginPrometheus {
             config: PrometheusConfig {
                 max_label_length,
                 max_unique_paths,
+                max_unique_hosts,
             },
             seen_paths: Arc::new(DashMap::new()),
+            seen_hosts: Arc::new(DashMap::new()),
         }
     }
 
     #[test]
     fn route_templates_obey_label_length_limit() {
-        let plugin = plugin(8, 10);
+        let plugin = plugin(8, 10, 100);
         assert_eq!(
             plugin.limit_path_label("/abcdefghij".to_string()),
             "/abcd..."
@@ -343,14 +404,14 @@ mod tests {
 
     #[test]
     fn route_templates_obey_unique_path_limit() {
-        let plugin = plugin(100, 1);
+        let plugin = plugin(100, 1, 100);
         assert_eq!(plugin.limit_path_label("/first".to_string()), "/first");
         assert_eq!(plugin.limit_path_label("/second".to_string()), "/...");
     }
 
     #[test]
     fn normalize_path_collapses_beyond_eight_segments() {
-        let plugin = plugin(100, 100);
+        let plugin = plugin(100, 100, 100);
         // 9 segments: keep the first 7 and append "/...".
         assert_eq!(
             plugin.normalize_path("/a/b/c/d/e/f/g/h"),
@@ -358,5 +419,35 @@ mod tests {
         );
         // 8 segments: under the limit, unchanged.
         assert_eq!(plugin.normalize_path("/a/b/c/d/e/f/g"), "/a/b/c/d/e/f/g");
+    }
+
+    #[test]
+    fn host_label_uses_route_single_host() {
+        // A route configured with a single concrete host reports that host,
+        // regardless of the request's original Host header.
+        let hosts = vec!["api.example.com".to_string()];
+        assert_eq!(select_host_label(&hosts), "api.example.com");
+    }
+
+    #[test]
+    fn host_label_star_for_multiple_hosts() {
+        let hosts = vec!["a.example.com".to_string(), "b.example.com".to_string()];
+        assert_eq!(select_host_label(&hosts), "*");
+    }
+
+    #[test]
+    fn host_label_star_for_wildcard() {
+        let hosts = vec!["*.example.com".to_string()];
+        assert_eq!(select_host_label(&hosts), "*");
+    }
+
+    #[test]
+    fn host_label_collapsed_when_exceeds_max() {
+        let plugin = plugin(100, 100, 1);
+        assert_eq!(
+            plugin.limit_host_label("api.example.com".to_string()),
+            "api.example.com"
+        );
+        assert_eq!(plugin.limit_host_label("evil.com".to_string()), "*");
     }
 }

@@ -62,44 +62,177 @@ impl ResourceConfigSet {
     pub fn from_etcd_list(response: &GetResponse) -> ProxyResult<Self> {
         let mut set = Self::default();
         for kv in response.kvs() {
-            let (id, key_type) = parse_key(kv.key()).map_err(|e| {
-                ProxyError::Configuration(format!("Invalid etcd key during list: {e}"))
-            })?;
-            match key_type.as_str() {
-                "upstreams" => {
-                    let mut resource = json_to_resource::<Upstream>(kv.value())?;
-                    resource.set_id(id.clone());
-                    set.upstreams.insert(id, resource);
-                }
-                "services" => {
-                    let mut resource = json_to_resource::<Service>(kv.value())?;
-                    resource.set_id(id.clone());
-                    set.services.insert(id, resource);
-                }
-                "global_rules" => {
-                    let mut resource = json_to_resource::<GlobalRule>(kv.value())?;
-                    resource.set_id(id.clone());
-                    set.global_rules.insert(id, resource);
-                }
-                "routes" => {
-                    let mut resource = json_to_resource::<Route>(kv.value())?;
-                    resource.set_id(id.clone());
-                    set.routes.insert(id, resource);
-                }
-                "ssls" => {
-                    let mut resource = json_to_resource::<SSL>(kv.value())?;
-                    resource.set_id(id.clone());
-                    set.ssls.insert(id, resource);
-                }
-                other => {
+            insert_kv(&mut set, kv.key(), kv.value())?;
+        }
+        Ok(set)
+    }
+}
+
+/// Insert a single `(key, value)` pair into a `ResourceConfigSet`.
+///
+/// Shared by `from_etcd_list` and the admin CAS path (which builds a candidate
+/// set from a full-graph read before validating references).
+fn insert_kv(set: &mut ResourceConfigSet, key: &[u8], value: &[u8]) -> ProxyResult<()> {
+    let (id, key_type) =
+        parse_key(key).map_err(|e| ProxyError::Configuration(format!("Invalid etcd key: {e}")))?;
+    match key_type.as_str() {
+        "upstreams" => {
+            let mut resource = json_to_resource::<Upstream>(value)?;
+            resource.set_id(id.clone());
+            set.upstreams.insert(id, resource);
+        }
+        "services" => {
+            let mut resource = json_to_resource::<Service>(value)?;
+            resource.set_id(id.clone());
+            set.services.insert(id, resource);
+        }
+        "global_rules" => {
+            let mut resource = json_to_resource::<GlobalRule>(value)?;
+            resource.set_id(id.clone());
+            set.global_rules.insert(id, resource);
+        }
+        "routes" => {
+            let mut resource = json_to_resource::<Route>(value)?;
+            resource.set_id(id.clone());
+            set.routes.insert(id, resource);
+        }
+        "ssls" => {
+            let mut resource = json_to_resource::<SSL>(value)?;
+            resource.set_id(id.clone());
+            set.ssls.insert(id, resource);
+        }
+        other => {
+            return Err(ProxyError::Configuration(format!(
+                "Unknown etcd resource type: {other}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Build a `ResourceConfigSet` from an arbitrary list of `(physical_key, value)`
+/// pairs. Used by the Admin write path to reconstruct the full resource graph
+/// from a `read_full_graph` snapshot so `CandidateSnapshot::build` can validate
+/// cross-resource references before a CAS commit.
+pub fn build_config_set_from_kvs(kvs: &[(String, Vec<u8>)]) -> ProxyResult<ResourceConfigSet> {
+    let mut set = ResourceConfigSet::default();
+    for (key, value) in kvs {
+        insert_kv(&mut set, key.as_bytes(), value)?;
+    }
+    Ok(set)
+}
+
+/// Lightweight validation of a candidate resource graph without constructing
+/// runtime objects (`ProxyUpstream`/`ProxyRoute`/...).
+///
+/// Performs per-resource `Validate::validate()` plus cross-resource reference
+/// checks that mirror `CandidateSnapshot::build`:
+/// - `route.service_id` must resolve to an existing service.
+/// - `route.upstream_id` (when no inline upstream) must resolve to an existing upstream.
+/// - `service.upstream_id` (when no inline upstream) must resolve to an existing upstream.
+/// - `traffic-split` `weighted_upstreams[].upstream_id` on routes, services, and
+///   global rules must resolve to an existing upstream.
+///
+/// Used by the Admin write path so PUT/DELETE do not pay the cost of building
+/// the full runtime graph (and its `Configuring ...` log noise) just to check
+/// references.
+pub fn validate_config_set(set: &ResourceConfigSet) -> ProxyResult<()> {
+    for upstream in set.upstreams.values() {
+        upstream.validate().map_err(|e| {
+            ProxyError::Configuration(format!("Upstream '{}' validation failed: {e}", upstream.id))
+        })?;
+    }
+    for service in set.services.values() {
+        service.validate().map_err(|e| {
+            ProxyError::Configuration(format!("Service '{}' validation failed: {e}", service.id))
+        })?;
+    }
+    for rule in set.global_rules.values() {
+        rule.validate().map_err(|e| {
+            ProxyError::Configuration(format!("GlobalRule '{}' validation failed: {e}", rule.id))
+        })?;
+    }
+    for route in set.routes.values() {
+        route.validate().map_err(|e| {
+            ProxyError::Configuration(format!("Route '{}' validation failed: {e}", route.id))
+        })?;
+    }
+    for ssl in set.ssls.values() {
+        ssl.validate().map_err(|e| {
+            ProxyError::Configuration(format!("SSL '{}' validation failed: {e}", ssl.id))
+        })?;
+    }
+
+    // Cross-resource reference checks.
+    for route in set.routes.values() {
+        if let Some(id) = &route.service_id {
+            if !set.services.contains_key(id) {
+                return Err(ProxyError::Configuration(format!(
+                    "Route '{}' references missing service '{}'",
+                    route.id, id
+                )));
+            }
+        }
+        if route.upstream.is_none() {
+            if let Some(id) = &route.upstream_id {
+                if !set.upstreams.contains_key(id) {
                     return Err(ProxyError::Configuration(format!(
-                        "Unknown etcd resource type during list: {other}"
+                        "Route '{}' references missing upstream '{}'",
+                        route.id, id
                     )));
                 }
             }
         }
-        Ok(set)
+        validate_plugin_upstream_refs(
+            &format!("Route '{}'", route.id),
+            &route.plugins,
+            &set.upstreams,
+        )?;
     }
+    for service in set.services.values() {
+        if service.upstream.is_none() {
+            if let Some(id) = &service.upstream_id {
+                if !set.upstreams.contains_key(id) {
+                    return Err(ProxyError::Configuration(format!(
+                        "Service '{}' references missing upstream '{}'",
+                        service.id, id
+                    )));
+                }
+            }
+        }
+        validate_plugin_upstream_refs(
+            &format!("Service '{}'", service.id),
+            &service.plugins,
+            &set.upstreams,
+        )?;
+    }
+    for rule in set.global_rules.values() {
+        validate_plugin_upstream_refs(
+            &format!("GlobalRule '{}'", rule.id),
+            &rule.plugins,
+            &set.upstreams,
+        )?;
+    }
+    Ok(())
+}
+
+/// Validate plugin-embedded named upstream references (currently traffic-split).
+fn validate_plugin_upstream_refs(
+    owner: &str,
+    plugins: &HashMap<String, serde_json::Value>,
+    upstreams: &HashMap<String, Upstream>,
+) -> ProxyResult<()> {
+    if let Some(value) = plugins.get("traffic-split") {
+        crate::plugins::traffic_split::validate_traffic_split_config(value)?;
+        for id in crate::plugins::traffic_split::named_upstream_ids(value)? {
+            if !upstreams.contains_key(&id) {
+                return Err(ProxyError::Configuration(format!(
+                    "{owner} traffic-split references missing upstream '{id}'"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Control-plane-only candidate built from a single version of the resource graph.
@@ -498,6 +631,279 @@ mod tests {
             upstream_host: None,
             tls: None,
         }
+    }
+
+    #[test]
+    fn validate_config_set_rejects_dangling_route_upstream_id() {
+        let mut set = ResourceConfigSet::default();
+        set.routes.insert(
+            "r1".into(),
+            crate::config::Route {
+                id: "r1".into(),
+                uri: Some("/".into()),
+                uris: vec![],
+                methods: vec![],
+                host: None,
+                hosts: vec![],
+                priority: 0,
+                plugins: Default::default(),
+                upstream: None,
+                upstream_id: Some("missing".into()),
+                service_id: None,
+                timeout: None,
+            },
+        );
+        assert!(validate_config_set(&set).is_err());
+    }
+
+    #[test]
+    fn validate_config_set_rejects_dangling_route_service_id() {
+        let mut set = ResourceConfigSet::default();
+        set.upstreams
+            .insert("u1".into(), sample_upstream("u1", "10.0.0.1:80"));
+        set.routes.insert(
+            "r1".into(),
+            crate::config::Route {
+                id: "r1".into(),
+                uri: Some("/".into()),
+                uris: vec![],
+                methods: vec![],
+                host: None,
+                hosts: vec![],
+                priority: 0,
+                plugins: Default::default(),
+                upstream: None,
+                upstream_id: Some("u1".into()),
+                service_id: Some("missing".into()),
+                timeout: None,
+            },
+        );
+        assert!(validate_config_set(&set).is_err());
+    }
+
+    #[test]
+    fn validate_config_set_rejects_dangling_service_upstream_id() {
+        let mut set = ResourceConfigSet::default();
+        set.services.insert(
+            "s1".into(),
+            crate::config::Service {
+                id: "s1".into(),
+                plugins: Default::default(),
+                upstream: None,
+                upstream_id: Some("missing".into()),
+                hosts: vec![],
+            },
+        );
+        assert!(validate_config_set(&set).is_err());
+    }
+
+    #[test]
+    fn validate_config_set_rejects_traffic_split_missing_upstream_on_route() {
+        let mut set = ResourceConfigSet::default();
+        set.upstreams
+            .insert("u1".into(), sample_upstream("u1", "10.0.0.1:80"));
+        let mut plugins = std::collections::HashMap::new();
+        plugins.insert(
+            "traffic-split".into(),
+            serde_json::json!({
+                "rules": [{
+                    "weighted_upstreams": [
+                        { "upstream_id": "does-not-exist", "weight": 100 }
+                    ]
+                }]
+            }),
+        );
+        set.routes.insert(
+            "r1".into(),
+            crate::config::Route {
+                id: "r1".into(),
+                uri: Some("/".into()),
+                uris: vec![],
+                methods: vec![],
+                host: None,
+                hosts: vec![],
+                priority: 0,
+                plugins,
+                upstream: None,
+                upstream_id: Some("u1".into()),
+                service_id: None,
+                timeout: None,
+            },
+        );
+        let err = validate_config_set(&set).unwrap_err().to_string();
+        assert!(
+            err.contains("does-not-exist"),
+            "expected missing upstream error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_config_set_rejects_traffic_split_missing_upstream_on_service() {
+        let mut set = ResourceConfigSet::default();
+        set.upstreams
+            .insert("u1".into(), sample_upstream("u1", "10.0.0.1:80"));
+        let mut plugins = std::collections::HashMap::new();
+        plugins.insert(
+            "traffic-split".into(),
+            serde_json::json!({
+                "rules": [{
+                    "weighted_upstreams": [
+                        { "upstream_id": "missing-svc-up", "weight": 100 }
+                    ]
+                }]
+            }),
+        );
+        set.services.insert(
+            "s1".into(),
+            crate::config::Service {
+                id: "s1".into(),
+                plugins,
+                upstream: None,
+                upstream_id: Some("u1".into()),
+                hosts: vec![],
+            },
+        );
+        let err = validate_config_set(&set).unwrap_err().to_string();
+        assert!(err.contains("missing-svc-up"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_config_set_rejects_traffic_split_missing_upstream_on_global_rule() {
+        let mut set = ResourceConfigSet::default();
+        let mut plugins = std::collections::HashMap::new();
+        plugins.insert(
+            "traffic-split".into(),
+            serde_json::json!({
+                "rules": [{
+                    "weighted_upstreams": [
+                        { "upstream_id": "missing-gr-up", "weight": 100 }
+                    ]
+                }]
+            }),
+        );
+        set.global_rules.insert(
+            "g1".into(),
+            crate::config::GlobalRule {
+                id: "g1".into(),
+                plugins,
+            },
+        );
+        let err = validate_config_set(&set).unwrap_err().to_string();
+        assert!(err.contains("missing-gr-up"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_config_set_accepts_traffic_split_with_existing_upstream() {
+        let mut set = ResourceConfigSet::default();
+        set.upstreams
+            .insert("u1".into(), sample_upstream("u1", "10.0.0.1:80"));
+        set.upstreams.insert(
+            "payments".into(),
+            sample_upstream("payments", "10.0.0.2:80"),
+        );
+        let mut plugins = std::collections::HashMap::new();
+        plugins.insert(
+            "traffic-split".into(),
+            serde_json::json!({
+                "rules": [{
+                    "weighted_upstreams": [
+                        { "upstream_id": "payments", "weight": 100 }
+                    ]
+                }]
+            }),
+        );
+        set.routes.insert(
+            "r1".into(),
+            crate::config::Route {
+                id: "r1".into(),
+                uri: Some("/".into()),
+                uris: vec![],
+                methods: vec![],
+                host: None,
+                hosts: vec![],
+                priority: 0,
+                plugins,
+                upstream: None,
+                upstream_id: Some("u1".into()),
+                service_id: None,
+                timeout: None,
+            },
+        );
+        assert!(validate_config_set(&set).is_ok());
+    }
+
+    #[test]
+    fn validate_config_set_delete_upstream_referenced_by_traffic_split_fails() {
+        // Simulate DELETE of upstream "payments" while a route traffic-split still
+        // references it: the candidate set without "payments" must be rejected.
+        let mut set = ResourceConfigSet::default();
+        set.upstreams
+            .insert("u1".into(), sample_upstream("u1", "10.0.0.1:80"));
+        // payments intentionally absent (deleted).
+        let mut plugins = std::collections::HashMap::new();
+        plugins.insert(
+            "traffic-split".into(),
+            serde_json::json!({
+                "rules": [{
+                    "weighted_upstreams": [
+                        { "upstream_id": "payments", "weight": 100 }
+                    ]
+                }]
+            }),
+        );
+        set.routes.insert(
+            "r1".into(),
+            crate::config::Route {
+                id: "r1".into(),
+                uri: Some("/".into()),
+                uris: vec![],
+                methods: vec![],
+                host: None,
+                hosts: vec![],
+                priority: 0,
+                plugins,
+                upstream: None,
+                upstream_id: Some("u1".into()),
+                service_id: None,
+                timeout: None,
+            },
+        );
+        assert!(validate_config_set(&set).is_err());
+    }
+
+    #[test]
+    fn validate_config_set_accepts_valid_graph() {
+        let mut set = ResourceConfigSet::default();
+        set.upstreams
+            .insert("u1".into(), sample_upstream("u1", "10.0.0.1:80"));
+        set.services.insert(
+            "s1".into(),
+            crate::config::Service {
+                id: "s1".into(),
+                plugins: Default::default(),
+                upstream: None,
+                upstream_id: Some("u1".into()),
+                hosts: vec![],
+            },
+        );
+        set.routes.insert(
+            "r1".into(),
+            crate::config::Route {
+                id: "r1".into(),
+                uri: Some("/".into()),
+                uris: vec![],
+                methods: vec![],
+                host: None,
+                hosts: vec![],
+                priority: 0,
+                plugins: Default::default(),
+                upstream: None,
+                upstream_id: Some("u1".into()),
+                service_id: Some("s1".into()),
+                timeout: None,
+            },
+        );
+        assert!(validate_config_set(&set).is_ok());
     }
 
     #[test]

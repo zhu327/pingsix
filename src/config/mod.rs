@@ -53,6 +53,7 @@ impl_identifiable!(SSL);
 #[serde_as]
 #[derive(Default, Debug, Serialize, Deserialize, Validate)]
 #[validate(schema(function = "Config::validate_resource_id"))]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     /// Pingora framework configuration (workers, logging, etc.)
     #[serde(default)]
@@ -110,7 +111,7 @@ impl Config {
 
     /// Parses YAML configuration string with comprehensive validation.
     pub fn from_yaml(conf_str: &str) -> Result<Self> {
-        let conf: Config = serde_yaml::from_str(conf_str)
+        let conf: Config = serde_yml::from_str(conf_str)
             .or_err_with(ReadError, || "Unable to parse yaml configuration")?;
 
         log::debug!(
@@ -144,7 +145,7 @@ impl Config {
     /// Serializes configuration back to YAML format for debugging or export.
     #[cfg(test)]
     pub fn to_yaml(&self) -> String {
-        serde_yaml::to_string(self).unwrap_or_else(|e| {
+        serde_yml::to_string(self).unwrap_or_else(|e| {
             log::error!("Failed to serialize config to YAML: {e}");
             String::new()
         })
@@ -196,6 +197,7 @@ impl Config {
 }
 
 #[derive(Clone, Default, Debug, Serialize, Deserialize, Validate)]
+#[serde(deny_unknown_fields)]
 pub struct Pingsix {
     #[validate(length(min = 1))]
     #[validate(nested)]
@@ -218,10 +220,99 @@ pub struct Pingsix {
 
     #[validate(nested)]
     pub log: Option<Log>,
+
+    #[validate(nested)]
+    pub defaults: Option<Defaults>,
+}
+
+/// Global default settings applied when a route/upstream does not override them.
+#[derive(Clone, Debug, Serialize, Deserialize, Validate)]
+#[serde(deny_unknown_fields)]
+pub struct Defaults {
+    /// Fallback upstream connect/read/send timeout used when a route or
+    /// upstream does not set its own `timeout`.
+    #[validate(nested)]
+    pub upstream_timeout: Option<Timeout>,
+    #[validate(nested)]
+    pub cache: Option<CacheDefaults>,
+}
+
+/// Default capacity knobs for the response cache.
+#[derive(Clone, Debug, Serialize, Deserialize, Validate)]
+#[serde(deny_unknown_fields)]
+pub struct CacheDefaults {
+    #[serde(default = "CacheDefaults::default_max_memory_bytes")]
+    pub max_memory_bytes: usize,
+    #[serde(default = "CacheDefaults::default_max_object_bytes")]
+    pub default_max_object_bytes: usize,
+}
+
+impl CacheDefaults {
+    /// 512 MB.
+    fn default_max_memory_bytes() -> usize {
+        512 * 1024 * 1024
+    }
+
+    /// 1 MB.
+    fn default_max_object_bytes() -> usize {
+        1024 * 1024
+    }
+}
+
+/// Global default upstream timeout, populated once at startup from
+/// `pingsix.defaults.upstream_timeout`. Used as a fallback when a route or
+/// upstream does not configure its own `timeout`.
+static DEFAULT_UPSTREAM_TIMEOUT: once_cell::sync::OnceCell<Option<Timeout>> =
+    once_cell::sync::OnceCell::new();
+
+/// Populate the global default upstream timeout from configuration. Called once
+/// at startup. Subsequent calls are no-ops (first value wins), which keeps
+/// parallel test initialization safe.
+pub fn init_default_upstream_timeout(timeout: Option<Timeout>) {
+    let _ = DEFAULT_UPSTREAM_TIMEOUT.set(timeout);
+}
+
+/// Returns the configured global default upstream timeout, if any.
+pub fn default_upstream_timeout() -> Option<Timeout> {
+    DEFAULT_UPSTREAM_TIMEOUT.get().cloned().flatten()
+}
+
+/// Resolve the effective timeout for a route/upstream: an explicit value always
+/// wins; otherwise the global default is used. Extracted as a free function so
+/// it can be unit tested without an `HttpPeer`.
+pub fn resolve_upstream_timeout(
+    explicit: Option<Timeout>,
+    global: Option<Timeout>,
+) -> Option<Timeout> {
+    explicit.or(global)
+}
+
+/// TLS/mTLS configuration for connecting to etcd.
+#[derive(Clone, Debug, Serialize, Deserialize, Validate)]
+#[validate(schema(function = "EtcdTls::validate_mtls_pair"))]
+#[serde(deny_unknown_fields)]
+pub struct EtcdTls {
+    #[validate(length(min = 1))]
+    pub ca_cert: String,
+    pub client_cert: Option<String>,
+    pub client_key: Option<String>,
+    pub domain: Option<String>,
+}
+
+impl EtcdTls {
+    /// mTLS requires both a client cert and a client key, or neither. A partial
+    /// pair would silently skip mTLS, so reject it at config-validation time.
+    fn validate_mtls_pair(&self) -> Result<(), ValidationError> {
+        match (&self.client_cert, &self.client_key) {
+            (Some(_), Some(_)) | (None, None) => Ok(()),
+            _ => Err(ValidationError::new("mtls_cert_and_key_required_together")),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Validate)]
 #[validate(schema(function = "Listener::validate_tls_for_offer_h2"))]
+#[serde(deny_unknown_fields)]
 pub struct Listener {
     pub address: SocketAddr,
     pub tls: Option<Tls>,
@@ -242,6 +333,7 @@ impl Listener {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Validate)]
+#[serde(deny_unknown_fields)]
 pub struct Etcd {
     #[validate(length(min = 1))]
     pub host: Vec<String>,
@@ -251,9 +343,12 @@ pub struct Etcd {
     pub connect_timeout: Option<u32>,
     pub user: Option<String>,
     pub password: Option<String>,
+    #[validate(nested)]
+    pub tls: Option<EtcdTls>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Validate)]
+#[serde(deny_unknown_fields)]
 pub struct Admin {
     pub address: SocketAddr,
     #[validate(length(min = 1), custom(function = "Admin::validate_api_key"))]
@@ -294,6 +389,7 @@ impl Admin {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Validate)]
+#[serde(deny_unknown_fields)]
 pub struct Status {
     pub address: SocketAddr,
     /// Seconds after which an etcd sync is considered stale (default: 300).
@@ -305,16 +401,19 @@ pub struct Status {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Validate)]
+#[serde(deny_unknown_fields)]
 pub struct Prometheus {
     pub address: SocketAddr,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Validate)]
+#[serde(deny_unknown_fields)]
 pub struct Sentry {
     pub dsn: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Validate)]
+#[serde(deny_unknown_fields)]
 pub struct Log {
     #[validate(length(min = 1), custom(function = "Log::validate_path"))]
     pub path: String,
@@ -330,12 +429,14 @@ impl Log {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Tls {
     pub cert_path: String,
     pub key_path: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
+#[serde(deny_unknown_fields)]
 pub struct UpstreamTls {
     #[validate(length(min = 1))]
     pub client_cert: String,
@@ -344,6 +445,7 @@ pub struct UpstreamTls {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
+#[serde(deny_unknown_fields)]
 pub struct Timeout {
     pub connect: u64,
     pub send: u64,
@@ -353,6 +455,7 @@ pub struct Timeout {
 #[serde_as]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
 #[validate(schema(function = "Route::validate"))]
+#[serde(deny_unknown_fields)]
 pub struct Route {
     #[serde(default)]
     pub id: String,
@@ -415,6 +518,7 @@ impl Route {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
 #[validate(schema(function = "Upstream::validate_upstream_host"))]
+#[serde(deny_unknown_fields)]
 pub struct Upstream {
     #[serde(default)]
     pub id: String,
@@ -518,6 +622,7 @@ pub enum SelectionType {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
+#[serde(deny_unknown_fields)]
 pub struct HealthCheck {
     // only support passive check for now
     #[validate(nested)]
@@ -525,19 +630,23 @@ pub struct HealthCheck {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
+#[serde(deny_unknown_fields)]
 pub struct ActiveCheck {
     #[serde(default)]
     pub r#type: ActiveCheckType,
     #[serde(default = "ActiveCheck::default_timeout")]
+    #[validate(range(min = 1))]
     pub timeout: u32,
     #[serde(default = "ActiveCheck::default_http_path")]
     pub http_path: String,
     pub host: Option<String>,
+    #[validate(range(min = 1, max = 65535))]
     pub port: Option<u32>,
     #[serde(default = "ActiveCheck::default_https_verify_certificate")]
     pub https_verify_certificate: bool,
     #[serde(default)]
     pub req_headers: Vec<String>,
+    #[validate(nested)]
     pub healthy: Option<Health>,
     #[validate(nested)]
     pub unhealthy: Option<Unhealthy>,
@@ -567,13 +676,16 @@ impl ActiveCheck {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
+#[serde(deny_unknown_fields)]
 pub struct Health {
     #[serde(default = "Health::default_interval")]
+    #[validate(range(min = 1))]
     pub interval: u32,
     #[serde(default = "Health::default_http_statuses")]
     pub http_statuses: Vec<u32>,
     #[serde(default = "Health::default_successes")]
+    #[validate(range(min = 1))]
     pub successes: u32,
 }
 
@@ -592,10 +704,13 @@ impl Health {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
+#[serde(deny_unknown_fields)]
 pub struct Unhealthy {
     #[serde(default = "Unhealthy::default_http_failures")]
+    #[validate(range(min = 1))]
     pub http_failures: u32,
     #[serde(default = "Unhealthy::default_tcp_failures")]
+    #[validate(range(min = 1))]
     pub tcp_failures: u32,
 }
 
@@ -642,6 +757,7 @@ pub enum UpstreamPassHost {
 
 #[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
 #[validate(schema(function = "Service::validate_upstream"))]
+#[serde(deny_unknown_fields)]
 pub struct Service {
     #[serde(default)]
     pub id: String,
@@ -664,6 +780,7 @@ impl Service {
 }
 
 #[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
+#[serde(deny_unknown_fields)]
 pub struct GlobalRule {
     #[serde(default)]
     pub id: String,
@@ -673,6 +790,7 @@ pub struct GlobalRule {
 
 #[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
 #[allow(clippy::upper_case_acronyms)]
+#[serde(deny_unknown_fields)]
 pub struct SSL {
     #[serde(default)]
     pub id: String,
@@ -1215,5 +1333,381 @@ upstreams:
             allow_insecure_remote: true,
         };
         assert!(remote.validate_bind_safety().is_ok());
+    }
+
+    #[test]
+    fn test_unknown_field_rejected() {
+        init_log();
+        // `retry_timout` is a typo of `retry_timeout`; deny_unknown_fields must reject it.
+        let conf_str = r#"
+---
+pingsix:
+  listeners:
+    - address: "[::1]:8080"
+routes:
+  - id: "1"
+    uri: /
+    upstream:
+      nodes:
+        "127.0.0.1:1980": 1
+      retry_timout: 10
+"#;
+        let conf = Config::from_yaml(conf_str);
+        assert!(
+            conf.is_err(),
+            "Expected unknown field `retry_timout` to be rejected"
+        );
+    }
+
+    #[test]
+    fn resolve_upstream_timeout_prefers_explicit() {
+        init_log();
+        let explicit = Timeout {
+            connect: 1,
+            send: 2,
+            read: 3,
+        };
+        let global = Timeout {
+            connect: 9,
+            send: 9,
+            read: 9,
+        };
+        let t = resolve_upstream_timeout(Some(explicit), Some(global)).unwrap();
+        assert_eq!(t.connect, 1);
+        assert_eq!(t.read, 3);
+    }
+
+    #[test]
+    fn resolve_upstream_timeout_uses_global_when_explicit_none() {
+        init_log();
+        let global = Timeout {
+            connect: 9,
+            send: 9,
+            read: 9,
+        };
+        let t = resolve_upstream_timeout(None, Some(global)).unwrap();
+        assert_eq!(t.connect, 9);
+    }
+
+    #[test]
+    fn resolve_upstream_timeout_none_when_both_absent() {
+        init_log();
+        assert!(resolve_upstream_timeout(None, None).is_none());
+    }
+
+    #[test]
+    fn test_health_check_port_out_of_range() {
+        init_log();
+        for port in [0u32, 70000] {
+            let conf_str = format!(
+                r#"
+---
+pingsix:
+  listeners:
+    - address: "[::1]:8080"
+routes:
+  - id: "1"
+    uri: /
+    upstream:
+      nodes:
+        "127.0.0.1:1980": 1
+      checks:
+        active:
+          type: http
+          port: {port}
+"#
+            );
+            let conf = Config::from_yaml(&conf_str);
+            assert!(
+                conf.is_err(),
+                "Expected health check port {port} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn test_health_check_zero_interval_rejected() {
+        init_log();
+        let conf_str = r#"
+---
+pingsix:
+  listeners:
+    - address: "[::1]:8080"
+routes:
+  - id: "1"
+    uri: /
+    upstream:
+      nodes:
+        "127.0.0.1:1980": 1
+      checks:
+        active:
+          type: http
+          healthy:
+            interval: 0
+"#;
+        assert!(Config::from_yaml(conf_str).is_err());
+    }
+
+    #[test]
+    fn test_health_check_zero_timeout_rejected() {
+        init_log();
+        let conf_str = r#"
+---
+pingsix:
+  listeners:
+    - address: "[::1]:8080"
+routes:
+  - id: "1"
+    uri: /
+    upstream:
+      nodes:
+        "127.0.0.1:1980": 1
+      checks:
+        active:
+          type: http
+          timeout: 0
+"#;
+        assert!(Config::from_yaml(conf_str).is_err());
+    }
+
+    #[test]
+    fn test_health_check_zero_successes_rejected() {
+        init_log();
+        let conf_str = r#"
+---
+pingsix:
+  listeners:
+    - address: "[::1]:8080"
+routes:
+  - id: "1"
+    uri: /
+    upstream:
+      nodes:
+        "127.0.0.1:1980": 1
+      checks:
+        active:
+          type: http
+          healthy:
+            successes: 0
+"#;
+        assert!(Config::from_yaml(conf_str).is_err());
+    }
+
+    #[test]
+    fn test_health_check_zero_failures_rejected() {
+        init_log();
+        for (field, yaml) in [
+            (
+                "http_failures",
+                r#"
+---
+pingsix:
+  listeners:
+    - address: "[::1]:8080"
+routes:
+  - id: "1"
+    uri: /
+    upstream:
+      nodes:
+        "127.0.0.1:1980": 1
+      checks:
+        active:
+          type: http
+          unhealthy:
+            http_failures: 0
+"#,
+            ),
+            (
+                "tcp_failures",
+                r#"
+---
+pingsix:
+  listeners:
+    - address: "[::1]:8080"
+routes:
+  - id: "1"
+    uri: /
+    upstream:
+      nodes:
+        "127.0.0.1:1980": 1
+      checks:
+        active:
+          type: http
+          unhealthy:
+            tcp_failures: 0
+"#,
+            ),
+        ] {
+            let conf = Config::from_yaml(yaml);
+            assert!(
+                conf.is_err(),
+                "Expected health check {field}=0 to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn test_defaults_cache_parsed() {
+        init_log();
+        // Explicit values.
+        let conf_str = r#"
+---
+pingsix:
+  listeners:
+    - address: "[::1]:8080"
+  defaults:
+    cache:
+      max_memory_bytes: 1048576
+      default_max_object_bytes: 2048
+routes:
+  - id: "1"
+    uri: /
+    upstream:
+      nodes:
+        "127.0.0.1:1980": 1
+"#;
+        let conf = Config::from_yaml(conf_str).unwrap();
+        let cache = conf
+            .pingsix
+            .defaults
+            .expect("defaults present")
+            .cache
+            .expect("cache present");
+        assert_eq!(cache.max_memory_bytes, 1048576);
+        assert_eq!(cache.default_max_object_bytes, 2048);
+
+        // Empty cache -> defaults 512MB / 1MB.
+        let conf_str = r#"
+---
+pingsix:
+  listeners:
+    - address: "[::1]:8080"
+  defaults:
+    cache: {}
+routes:
+  - id: "1"
+    uri: /
+    upstream:
+      nodes:
+        "127.0.0.1:1980": 1
+"#;
+        let conf = Config::from_yaml(conf_str).unwrap();
+        let cache = conf
+            .pingsix
+            .defaults
+            .expect("defaults present")
+            .cache
+            .expect("cache present");
+        assert_eq!(cache.max_memory_bytes, 512 * 1024 * 1024);
+        assert_eq!(cache.default_max_object_bytes, 1024 * 1024);
+    }
+
+    #[test]
+    fn test_defaults_upstream_timeout_parsed() {
+        init_log();
+        let conf_str = r#"
+---
+pingsix:
+  listeners:
+    - address: "[::1]:8080"
+  defaults:
+    upstream_timeout:
+      connect: 1
+      send: 2
+      read: 3
+routes:
+  - id: "1"
+    uri: /
+    upstream:
+      nodes:
+        "127.0.0.1:1980": 1
+"#;
+        let conf = Config::from_yaml(conf_str).unwrap();
+        let t = conf
+            .pingsix
+            .defaults
+            .expect("defaults present")
+            .upstream_timeout
+            .expect("upstream_timeout present");
+        assert_eq!(t.connect, 1);
+        assert_eq!(t.send, 2);
+        assert_eq!(t.read, 3);
+    }
+
+    #[test]
+    fn test_etcd_tls_parsed() {
+        init_log();
+        let conf_str = r#"
+---
+pingsix:
+  listeners:
+    - address: "[::1]:8080"
+  etcd:
+    host:
+      - "http://127.0.0.1:2379"
+    prefix: "/pingsix"
+    tls:
+      ca_cert: /a.pem
+      client_cert: /c.pem
+      client_key: /k.pem
+      domain: etcd.x
+routes:
+  - id: "1"
+    uri: /
+    upstream:
+      nodes:
+        "127.0.0.1:1980": 1
+"#;
+        let conf = Config::from_yaml(conf_str).unwrap();
+        let tls = conf
+            .pingsix
+            .etcd
+            .expect("etcd present")
+            .tls
+            .expect("tls present");
+        assert_eq!(tls.ca_cert, "/a.pem");
+        assert_eq!(tls.client_cert.as_deref(), Some("/c.pem"));
+        assert_eq!(tls.client_key.as_deref(), Some("/k.pem"));
+        assert_eq!(tls.domain.as_deref(), Some("etcd.x"));
+    }
+
+    #[test]
+    fn etcd_tls_rejects_partial_mtls() {
+        use validator::Validate;
+        // client_cert present without client_key must fail validation rather
+        // than silently skip mTLS.
+        let tls = EtcdTls {
+            ca_cert: "/a.pem".to_string(),
+            client_cert: Some("/c.pem".to_string()),
+            client_key: None,
+            domain: None,
+        };
+        assert!(tls.validate().is_err());
+
+        // Symmetric: key without cert also fails.
+        let tls = EtcdTls {
+            ca_cert: "/a.pem".to_string(),
+            client_cert: None,
+            client_key: Some("/k.pem".to_string()),
+            domain: None,
+        };
+        assert!(tls.validate().is_err());
+
+        // Both present (or both absent) is valid.
+        let tls = EtcdTls {
+            ca_cert: "/a.pem".to_string(),
+            client_cert: Some("/c.pem".to_string()),
+            client_key: Some("/k.pem".to_string()),
+            domain: None,
+        };
+        assert!(tls.validate().is_ok());
+
+        let tls = EtcdTls {
+            ca_cert: "/a.pem".to_string(),
+            client_cert: None,
+            client_key: None,
+            domain: None,
+        };
+        assert!(tls.validate().is_ok());
     }
 }

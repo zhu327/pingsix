@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use http::Method;
+use once_cell::sync::OnceCell;
 use pingora_error::Result;
 use pingora_proxy::Session;
 use regex::Regex;
@@ -15,6 +16,48 @@ use crate::core::{ProxyContext, ProxyError, ProxyPlugin, ProxyResult};
 
 pub const PLUGIN_NAME: &str = "cache";
 const PRIORITY: i32 = 1085;
+
+/// Global default max object size, populated once at startup from
+/// `pingsix.defaults.cache.default_max_object_bytes`. Falls back to 1MB when unset
+/// (e.g. in unit tests that do not initialize the full config).
+static DEFAULT_MAX_OBJECT_BYTES: OnceCell<usize> = OnceCell::new();
+
+/// 1MB fallback used when no global default has been initialized.
+const FALLBACK_MAX_OBJECT_BYTES: usize = 1024 * 1024;
+
+/// Populates the global default max object size from configuration. Called once at
+/// startup by `service::http::init_cache_defaults`. Subsequent calls are no-ops
+/// (the first value wins), which keeps parallel test initialization safe.
+pub fn init_default_max_object_bytes(bytes: usize) {
+    let _ = DEFAULT_MAX_OBJECT_BYTES.set(bytes);
+}
+
+/// Returns the effective global default max object size, falling back to 1MB when unset.
+pub fn default_max_object_bytes() -> usize {
+    DEFAULT_MAX_OBJECT_BYTES
+        .get()
+        .copied()
+        .unwrap_or(FALLBACK_MAX_OBJECT_BYTES)
+}
+
+/// Resolves the final `max_file_size_bytes` a cache plugin would embed for `cfg`.
+///
+/// Used by static-config integration tests to assert that YAML defaults are applied
+/// before plugin construction.
+pub fn resolved_max_file_size_bytes(cfg: JsonValue) -> ProxyResult<usize> {
+    let config = PluginConfig::try_from(cfg)?;
+    Ok(resolve_max_file_size(
+        config.max_file_size_bytes,
+        default_max_object_bytes(),
+    ))
+}
+
+/// Resolves the final `max_file_size_bytes` for `CacheSettings`.
+/// `None` (unconfigured) -> use the global default; `Some(0)` -> 0 (unlimited);
+/// `Some(n)` -> n.
+fn resolve_max_file_size(configured: Option<usize>, global_default: usize) -> usize {
+    configured.unwrap_or(global_default)
+}
 
 // Context key for sharing cache settings between plugin and HttpService
 pub const CTX_KEY_CACHE_SETTINGS: &str = "pingsix_cache_settings";
@@ -66,10 +109,12 @@ pub struct PluginConfig {
     #[serde(default)]
     pub hide_cache_headers: bool,
 
-    /// Maximum cacheable response size in bytes. Zero means no limit.
-    /// Used to prevent memory exhaustion from caching large responses.
+    /// Maximum cacheable response size in bytes.
+    /// `None` (default) inherits the global `default_max_object_bytes`
+    /// (`pingsix.defaults.cache.default_max_object_bytes`, 1MB by default).
+    /// `Some(0)` means no limit. `Some(n)` enforces an explicit byte limit.
     #[serde(default)]
-    pub max_file_size_bytes: usize,
+    pub max_file_size_bytes: Option<usize>,
 
     /// Stale-While-Revalidate duration in seconds.
     /// When set, stale cached responses can be served while a background revalidation occurs.
@@ -183,13 +228,18 @@ pub fn create_cache_plugin(cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyPlugin>> 
             .collect(),
     );
 
+    // Resolve the final max object size: None inherits the global default,
+    // Some(0) means unlimited, Some(n) is an explicit limit.
+    let max_file_size_bytes =
+        resolve_max_file_size(config.max_file_size_bytes, default_max_object_bytes());
+
     // Pre-build cache settings at plugin creation to avoid per-request overhead
     let cache_settings = Arc::new(CacheSettings {
         ttl: Duration::from_secs(config.ttl),
         statuses,
         vary,
         hide_cache_headers: config.hide_cache_headers,
-        max_file_size_bytes: config.max_file_size_bytes,
+        max_file_size_bytes,
         stale_while_revalidate: config.stale_while_revalidate_secs.map(Duration::from_secs),
         respect_s_maxage: config.respect_s_maxage,
         cache_authenticated_requests: config.cache_authenticated_requests,
@@ -261,19 +311,26 @@ impl ProxyPlugin for PluginCache {
 mod tests {
     use super::*;
 
-    fn settings_from_json(value: serde_json::Value) -> CacheSettings {
+    fn settings_from_json_with_default(
+        value: serde_json::Value,
+        global_default: usize,
+    ) -> CacheSettings {
         let config = PluginConfig::try_from(value).unwrap();
         CacheSettings {
             ttl: Duration::from_secs(config.ttl),
             statuses: Arc::new(config.cache_http_statuses.iter().cloned().collect()),
             vary: Arc::new(vec![]),
             hide_cache_headers: config.hide_cache_headers,
-            max_file_size_bytes: config.max_file_size_bytes,
+            max_file_size_bytes: resolve_max_file_size(config.max_file_size_bytes, global_default),
             stale_while_revalidate: config.stale_while_revalidate_secs.map(Duration::from_secs),
             respect_s_maxage: config.respect_s_maxage,
             cache_authenticated_requests: config.cache_authenticated_requests,
             cache_set_cookie_responses: config.cache_set_cookie_responses,
         }
+    }
+
+    fn settings_from_json(value: serde_json::Value) -> CacheSettings {
+        settings_from_json_with_default(value, default_max_object_bytes())
     }
 
     #[test]
@@ -352,5 +409,30 @@ mod tests {
             "cache_set_cookie_responses": true
         }));
         assert!(!should_bypass_set_cookie_response(&opt_in, true));
+    }
+
+    #[test]
+    fn max_file_size_none_uses_global_default() {
+        // None (unconfigured) inherits the global default, whatever it is.
+        let s = settings_from_json_with_default(serde_json::json!({ "ttl": 60 }), 999_999);
+        assert_eq!(s.max_file_size_bytes, 999_999);
+    }
+
+    #[test]
+    fn max_file_size_some_zero_means_unlimited() {
+        let s = settings_from_json_with_default(
+            serde_json::json!({ "ttl": 60, "max_file_size_bytes": 0 }),
+            999_999,
+        );
+        assert_eq!(s.max_file_size_bytes, 0);
+    }
+
+    #[test]
+    fn max_file_size_some_value() {
+        let s = settings_from_json_with_default(
+            serde_json::json!({ "ttl": 60, "max_file_size_bytes": 5_000_000 }),
+            999_999,
+        );
+        assert_eq!(s.max_file_size_bytes, 5_000_000);
     }
 }

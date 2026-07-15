@@ -6,7 +6,7 @@ use http::{
     header::{SET_COOKIE, VARY},
     StatusCode,
 };
-use once_cell::sync::Lazy;
+use once_cell::sync::{Lazy, OnceCell};
 use pingora::modules::http::{
     HttpModules,
     {compression::ResponseCompressionBuilder, grpc_web::GrpcWeb},
@@ -26,9 +26,9 @@ use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_proxy::{ProxyHttp, Session};
 
 use crate::{
-    config,
+    config::{self, CacheDefaults},
     core::{ProxyContext, ProxyError, ProxyPlugin, RouteContext},
-    plugins::cache::{CacheSettings, CTX_KEY_CACHE_SETTINGS},
+    plugins::cache::{self, CacheSettings, CTX_KEY_CACHE_SETTINGS},
     proxy::runtime::RUNTIME,
 };
 
@@ -46,8 +46,31 @@ static CACHE_BACKEND: Lazy<MemCache> = Lazy::new(MemCache::new);
 // 2. Default cache metadata: No caching by default unless explicitly configured
 const CACHE_DEFAULT: CacheMetaDefaults = CacheMetaDefaults::new(|_| None, 0, 0);
 
-// 3. Eviction manager: Adjust based on server memory, using 512MB as example
-static EVICTION_MANAGER: Lazy<Manager> = Lazy::new(|| Manager::new(512 * 1024 * 1024));
+/// Configured eviction memory budget, populated once at startup from
+/// `pingsix.defaults.cache.max_memory_bytes`. Falls back to 512MB when unset.
+static CACHE_MAX_MEMORY_BYTES: OnceCell<usize> = OnceCell::new();
+
+/// 512MB fallback used when no memory budget has been initialized.
+const FALLBACK_MAX_MEMORY_BYTES: usize = 512 * 1024 * 1024;
+
+/// Populates global cache capacity defaults from configuration. Must be called once
+/// at startup before the proxy serves traffic. Subsequent calls are no-ops (first
+/// value wins), keeping parallel test initialization safe.
+pub fn init_cache_defaults(cache: &CacheDefaults) {
+    let _ = CACHE_MAX_MEMORY_BYTES.set(cache.max_memory_bytes);
+    cache::init_default_max_object_bytes(cache.default_max_object_bytes);
+}
+
+/// Returns the effective cache memory budget, falling back to 512MB when unset.
+pub fn configured_max_memory_bytes() -> usize {
+    CACHE_MAX_MEMORY_BYTES
+        .get()
+        .copied()
+        .unwrap_or(FALLBACK_MAX_MEMORY_BYTES)
+}
+
+// 3. Eviction manager: sized from `pingsix.defaults.cache.max_memory_bytes`
+static EVICTION_MANAGER: Lazy<Manager> = Lazy::new(|| Manager::new(configured_max_memory_bytes()));
 
 // 4. Cache lock: Timeout should be slightly larger than upstream P99 response time
 static CACHE_LOCK: Lazy<Box<CacheKeyLockImpl>> =
@@ -526,5 +549,18 @@ mod tests {
         headers.clear();
         headers.insert("cookie", "a=b".parse().unwrap());
         assert!(headers_indicate_shared_cache_credentials(&headers));
+    }
+
+    #[test]
+    fn eviction_manager_uses_configured_memory() {
+        // init_cache_defaults is idempotent (first call wins); in a fresh test binary this
+        // is the only setter, so the configured value is observable via the getter.
+        let cache = CacheDefaults {
+            max_memory_bytes: 777_777,
+            default_max_object_bytes: 888,
+        };
+        init_cache_defaults(&cache);
+        assert_eq!(configured_max_memory_bytes(), 777_777);
+        assert_eq!(cache::default_max_object_bytes(), 888);
     }
 }

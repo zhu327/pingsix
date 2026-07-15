@@ -57,6 +57,14 @@ pub trait RouteContext: Send + Sync {
     /// Select an HTTP peer for the route
     fn select_http_peer(&self, session: &mut Session) -> ProxyResult<Box<HttpPeer>>;
 
+    /// Return the effective host patterns used to match this route.
+    ///
+    /// Exposed so plugins can derive bounded labels from route configuration
+    /// instead of attacker-controllable request input. Default is empty.
+    fn effective_hosts(&self) -> &[String] {
+        &[]
+    }
+
     /// Build plugin executor for this route
     fn build_plugin_executor(&self) -> Arc<ProxyPluginExecutor>;
 

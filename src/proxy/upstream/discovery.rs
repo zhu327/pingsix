@@ -8,7 +8,7 @@ use hickory_resolver::TokioResolver;
 use once_cell::sync::OnceCell;
 use pingora::{protocols::ALPN, upstreams::peer::HttpPeer};
 use pingora_core::utils::tls::CertKey;
-use pingora_error::{Error, ErrorType::InternalError, OrErr, Result};
+use pingora_error::{BError, Error, ErrorType::InternalError, OrErr, Result};
 use pingora_load_balancing::{
     discovery::{ServiceDiscovery, Static},
     Backend,
@@ -170,23 +170,45 @@ pub struct HybridDiscovery {
 #[async_trait]
 impl ServiceDiscovery for HybridDiscovery {
     /// Discovers backends by combining static and DNS-based service discovery.
+    ///
+    /// If every sub-discovery that yields backends fails (or all succeed with
+    /// none and at least one errored), the first error is surfaced so an empty
+    /// backend set is never silently published. When some backends are
+    /// recovered despite failures, the failed sub-discoveries are logged as
+    /// warnings and the successful backends are returned.
     async fn discover(&self) -> Result<(BTreeSet<Backend>, HashMap<u64, bool>)> {
-        // Combine backends from static and DNS discoveries
         let mut backends = BTreeSet::new();
         let mut health_checks = HashMap::new();
 
-        let futures = self.discoveries.iter().map(|discovery| async move {
-            discovery.discover().await.map_err(|e| {
-                log::warn!("Hybrid discovery failed: {e}");
-                e
-            })
-        });
+        let futures = self
+            .discoveries
+            .iter()
+            .map(|discovery| async move { discovery.discover().await });
 
         let results = join_all(futures).await;
 
-        for (part_backends, part_health_checks) in results.into_iter().flatten() {
-            backends.extend(part_backends);
-            health_checks.extend(part_health_checks);
+        let mut first_err: Option<BError> = None;
+        for result in results.into_iter() {
+            match result {
+                Ok((part_backends, part_health_checks)) => {
+                    backends.extend(part_backends);
+                    health_checks.extend(part_health_checks);
+                }
+                Err(e) => {
+                    log::warn!("Hybrid discovery sub-task failed: {e}");
+                    first_err.get_or_insert(e);
+                }
+            }
+        }
+
+        if backends.is_empty() {
+            if let Some(err) = first_err {
+                return Err(Error::because(
+                    InternalError,
+                    "Hybrid discovery yielded no backends and at least one sub-discovery failed",
+                    err,
+                ));
+            }
         }
 
         Ok((backends, health_checks))
@@ -329,6 +351,91 @@ fn parse_host_and_port(addr: &str) -> ProxyResult<(String, Option<u32>)> {
 #[cfg(test)]
 mod tests {
     use super::parse_host_and_port;
+    use super::*;
+
+    /// Stub `ServiceDiscovery` that returns a fixed set of backends or an error.
+    struct StubDiscovery {
+        backends: Vec<Backend>,
+        fail: bool,
+    }
+
+    impl StubDiscovery {
+        fn ok(addrs: &[&str]) -> Self {
+            let backends = addrs
+                .iter()
+                .map(|addr| Backend::new_with_weight(addr, 1).unwrap())
+                .collect();
+            Self {
+                backends,
+                fail: false,
+            }
+        }
+
+        fn fail() -> Self {
+            Self {
+                backends: vec![],
+                fail: true,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ServiceDiscovery for StubDiscovery {
+        async fn discover(&self) -> Result<(BTreeSet<Backend>, HashMap<u64, bool>)> {
+            if self.fail {
+                return Err(Error::because(
+                    InternalError,
+                    "stub discovery failure",
+                    std::io::Error::other("stub"),
+                ));
+            }
+            Ok((self.backends.iter().cloned().collect(), HashMap::new()))
+        }
+    }
+
+    fn hybrid(discs: Vec<StubDiscovery>) -> HybridDiscovery {
+        let discoveries: Vec<Box<dyn ServiceDiscovery + Send + Sync>> = discs
+            .into_iter()
+            .map(|d| Box::new(d) as Box<dyn ServiceDiscovery + Send + Sync>)
+            .collect();
+        HybridDiscovery { discoveries }
+    }
+
+    #[tokio::test]
+    async fn test_all_discoveries_fail_returns_error() {
+        let hd = hybrid(vec![StubDiscovery::fail(), StubDiscovery::fail()]);
+        let result = hd.discover().await;
+        assert!(result.is_err(), "expected Err when all discoveries fail");
+    }
+
+    #[tokio::test]
+    async fn test_partial_failure_returns_successful_backends() {
+        let hd = hybrid(vec![
+            StubDiscovery::ok(&["127.0.0.1:80"]),
+            StubDiscovery::fail(),
+        ]);
+        let (backends, _) = hd
+            .discover()
+            .await
+            .expect("expected Ok with successful backends on partial failure");
+        assert_eq!(backends.len(), 1);
+        assert!(backends
+            .iter()
+            .any(|b| b.addr.to_string() == "127.0.0.1:80"));
+    }
+
+    #[tokio::test]
+    async fn test_all_success_returns_all() {
+        let hd = hybrid(vec![
+            StubDiscovery::ok(&["127.0.0.1:80"]),
+            StubDiscovery::ok(&["127.0.0.2:80"]),
+        ]);
+        let (backends, _) = hd
+            .discover()
+            .await
+            .expect("expected Ok when all discoveries succeed");
+        assert_eq!(backends.len(), 2);
+    }
 
     #[test]
     fn test_parse_upstream_node() {

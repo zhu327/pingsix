@@ -191,6 +191,13 @@ impl ProxyRoute {
     fn get_hosts(&self) -> Vec<&str> {
         self.effective_hosts.iter().map(String::as_str).collect()
     }
+
+    /// Return the effective host patterns used to match this route (route
+    /// hosts, falling back to service hosts). Exposed so plugins can derive
+    /// bounded labels from route configuration instead of raw request input.
+    pub fn effective_hosts(&self) -> &[String] {
+        &self.effective_hosts
+    }
 }
 
 impl RouteContext for ProxyRoute {
@@ -236,24 +243,38 @@ impl RouteContext for ProxyRoute {
         self.plugin_executor.clone()
     }
 
+    fn effective_hosts(&self) -> &[String] {
+        &self.effective_hosts
+    }
+
     fn resolve_upstream(&self) -> Option<Arc<dyn UpstreamSelector>> {
         self.resolved_upstream.clone()
     }
 }
 
 impl ProxyRoute {
-    /// Sets the timeout for an `HttpPeer` based on the route configuration.
+    /// Applies route-level timeout override when the route configures one.
+    ///
+    /// Priority: `route.timeout` > upstream-written timeout (explicit or global).
+    /// When the route has no timeout, leave the peer alone so named/inline upstream
+    /// settings (or `pingsix.defaults.upstream_timeout` applied by the upstream)
+    /// are preserved.
     fn set_timeout(&self, p: &mut HttpPeer) {
-        if let Some(config::Timeout {
-            connect,
-            read,
-            send,
-        }) = self.inner.timeout
-        {
-            p.options.connection_timeout = Some(Duration::from_secs(connect));
-            p.options.read_timeout = Some(Duration::from_secs(read));
-            p.options.write_timeout = Some(Duration::from_secs(send));
-        }
+        apply_route_timeout(self.inner.timeout.as_ref(), p);
+    }
+}
+
+/// Apply an explicit route timeout onto a peer. No-op when `route_timeout` is `None`.
+pub(crate) fn apply_route_timeout(route_timeout: Option<&config::Timeout>, p: &mut HttpPeer) {
+    if let Some(config::Timeout {
+        connect,
+        read,
+        send,
+    }) = route_timeout
+    {
+        p.options.connection_timeout = Some(Duration::from_secs(*connect));
+        p.options.read_timeout = Some(Duration::from_secs(*read));
+        p.options.write_timeout = Some(Duration::from_secs(*send));
     }
 }
 
@@ -617,5 +638,48 @@ mod tests {
         let proxy_route = ProxyRoute::build(route_cfg, &upstreams, &services).unwrap();
         let exec = proxy_route.build_plugin_executor();
         assert!(Arc::ptr_eq(&exec, &ProxyPluginExecutor::default_shared()));
+    }
+
+    #[test]
+    fn apply_route_timeout_none_preserves_peer_timeouts() {
+        use pingora_core::upstreams::peer::HttpPeer;
+
+        let mut peer = HttpPeer::new("127.0.0.1:80", false, String::new());
+        peer.options.connection_timeout = Some(Duration::from_secs(30));
+        peer.options.read_timeout = Some(Duration::from_secs(30));
+        peer.options.write_timeout = Some(Duration::from_secs(30));
+
+        apply_route_timeout(None, &mut peer);
+
+        assert_eq!(
+            peer.options.connection_timeout,
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(peer.options.read_timeout, Some(Duration::from_secs(30)));
+        assert_eq!(peer.options.write_timeout, Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn apply_route_timeout_some_overrides_peer_timeouts() {
+        use pingora_core::upstreams::peer::HttpPeer;
+
+        let mut peer = HttpPeer::new("127.0.0.1:80", false, String::new());
+        peer.options.connection_timeout = Some(Duration::from_secs(30));
+        peer.options.read_timeout = Some(Duration::from_secs(30));
+        peer.options.write_timeout = Some(Duration::from_secs(30));
+
+        let route_timeout = config::Timeout {
+            connect: 5,
+            read: 5,
+            send: 5,
+        };
+        apply_route_timeout(Some(&route_timeout), &mut peer);
+
+        assert_eq!(
+            peer.options.connection_timeout,
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(peer.options.read_timeout, Some(Duration::from_secs(5)));
+        assert_eq!(peer.options.write_timeout, Some(Duration::from_secs(5)));
     }
 }

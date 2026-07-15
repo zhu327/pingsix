@@ -1,7 +1,7 @@
 # PingSIX
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org)
 [![Build Status](https://img.shields.io/github/actions/workflow/status/zhu327/pingsix/rust.yml)](https://github.com/zhu327/pingsix/actions)
 
 > A high-performance, cloud-native API gateway built with Rust

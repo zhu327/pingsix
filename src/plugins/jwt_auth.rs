@@ -5,6 +5,7 @@ use base64::{engine::general_purpose, Engine as _};
 use http::StatusCode;
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use pingora_error::Result;
+use pingora_http::RequestHeader;
 use pingora_proxy::Session;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -21,8 +22,6 @@ const PRIORITY: i32 = 2510;
 const JWT_AUTH_PAYLOAD_KEY: &str = "jwt-auth-payload";
 /// Default authorization header name
 const DEFAULT_AUTH_HEADER: &str = "authorization";
-/// Default query parameter name for JWT token
-const DEFAULT_JWT_QUERY: &str = "jwt";
 /// Default cookie name for JWT token
 const DEFAULT_JWT_COOKIE: &str = "jwt";
 
@@ -36,8 +35,7 @@ pub fn create_jwt_auth_plugin(cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyPlugin
     })?;
 
     // Pre-create validation object for better performance
-    let mut validation = Validation::new(config.algorithm);
-    validation.leeway = config.lifetime_grace_period;
+    let validation = build_validation(&config);
 
     Ok(Arc::new(PluginJWTAuth {
         config,
@@ -54,7 +52,7 @@ pub struct PluginConfig {
     #[serde(default = "PluginConfig::default_header")]
     pub header: String,
 
-    /// Query parameter name containing the JWT (default: `jwt`).
+    /// Query parameter name containing the JWT (default: `""`, which disables query extraction).
     #[serde(default = "PluginConfig::default_query")]
     pub query: String,
 
@@ -89,6 +87,19 @@ pub struct PluginConfig {
     /// Public key (PEM format) for RSA/ECDSA algorithms (RS256, ES256).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub public_key: Option<String>,
+
+    /// Expected issuer (`iss`) claim. When set, tokens must carry a matching `iss`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub iss: Option<String>,
+
+    /// Expected audience (`aud`) claim. When set, tokens must carry a matching `aud`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aud: Option<String>,
+
+    /// Registered claims that must be present (e.g. `sub`, `iss`, `aud`, `exp`, `nbf`).
+    /// Only the registered claim names listed by `jsonwebtoken` are enforced.
+    #[serde(default)]
+    pub required_claims: Vec<String>,
 }
 
 impl PluginConfig {
@@ -97,7 +108,7 @@ impl PluginConfig {
     }
 
     fn default_query() -> String {
-        DEFAULT_JWT_QUERY.to_string()
+        String::new()
     }
 
     fn default_cookie() -> String {
@@ -164,6 +175,27 @@ struct Claims {
     /// Custom claims
     #[serde(flatten)]
     extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Build the `jsonwebtoken` [`Validation`] from the plugin config.
+///
+/// Extracted as a free function so the issuer/audience/required-claim logic can be unit tested
+/// without constructing a full proxy [`Session`].
+fn build_validation(config: &PluginConfig) -> Validation {
+    let mut validation = Validation::new(config.algorithm);
+    validation.leeway = config.lifetime_grace_period;
+    if let Some(iss) = &config.iss {
+        validation.set_issuer(&[iss]);
+    }
+    if let Some(aud) = &config.aud {
+        validation.set_audience(&[aud]);
+    }
+    // `set_required_spec_claims` replaces the whole set, so insert user-required claims into
+    // the default set (which already contains "exp") to preserve the default behavior.
+    for claim in &config.required_claims {
+        validation.required_spec_claims.insert(claim.clone());
+    }
+    validation
 }
 
 /// JWT Auth plugin implementation.
@@ -253,7 +285,7 @@ impl ProxyPlugin for PluginJWTAuth {
         // Handle cookie clearing if needed
         if let Some(cookie_name) = ctx.get_str("jwt_auth_clear_cookie") {
             let clear_cookie_header = format!("{cookie_name}=; Max-Age=0; Path=/; HttpOnly");
-            upstream_response.insert_header("Set-Cookie", clear_cookie_header)?;
+            upstream_response.append_header("Set-Cookie", clear_cookie_header)?;
         }
         Ok(())
     }
@@ -288,16 +320,25 @@ impl PluginJWTAuth {
 
     /// Extract token from query parameter and optionally remove it
     fn extract_from_query(&self, session: &mut Session) -> Option<String> {
-        let token = {
-            request::get_query_value(session.req_header(), &self.config.query)
-                .map(|q| q.to_string())
-        };
+        let token = self.extract_token_from_query(session.req_header());
 
         if token.is_some() && self.config.hide_credentials {
             let _ = request::remove_query_from_header(session.req_header_mut(), &self.config.query);
         }
 
         token
+    }
+
+    /// Pure query-extraction helper operating on a [`RequestHeader`] directly, so it can be
+    /// unit tested without a [`Session`].
+    ///
+    /// Returns `None` when query extraction is disabled (empty `config.query`).
+    fn extract_token_from_query(&self, req_header: &RequestHeader) -> Option<String> {
+        // An empty `query` config disables query-based token extraction.
+        if self.config.query.is_empty() {
+            return None;
+        }
+        request::get_query_value(req_header, &self.config.query).map(|q| q.to_string())
     }
 
     /// Extract token from cookie and optionally remove it
@@ -311,5 +352,163 @@ impl PluginJWTAuth {
         }
 
         token
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jsonwebtoken::{encode, EncodingKey, Header};
+    use serde::Serialize;
+
+    const TEST_SECRET: &str = "test-secret";
+
+    #[derive(Serialize)]
+    struct TestClaims {
+        exp: Option<u64>,
+        iss: Option<String>,
+        aud: Option<String>,
+        sub: Option<String>,
+    }
+
+    fn base_config() -> PluginConfig {
+        PluginConfig {
+            header: PluginConfig::default_header(),
+            query: PluginConfig::default_query(),
+            cookie: PluginConfig::default_cookie(),
+            hide_credentials: false,
+            store_in_ctx: false,
+            secret: Some(TEST_SECRET.to_string()),
+            algorithm: Algorithm::HS256,
+            base64_secret: false,
+            lifetime_grace_period: 0,
+            public_key: None,
+            iss: None,
+            aud: None,
+            required_claims: vec![],
+        }
+    }
+
+    fn decoding_key() -> DecodingKey {
+        DecodingKey::from_secret(TEST_SECRET.as_bytes())
+    }
+
+    fn encoding_key() -> EncodingKey {
+        EncodingKey::from_secret(TEST_SECRET.as_bytes())
+    }
+
+    fn make_token(claims: TestClaims) -> String {
+        encode(&Header::new(Algorithm::HS256), &claims, &encoding_key()).unwrap()
+    }
+
+    fn far_future_exp() -> Option<u64> {
+        Some(9_999_999_999)
+    }
+
+    #[test]
+    fn default_query_is_empty_disabling_extraction() {
+        // The default `query` config is now an empty string, which disables query extraction.
+        let cfg = base_config();
+        assert!(cfg.query.is_empty());
+    }
+
+    #[test]
+    fn valid_token_with_matching_iss_aud_passes() {
+        let mut cfg = base_config();
+        cfg.iss = Some("issuer-a".to_string());
+        cfg.aud = Some("audience-a".to_string());
+
+        let validation = build_validation(&cfg);
+        let token = make_token(TestClaims {
+            exp: far_future_exp(),
+            iss: Some("issuer-a".to_string()),
+            aud: Some("audience-a".to_string()),
+            sub: None,
+        });
+
+        let result = decode::<Claims>(&token, &decoding_key(), &validation);
+        assert!(
+            result.is_ok(),
+            "token with matching iss/aud should pass: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn token_with_wrong_iss_rejected() {
+        let mut cfg = base_config();
+        cfg.iss = Some("expected-issuer".to_string());
+
+        let validation = build_validation(&cfg);
+        let token = make_token(TestClaims {
+            exp: far_future_exp(),
+            iss: Some("wrong-issuer".to_string()),
+            aud: None,
+            sub: None,
+        });
+
+        let err = decode::<Claims>(&token, &decoding_key(), &validation).unwrap_err();
+        assert!(
+            matches!(err.kind(), jsonwebtoken::errors::ErrorKind::InvalidIssuer),
+            "expected InvalidIssuer, got {:?}",
+            err.kind()
+        );
+    }
+
+    #[test]
+    fn token_missing_required_claim_rejected() {
+        let mut cfg = base_config();
+        cfg.required_claims = vec!["sub".to_string()];
+
+        let validation = build_validation(&cfg);
+        // Token carries exp (so the default exp requirement is satisfied) but no `sub`.
+        let token = make_token(TestClaims {
+            exp: far_future_exp(),
+            iss: None,
+            aud: None,
+            sub: None,
+        });
+
+        let err = decode::<Claims>(&token, &decoding_key(), &validation).unwrap_err();
+        assert!(
+            matches!(
+                err.kind(),
+                jsonwebtoken::errors::ErrorKind::MissingRequiredClaim(claim) if claim == "sub"
+            ),
+            "expected MissingRequiredClaim(\"sub\"), got {:?}",
+            err.kind()
+        );
+    }
+
+    #[test]
+    fn query_extraction_disabled_by_default() {
+        // Default config has query="", so extraction must return None even when the request
+        // carries a `jwt=` query parameter.
+        let plugin = PluginJWTAuth {
+            config: base_config(),
+            decoding_key: decoding_key(),
+            validation: Validation::new(Algorithm::HS256),
+        };
+
+        let req = RequestHeader::build("GET", b"/protected?jwt=sometoken", None).unwrap();
+        assert!(plugin.extract_token_from_query(&req).is_none());
+    }
+
+    #[test]
+    fn query_extraction_enabled_when_configured() {
+        let mut cfg = base_config();
+        cfg.query = "jwt".to_string();
+
+        let plugin = PluginJWTAuth {
+            config: cfg,
+            decoding_key: decoding_key(),
+            validation: Validation::new(Algorithm::HS256),
+        };
+
+        let req = RequestHeader::build("GET", b"/protected?jwt=sometoken", None).unwrap();
+        assert_eq!(
+            plugin.extract_token_from_query(&req).as_deref(),
+            Some("sometoken")
+        );
     }
 }

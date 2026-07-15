@@ -1143,6 +1143,34 @@ global_rules:
 
 PingSIX includes 16+ built-in plugins for various functionalities:
 
+### Plugin Execution Order
+
+PingSIX runs plugins in two layers, mirroring APISIX's phase model:
+
+1. **Global-rule plugins** run first. These come from `global_rules` and are
+   sorted by `priority` in **descending** order (higher priority executes
+   first). Ties are broken by plugin name for determinism.
+2. **Route/service plugins** run next, also sorted by `priority` in
+   descending order. When a route and its service define a plugin with the
+   same name, the route-level definition wins and the service-level one is
+   skipped.
+
+A plugin short-circuits the request when its `request_filter` returns
+`true`. **A global-rule plugin that short-circuits prevents every route
+plugin from running — including authentication plugins.** This is intentional:
+it lets global redirect/echo rules respond before any upstream work, but it
+also means a global short-circuit can bypass route-level authentication.
+
+> **Warning:** Do not combine a global short-circuit plugin (e.g. redirect or
+> echo) that needs authentication protection with route-level auth plugins.
+> The global plugin will respond before the route auth plugin ever runs, so
+> the request is never authenticated. Put such protective logic at the global
+> layer instead, or avoid short-circuiting globally.
+
+This ordering is enforced in `HttpService::request_filter`
+(`src/service/http.rs`) and is pinned by the semantic tests in
+`tests/plugin_order.rs`.
+
 ### Authentication Plugins
 
 #### JWT Authentication
@@ -1397,6 +1425,9 @@ plugins:
 plugins:
   redirect:
     http_to_https: true           # Redirect HTTP to HTTPS
+    redirect_host: example.com    # Required with http_to_https (Location host)
+    # trusted_proxies:            # Optional: only then honor X-Forwarded-Proto
+    #   - 10.0.0.0/8
     ret_code: 301                 # Redirect status code
     uri: /new-location            # Static redirect
     append_query_string: true     # Preserve query parameters

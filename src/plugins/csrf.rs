@@ -67,6 +67,15 @@ struct CsrfToken {
     sign: String,
 }
 
+/// Build the CSRF cookie value string with security attributes.
+///
+/// `Secure` is included so the cookie is only sent over HTTPS in production.
+/// `HttpOnly` is intentionally omitted because the double-submit pattern requires
+/// JavaScript to read the token and resend it in a header.
+fn build_cookie_value(name: &str, token: &str, expires: u64) -> String {
+    format!("{name}={token}; Path=/; SameSite=Lax; Max-Age={expires}; Secure")
+}
+
 pub struct PluginCsrf {
     config: PluginConfig,
 }
@@ -107,6 +116,26 @@ impl PluginCsrf {
         // Serialize to JSON, return None on error instead of panicking
         let json = serde_json::to_string(&token).ok()?;
         Some(general_purpose::STANDARD.encode(json))
+    }
+
+    /// Attach the CSRF cookie to the upstream response.
+    ///
+    /// Uses `append_header` so that any `Set-Cookie` headers already produced by the
+    /// upstream are preserved rather than overwritten.
+    fn set_csrf_cookie(&self, upstream_response: &mut ResponseHeader) -> Result<()> {
+        // Generate token, handle potential errors gracefully
+        let Some(csrf_token) = self.gen_token_string() else {
+            log::error!("Failed to generate CSRF token");
+            return Ok(());
+        };
+
+        // Set the CSRF cookie with security attributes
+        // Note: HttpOnly is intentionally NOT set because JavaScript needs to read this
+        // for the double-submit pattern (sending it in both cookie and header)
+        let cookie_val = build_cookie_value(&self.config.name, &csrf_token, self.config.expires);
+
+        upstream_response.append_header(header::SET_COOKIE, cookie_val)?;
+        Ok(())
     }
 
     /// Validates a CSRF token
@@ -233,22 +262,7 @@ impl ProxyPlugin for PluginCsrf {
         upstream_response: &mut ResponseHeader,
         _ctx: &mut ProxyContext,
     ) -> Result<()> {
-        // Generate token, handle potential errors gracefully
-        let Some(csrf_token) = self.gen_token_string() else {
-            log::error!("Failed to generate CSRF token");
-            return Ok(());
-        };
-
-        // Set the CSRF cookie with security attributes
-        // Note: HttpOnly is intentionally NOT set because JavaScript needs to read this
-        // for the double-submit pattern (sending it in both cookie and header)
-        let cookie_val = format!(
-            "{}={}; Path=/; SameSite=Lax; Max-Age={}",
-            self.config.name, csrf_token, self.config.expires
-        );
-
-        upstream_response.insert_header(header::SET_COOKIE, cookie_val)?;
-        Ok(())
+        self.set_csrf_cookie(upstream_response)
     }
 }
 
@@ -326,5 +340,47 @@ mod tests {
         for _ in 0..100 {
             assert!(plugin.gen_token_string().is_some());
         }
+    }
+
+    #[test]
+    fn csrf_cookie_contains_secure_attribute() {
+        let cookie = build_cookie_value("csrf-token", "dummy-token", 7200);
+        assert!(
+            cookie.contains("Secure"),
+            "CSRF cookie should contain the Secure attribute, got: {cookie}"
+        );
+    }
+
+    #[test]
+    fn csrf_uses_append_not_insert() {
+        let plugin = build_plugin(7200);
+        let mut resp = ResponseHeader::build(StatusCode::OK, None).expect("build resp");
+        // Simulate an upstream Set-Cookie that must survive the CSRF plugin.
+        resp.append_header(header::SET_COOKIE, "session=abc")
+            .expect("append session cookie");
+
+        plugin.set_csrf_cookie(&mut resp).expect("set csrf cookie");
+
+        let set_cookies: Vec<String> = resp
+            .as_owned_parts()
+            .headers
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().expect("cookie value is ascii").to_string())
+            .collect();
+
+        assert_eq!(
+            set_cookies.len(),
+            2,
+            "expected both session and csrf Set-Cookie headers, got: {set_cookies:?}"
+        );
+        assert!(
+            set_cookies.iter().any(|c| c.starts_with("session=")),
+            "upstream session cookie must be preserved, got: {set_cookies:?}"
+        );
+        assert!(
+            set_cookies.iter().any(|c| c.starts_with("csrf-token=")),
+            "csrf cookie must be appended, got: {set_cookies:?}"
+        );
     }
 }

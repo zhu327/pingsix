@@ -22,7 +22,10 @@ use crate::{
     },
     core::{constant_time_eq, ProxyError},
     plugins::{build_plugin, traffic_split},
-    proxy::ssl::ProxySSL,
+    proxy::{
+        control_plane::{build_config_set_from_kvs, validate_config_set},
+        ssl::ProxySSL,
+    },
     utils::response::{CommonErrors, ResponseBuilder},
 };
 
@@ -33,6 +36,11 @@ enum ApiError {
     MissingParameter(String),
     InvalidRequest(String),
     RequestBodyReadError(String),
+    /// Resource does not exist (maps to 404).
+    NotFound(String),
+    /// Optimistic-concurrency (CAS) conflict or referential-integrity violation
+    /// on delete (maps to 409).
+    Conflict(String),
     /// Preserves the original ProxyError with full context
     ProxyError(ProxyError),
 }
@@ -45,6 +53,8 @@ impl fmt::Display for ApiError {
             ApiError::MissingParameter(msg) => write!(f, "Missing parameter: {msg}"),
             ApiError::InvalidRequest(msg) => write!(f, "Invalid request: {msg}"),
             ApiError::RequestBodyReadError(msg) => write!(f, "Request body read error: {msg}"),
+            ApiError::NotFound(msg) => write!(f, "Not found: {msg}"),
+            ApiError::Conflict(msg) => write!(f, "Conflict: {msg}"),
             ApiError::ProxyError(err) => write!(f, "{err}"),
         }
     }
@@ -74,6 +84,8 @@ impl ApiError {
                 CommonErrors::internal_server_error("Backend configuration store unavailable")
             }
             RequestBodyReadError(_) => CommonErrors::bad_request("Failed to read request body"),
+            NotFound(_) => ResponseBuilder::error_http(StatusCode::NOT_FOUND, &self.to_string()),
+            Conflict(_) => ResponseBuilder::error_http(StatusCode::CONFLICT, &self.to_string()),
             ValidationError(_) | MissingParameter(_) | InvalidRequest(_) => {
                 CommonErrors::bad_request(&self.to_string())
             }
@@ -113,6 +125,9 @@ impl ApiError {
                 // Do not echo etcd endpoints/keys in client responses.
                 log::error!("Admin etcd error: {proxy_err}");
                 CommonErrors::internal_server_error("Backend configuration store unavailable")
+            }
+            ProxyError::CasConflict(_) => {
+                ResponseBuilder::error_http(StatusCode::CONFLICT, &proxy_err.to_string())
             }
             _ => {
                 log::error!("Admin internal error: {proxy_err}");
@@ -272,9 +287,35 @@ impl<T: AdminResource> Handler for ResourceHandler<T> {
         // Use generic resource validation
         T::validate_resource(&body_data)?;
 
-        etcd.put(&key, body_data).await?;
+        // Read the full resource graph, then build a candidate set that reflects
+        // the proposed put (target key replaced with the new body). validate_config_set
+        // checks cross-resource references including traffic-split upstream_ids
+        // before we touch etcd.
+        let (kv_map, _rev, mod_map) = etcd.read_full_graph().await.map_err(ApiError::from)?;
+        let full_key = etcd.prefixed_key(&key);
 
-        Ok(ResponseBuilder::success_http(Vec::new(), None))
+        let mut candidate_kvs = graph_without(&kv_map, &full_key);
+        candidate_kvs.push((full_key.clone(), body_data.clone()));
+
+        let candidate_set = build_config_set_from_kvs(&candidate_kvs).map_err(|e| {
+            ApiError::ValidationError(format!("Failed to build candidate config set: {e}"))
+        })?;
+        validate_config_set(&candidate_set).map_err(|e| {
+            ApiError::ValidationError(format!("Proposed configuration is invalid: {e}"))
+        })?;
+
+        let expected_mod_revision = mod_map.get(&full_key).copied();
+        // NOTE: single-key CAS; graph-level atomicity is best-effort (see design D2).
+        // read_full_graph and cas_put are not atomic across keys, so referential
+        // integrity is best-effort and residual races are caught by the watcher's
+        // last-known-good snapshot.
+        let committed = etcd
+            .cas_put(&full_key, body_data, expected_mod_revision)
+            .await
+            .map_err(cas_api_error)?;
+
+        let body = serde_json::json!({ "revision": committed });
+        Ok(ResponseBuilder::success_json(&body))
     }
 }
 
@@ -299,10 +340,12 @@ impl<T: AdminResource> Handler for GetHandler<T> {
                             e,
                         ))
                     })?;
-                let wrapper = ValueWrapper { value: json_value };
+                let wrapper = ValueWrapper {
+                    value: redact(T::RESOURCE_TYPE, json_value),
+                };
                 Ok(ResponseBuilder::success_json(&wrapper))
             }
-            Ok(None) => Err(ApiError::InvalidRequest("Resource not found".into())),
+            Ok(None) => Err(ApiError::NotFound("Resource not found".into())),
         }
     }
 }
@@ -318,7 +361,31 @@ impl<T: AdminResource> Handler for DeleteHandler<T> {
     ) -> ApiResult<ApiResponse> {
         let key = ResourceHandler::<T>::extract_key(&params)?;
 
-        etcd.delete(&key).await?;
+        let (kv_map, _rev, mod_map) = etcd.read_full_graph().await.map_err(ApiError::from)?;
+        let full_key = etcd.prefixed_key(&key);
+
+        let expected_mod_revision = *mod_map
+            .get(&full_key)
+            .ok_or_else(|| ApiError::NotFound("Resource not found".into()))?;
+
+        // Build the candidate graph without the target resource. If anything still
+        // references it (including traffic-split upstream_id), validation fails
+        // and we refuse the delete with 409.
+        let candidate_kvs = graph_without(&kv_map, &full_key);
+        let candidate_set = build_config_set_from_kvs(&candidate_kvs).map_err(|e| {
+            ApiError::ValidationError(format!("Failed to build candidate config set: {e}"))
+        })?;
+        validate_config_set(&candidate_set).map_err(|e| {
+            ApiError::Conflict(format!("Resource is referenced by other resources: {e}"))
+        })?;
+
+        // NOTE: single-key CAS; graph-level atomicity is best-effort (see design D2).
+        // Another writer may mutate a referencing key between read_full_graph and
+        // cas_delete; referential integrity is best-effort and residual races are
+        // caught by the watcher's last-known-good snapshot.
+        etcd.cas_delete(&full_key, expected_mod_revision)
+            .await
+            .map_err(cas_api_error)?;
 
         Ok(ResponseBuilder::success_http(Vec::new(), None))
     }
@@ -347,7 +414,7 @@ impl<T: AdminResource> Handler for ListHandler<T> {
 
             let item = serde_json::json!({
                 "key": key,
-                "value": value,
+                "value": redact(T::RESOURCE_TYPE, value),
                 "createdIndex": kv.create_revision(),
                 "modifiedIndex": kv.mod_revision(),
             });
@@ -521,6 +588,27 @@ fn is_json_content_type(ct_str: &str) -> bool {
         .is_some_and(|media_type| media_type.eq_ignore_ascii_case("application/json"))
 }
 
+/// Collect the full resource graph as `(physical_key, value)` pairs, excluding
+/// `exclude`. Used by the PUT/DELETE handlers to build a candidate snapshot.
+fn graph_without(kv_map: &HashMap<String, Vec<u8>>, exclude: &str) -> Vec<(String, Vec<u8>)> {
+    kv_map
+        .iter()
+        .filter(|(k, _)| *k != exclude)
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
+}
+
+/// Map a CAS operation error to an `ApiError`: a `CasConflict` becomes a 409
+/// `Conflict`, any other error is preserved verbatim.
+fn cas_api_error(e: ProxyError) -> ApiError {
+    match e {
+        ProxyError::CasConflict(_) => {
+            ApiError::Conflict("Resource was modified concurrently".into())
+        }
+        other => ApiError::from(other),
+    }
+}
+
 async fn read_request_body(http_session: &mut ServerSession) -> Result<Vec<u8>, ApiError> {
     let mut body_data = Vec::with_capacity(1024); // Initial capacity
     while let Some(bytes) = http_session
@@ -535,6 +623,102 @@ async fn read_request_body(http_session: &mut ServerSession) -> Result<Vec<u8>, 
         body_data.extend_from_slice(&bytes);
     }
     Ok(body_data)
+}
+
+/// Recursively redact sensitive fields in a JSON value.
+///
+/// Redaction is path/type-aware to avoid clobbering non-secret fields that
+/// happen to share a name with a secret elsewhere (e.g. an Upstream's
+/// `hash_on` `key`, whose value is something like `"uri"`). Sensitivity is
+/// decided by `resource_type` plus the structural position of the field:
+///
+/// - `ssls`: top-level `key` (the private key) is redacted.
+/// - `upstreams`: the `tls.client_key` field is redacted; the top-level `key`
+///   (a `hash_on` selector) is left intact.
+/// - `routes`/`services`/`global_rules`: inside a `plugins` object, the
+///   plugin-specific credential fields are redacted:
+///   `jwt-auth.secret`, `basic-auth.password`, `key-auth.keys[]`, `csrf.key`.
+///
+/// `in_upstream_tls` is set when the current object is an upstream's `tls`
+/// object. `plugin_name` is `Some(name)` when the current object is a single
+/// plugin's config inside a `plugins` map.
+pub(crate) fn redact(resource_type: &str, value: serde_json::Value) -> serde_json::Value {
+    redact_value(value, resource_type, false, None)
+}
+
+fn redact_value(
+    value: serde_json::Value,
+    resource_type: &str,
+    in_upstream_tls: bool,
+    plugin_name: Option<&str>,
+) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut out = serde_json::Map::with_capacity(map.len());
+            for (name, v) in map {
+                let redacted = if in_upstream_tls && name == "client_key" {
+                    redact_string(v)
+                } else if let Some(plugin) = plugin_name {
+                    match (plugin, name.as_str()) {
+                        ("jwt-auth", "secret") | ("basic-auth", "password") | ("csrf", "key") => {
+                            redact_string(v)
+                        }
+                        ("key-auth", "keys") => redact_keys_array(v),
+                        _ => redact_value(v, resource_type, false, None),
+                    }
+                } else if resource_type == "ssls" && name == "key" {
+                    redact_string(v)
+                } else if resource_type == "upstreams" && name == "tls" {
+                    redact_value(v, resource_type, true, None)
+                } else if name == "plugins" {
+                    redact_plugins(v, resource_type)
+                } else {
+                    redact_value(v, resource_type, false, None)
+                };
+                out.insert(name, redacted);
+            }
+            serde_json::Value::Object(out)
+        }
+        serde_json::Value::Array(arr) => serde_json::Value::Array(
+            arr.into_iter()
+                .map(|el| redact_value(el, resource_type, false, None))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+/// Redact a `plugins` object whose keys are plugin names and whose values are
+/// each plugin's config. Each plugin config is recursed with its name as
+/// context so only plugin-specific credential fields are redacted.
+fn redact_plugins(value: serde_json::Value, resource_type: &str) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut out = serde_json::Map::with_capacity(map.len());
+            for (plugin_name, v) in map {
+                let redacted = redact_value(v, resource_type, false, Some(plugin_name.as_str()));
+                out.insert(plugin_name, redacted);
+            }
+            serde_json::Value::Object(out)
+        }
+        other => other,
+    }
+}
+
+fn redact_string(v: serde_json::Value) -> serde_json::Value {
+    match v {
+        serde_json::Value::String(_) => serde_json::Value::String("***".into()),
+        other => other,
+    }
+}
+
+fn redact_keys_array(v: serde_json::Value) -> serde_json::Value {
+    match v {
+        serde_json::Value::Array(arr) => {
+            serde_json::Value::Array(arr.into_iter().map(redact_string).collect())
+        }
+        other => other,
+    }
 }
 
 #[cfg(test)]
@@ -564,5 +748,161 @@ mod tests {
             allow_insecure_remote: false,
         };
         assert!(admin.validate().is_err());
+    }
+
+    #[test]
+    fn redact_ssl_key() {
+        let input = serde_json::json!({
+            "cert": "-----BEGIN CERTIFICATE-----\ncert\n-----END CERTIFICATE-----",
+            "key": "-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----",
+        });
+        let out = redact("ssls", input);
+        assert_eq!(
+            out["cert"],
+            "-----BEGIN CERTIFICATE-----\ncert\n-----END CERTIFICATE-----"
+        );
+        assert_eq!(out["key"], "***");
+    }
+
+    #[test]
+    fn redact_jwt_secret() {
+        let input = serde_json::json!({
+            "plugins": { "jwt-auth": { "secret": "abc" } },
+        });
+        let out = redact("routes", input);
+        assert_eq!(out["plugins"]["jwt-auth"]["secret"], "***");
+    }
+
+    #[test]
+    fn redact_basic_auth_password() {
+        let input = serde_json::json!({
+            "plugins": { "basic-auth": { "username": "u", "password": "p" } },
+        });
+        let out = redact("routes", input);
+        assert_eq!(out["plugins"]["basic-auth"]["username"], "u");
+        assert_eq!(out["plugins"]["basic-auth"]["password"], "***");
+    }
+
+    #[test]
+    fn redact_key_auth_keys() {
+        let input = serde_json::json!({
+            "plugins": { "key-auth": { "keys": ["k1", "k2"] } },
+        });
+        let out = redact("routes", input);
+        assert_eq!(
+            out["plugins"]["key-auth"]["keys"],
+            serde_json::json!(["***", "***"])
+        );
+    }
+
+    #[test]
+    fn redact_csrf_key() {
+        let input = serde_json::json!({
+            "plugins": { "csrf": { "key": "secret-csrf" } },
+        });
+        let out = redact("global_rules", input);
+        assert_eq!(out["plugins"]["csrf"]["key"], "***");
+    }
+
+    #[test]
+    fn redact_nested_upstream_tls() {
+        let input = serde_json::json!({
+            "upstream": {
+                "tls": {
+                    "client_key": "-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----",
+                    "client_cert": "cert-data",
+                }
+            }
+        });
+        let out = redact("upstreams", input);
+        assert_eq!(out["upstream"]["tls"]["client_key"], "***");
+        assert_eq!(out["upstream"]["tls"]["client_cert"], "cert-data");
+    }
+
+    #[test]
+    fn redact_preserves_upstream_hash_on_key() {
+        // An Upstream's top-level `key` is a hash_on selector (e.g. "uri"),
+        // NOT a secret. It must survive redaction unchanged.
+        let input = serde_json::json!({
+            "key": "uri",
+            "type": "roundrobin",
+        });
+        let out = redact("upstreams", input);
+        assert_eq!(out["key"], "uri");
+        assert_eq!(out["type"], "roundrobin");
+    }
+
+    #[test]
+    fn redact_redacts_upstream_tls_client_key() {
+        let input = serde_json::json!({
+            "key": "uri",
+            "type": "roundrobin",
+            "tls": {
+                "client_key": "-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----",
+                "client_cert": "cert-data",
+            },
+        });
+        let out = redact("upstreams", input);
+        assert_eq!(out["key"], "uri");
+        assert_eq!(out["tls"]["client_key"], "***");
+        assert_eq!(out["tls"]["client_cert"], "cert-data");
+    }
+
+    #[test]
+    fn redact_non_sensitive_unchanged() {
+        let input = serde_json::json!({
+            "id": "r1",
+            "uri": "/x",
+            "methods": ["GET"],
+            "upstream_id": "u1",
+        });
+        let out = redact("routes", input.clone());
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn not_found_maps_to_404() {
+        let resp = ApiError::NotFound("Resource not found".into()).into_response();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn conflict_maps_to_409() {
+        let resp = ApiError::Conflict("resource is referenced".into()).into_response();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn cas_conflict_proxy_error_maps_to_409() {
+        let resp =
+            ApiError::from(ProxyError::CasConflict("mod_revision mismatch".into())).into_response();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn candidate_build_rejects_dangling_upstream_id() {
+        use crate::proxy::control_plane::{CandidateSnapshot, ResourceConfigSet};
+        use crate::proxy::runtime::RUNTIME_TEST_LOCK;
+
+        let _guard = RUNTIME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut set = ResourceConfigSet::default();
+        set.routes.insert(
+            "r1".into(),
+            crate::config::Route {
+                id: "r1".into(),
+                uri: Some("/".into()),
+                uris: vec![],
+                methods: vec![],
+                host: None,
+                hosts: vec![],
+                priority: 0,
+                plugins: Default::default(),
+                upstream: None,
+                upstream_id: Some("missing".into()),
+                service_id: None,
+                timeout: None,
+            },
+        );
+        assert!(CandidateSnapshot::build(set).is_err());
     }
 }

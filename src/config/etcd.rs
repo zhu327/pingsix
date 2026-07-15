@@ -1,7 +1,10 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use etcd_client::{Client, ConnectOptions, Event, GetOptions, GetResponse, WatchOptions};
+use etcd_client::{
+    Client, Compare, CompareOp, ConnectOptions, Event, GetOptions, GetResponse, Txn, TxnOp,
+    WatchOptions,
+};
 use pingora::server::ListenFds;
 use pingora_core::{server::ShutdownWatch, services::Service};
 use tokio::{
@@ -9,7 +12,7 @@ use tokio::{
     time::sleep,
 };
 
-use super::Etcd;
+use super::{Etcd, EtcdTls};
 use crate::core::{status, ProxyError, ProxyResult};
 
 // Retry delay constants
@@ -240,6 +243,44 @@ async fn sleep_or_shutdown(delay: Duration, shutdown: &ShutdownWatch) -> bool {
 }
 
 async fn create_client(cfg: &Etcd) -> ProxyResult<Client> {
+    let options = build_connect_options(cfg)?;
+    // TLS is opt-in via `etcd.tls`. etcd-client auto-enables TLS for any
+    // `https://` URL (even with empty TlsOptions), so normalize the scheme
+    // from the TLS config rather than trusting the configured host prefix.
+    let endpoints = normalize_etcd_endpoints(&cfg.host, cfg.tls.is_some());
+    Client::connect(endpoints, Some(options))
+        .await
+        .map_err(|e| {
+            ProxyError::etcd_error_with_cause(
+                format!("Failed to connect to host '{:?}'", cfg.host),
+                e,
+            )
+        })
+}
+
+/// Rewrite etcd host URLs so the scheme matches whether TLS is enabled.
+///
+/// Plaintext is the default: without `etcd.tls`, endpoints become `http://...`
+/// even if the config wrote `https://`. With TLS, endpoints become `https://...`.
+fn normalize_etcd_endpoints(hosts: &[String], use_tls: bool) -> Vec<String> {
+    let scheme = if use_tls { "https://" } else { "http://" };
+    hosts
+        .iter()
+        .map(|host| {
+            let stripped = host
+                .strip_prefix("https://")
+                .or_else(|| host.strip_prefix("http://"))
+                .unwrap_or(host.as_str());
+            format!("{scheme}{stripped}")
+        })
+        .collect()
+}
+
+/// Build etcd `ConnectOptions` from config (timeout, auth, TLS).
+///
+/// Separated from `create_client` so the TLS/options logic is unit-testable
+/// without a live etcd endpoint. TLS is only attached when `etcd.tls` is set.
+fn build_connect_options(cfg: &Etcd) -> ProxyResult<ConnectOptions> {
     let mut options = ConnectOptions::default();
     if let Some(timeout) = cfg.timeout {
         options = options.with_timeout(Duration::from_secs(timeout as _));
@@ -250,15 +291,35 @@ async fn create_client(cfg: &Etcd) -> ProxyResult<Client> {
     if let (Some(user), Some(password)) = (&cfg.user, &cfg.password) {
         options = options.with_user(user.clone(), password.clone());
     }
+    if let Some(tls_cfg) = &cfg.tls {
+        options = options.with_tls(build_tls_options(tls_cfg)?);
+    }
+    Ok(options)
+}
 
-    Client::connect(cfg.host.clone(), Some(options))
-        .await
-        .map_err(|e| {
-            ProxyError::etcd_error_with_cause(
-                format!("Failed to connect to host '{:?}'", cfg.host),
-                e,
-            )
-        })
+/// Build tonic `ClientTlsConfig` from `EtcdTls` by reading the configured PEM
+/// files. Used for both server certificate verification (CA) and mutual TLS
+/// (client cert/key) when the latter are present.
+fn build_tls_options(tls_cfg: &EtcdTls) -> ProxyResult<etcd_client::TlsOptions> {
+    let ca_pem = read_pem(&tls_cfg.ca_cert, "CA cert")?;
+    let mut tls =
+        etcd_client::TlsOptions::new().ca_certificate(etcd_client::Certificate::from_pem(ca_pem));
+    if let (Some(cert_path), Some(key_path)) = (&tls_cfg.client_cert, &tls_cfg.client_key) {
+        let cert_pem = read_pem(cert_path, "client cert")?;
+        let key_pem = read_pem(key_path, "client key")?;
+        tls = tls.identity(etcd_client::Identity::from_pem(cert_pem, key_pem));
+    }
+    if let Some(domain) = &tls_cfg.domain {
+        tls = tls.domain_name(domain);
+    }
+    Ok(tls)
+}
+
+/// Read a PEM file, mapping the IO error to an etcd error with a descriptive cause.
+fn read_pem(path: &str, label: &str) -> ProxyResult<Vec<u8>> {
+    std::fs::read(path).map_err(|e| {
+        ProxyError::etcd_error_with_cause(format!("Failed to read etcd {label} '{path}'"), e)
+    })
 }
 
 pub fn json_to_resource<T>(value: &[u8]) -> ProxyResult<T>
@@ -360,7 +421,291 @@ impl EtcdClientWrapper {
             })
     }
 
+    /// Read every key-value pair under the configured prefix.
+    ///
+    /// Returns `(key -> value, header revision, key -> mod_revision)` where keys
+    /// are the full physical etcd keys (including the prefix). Used by the Admin
+    /// write path to reconstruct the full resource graph for reference-integrity
+    /// validation before a CAS commit.
+    pub async fn read_full_graph(
+        &self,
+    ) -> ProxyResult<(
+        std::collections::HashMap<String, Vec<u8>>,
+        i64,
+        std::collections::HashMap<String, i64>,
+    )> {
+        let client_mutex = self.ensure_connected().await?;
+        let mut client = client_mutex.lock().await;
+
+        let prefixed_key = self.config.prefix.clone();
+        let options = GetOptions::new().with_prefix();
+        let response = client
+            .get(prefixed_key.as_bytes(), Some(options))
+            .await
+            .map_err(|e| {
+                ProxyError::etcd_error_with_cause(
+                    format!("read_full_graph for prefix '{prefixed_key}' failed"),
+                    e,
+                )
+            })?;
+
+        let revision = response
+            .header()
+            .map(|h| h.revision())
+            .ok_or_else(|| ProxyError::etcd_error("read_full_graph: missing response header"))?;
+
+        let mut kv_map = std::collections::HashMap::new();
+        let mut mod_map = std::collections::HashMap::new();
+        for kv in response.kvs() {
+            let key = String::from_utf8_lossy(kv.key()).into_owned();
+            kv_map.insert(key.clone(), kv.value().to_vec());
+            mod_map.insert(key, kv.mod_revision());
+        }
+        Ok((kv_map, revision, mod_map))
+    }
+
+    /// Compare-and-swap put. `expected_mod_revision = None` means the key must
+    /// not exist yet (create_revision == 0); `Some(r)` means the key's current
+    /// mod_revision must equal `r`. On success returns the committed header
+    /// revision. The `key` is the full physical etcd key (including prefix) and
+    /// is used verbatim — no further prefixing is applied.
+    pub async fn cas_put(
+        &self,
+        key: &str,
+        value: Vec<u8>,
+        expected_mod_revision: Option<i64>,
+    ) -> ProxyResult<i64> {
+        let client_mutex = self.ensure_connected().await?;
+        let mut client = client_mutex.lock().await;
+
+        let compare = match expected_mod_revision {
+            None => Compare::create_revision(key.as_bytes(), CompareOp::Equal, 0),
+            Some(r) => Compare::mod_revision(key.as_bytes(), CompareOp::Equal, r),
+        };
+        let txn =
+            Txn::new()
+                .when(vec![compare])
+                .and_then(vec![TxnOp::put(key.as_bytes(), value, None)]);
+
+        let response = client.txn(txn).await.map_err(|e| {
+            ProxyError::etcd_error_with_cause(format!("cas_put for key '{key}' failed"), e)
+        })?;
+
+        if !response.succeeded() {
+            return Err(ProxyError::CasConflict(format!(
+                "cas_put conflict for key '{key}': expected mod_revision mismatch"
+            )));
+        }
+
+        response
+            .header()
+            .map(|h| h.revision())
+            .ok_or_else(|| ProxyError::etcd_error("cas_put: missing response header"))
+    }
+
+    /// Compare-and-swap delete. The key's current mod_revision must equal
+    /// `expected_mod_revision`, otherwise the transaction fails. The `key` is
+    /// the full physical etcd key (including prefix) and is used verbatim.
+    pub async fn cas_delete(&self, key: &str, expected_mod_revision: i64) -> ProxyResult<()> {
+        let client_mutex = self.ensure_connected().await?;
+        let mut client = client_mutex.lock().await;
+
+        let compare =
+            Compare::mod_revision(key.as_bytes(), CompareOp::Equal, expected_mod_revision);
+        let txn = Txn::new()
+            .when(vec![compare])
+            .and_then(vec![TxnOp::delete(key.as_bytes(), None)]);
+
+        let response = client.txn(txn).await.map_err(|e| {
+            ProxyError::etcd_error_with_cause(format!("cas_delete for key '{key}' failed"), e)
+        })?;
+
+        if !response.succeeded() {
+            return Err(ProxyError::CasConflict(format!(
+                "cas_delete conflict for key '{key}': expected mod_revision mismatch"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Returns the full physical etcd key (prefix + logical key). Exposed so the
+    /// Admin write path can correlate `read_full_graph` keys (which are physical)
+    /// with CAS operations.
+    pub fn prefixed_key(&self, key: &str) -> String {
+        self.with_prefix(key)
+    }
+
     fn with_prefix(&self, key: &str) -> String {
         format!("{}/{}", self.config.prefix, key)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{Etcd, EtcdTls};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// Monotonic counter so each test gets a unique temp-file name.
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    /// Write `contents` to a unique temp file and return its path.
+    /// Files are cleaned up via `TempFile`'s Drop.
+    struct TempFile(std::path::PathBuf);
+
+    impl TempFile {
+        fn new(contents: &[u8], _ext: &str) -> Self {
+            let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+            let path = std::env::temp_dir()
+                .join(format!("pingsix_etcd_tls_{}_{id}.pem", std::process::id(),));
+            std::fs::write(&path, contents).expect("write temp file");
+            TempFile(path)
+        }
+
+        fn path(&self) -> &str {
+            self.0.to_str().expect("utf8 temp path")
+        }
+    }
+
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    const CA_PEM: &[u8] = b"-----BEGIN CERTIFICATE-----
+fake-ca
+-----END CERTIFICATE-----\n";
+    const CERT_PEM: &[u8] = b"-----BEGIN CERTIFICATE-----
+fake-cert
+-----END CERTIFICATE-----\n";
+    const KEY_PEM: &[u8] = b"-----BEGIN PRIVATE KEY-----
+fake-key
+-----END PRIVATE KEY-----\n";
+
+    fn etcd_with_tls(tls: EtcdTls) -> Etcd {
+        Etcd {
+            host: vec!["127.0.0.1:2379".to_string()],
+            prefix: "/pingsix".to_string(),
+            timeout: None,
+            connect_timeout: None,
+            user: None,
+            password: None,
+            tls: Some(tls),
+        }
+    }
+
+    #[test]
+    fn normalize_endpoints_default_plaintext() {
+        let hosts = vec![
+            "127.0.0.1:2379".to_string(),
+            "http://etcd:2379".to_string(),
+            "https://etcd:2379".to_string(),
+        ];
+        assert_eq!(
+            normalize_etcd_endpoints(&hosts, false),
+            vec![
+                "http://127.0.0.1:2379",
+                "http://etcd:2379",
+                "http://etcd:2379",
+            ]
+        );
+    }
+
+    #[test]
+    fn normalize_endpoints_tls_uses_https() {
+        let hosts = vec![
+            "127.0.0.1:2379".to_string(),
+            "http://etcd:2379".to_string(),
+            "https://etcd:2379".to_string(),
+        ];
+        assert_eq!(
+            normalize_etcd_endpoints(&hosts, true),
+            vec![
+                "https://127.0.0.1:2379",
+                "https://etcd:2379",
+                "https://etcd:2379",
+            ]
+        );
+    }
+
+    #[test]
+    fn build_tls_options_with_ca_only() {
+        let ca = TempFile::new(CA_PEM, "pem");
+        let tls = EtcdTls {
+            ca_cert: ca.path().to_string(),
+            client_cert: None,
+            client_key: None,
+            domain: None,
+        };
+        // TlsOptions internals are opaque; success means CA was parsed and config built.
+        assert!(build_tls_options(&tls).is_ok());
+    }
+
+    #[test]
+    fn build_tls_options_with_mtls() {
+        let ca = TempFile::new(CA_PEM, "pem");
+        let cert = TempFile::new(CERT_PEM, "pem");
+        let key = TempFile::new(KEY_PEM, "pem");
+        let tls = EtcdTls {
+            ca_cert: ca.path().to_string(),
+            client_cert: Some(cert.path().to_string()),
+            client_key: Some(key.path().to_string()),
+            domain: Some("etcd.example".to_string()),
+        };
+        assert!(build_tls_options(&tls).is_ok());
+    }
+
+    #[test]
+    fn build_tls_options_missing_ca_file() {
+        let tls = EtcdTls {
+            ca_cert: "/nonexistent/path/ca.pem".to_string(),
+            client_cert: None,
+            client_key: None,
+            domain: None,
+        };
+        assert!(build_tls_options(&tls).is_err());
+    }
+
+    #[test]
+    fn build_tls_options_missing_client_cert_file() {
+        let ca = TempFile::new(CA_PEM, "pem");
+        // cert path missing while key is present — must error rather than silently skip mTLS.
+        let key = TempFile::new(KEY_PEM, "pem");
+        let tls = EtcdTls {
+            ca_cert: ca.path().to_string(),
+            client_cert: Some("/nonexistent/path/cert.pem".to_string()),
+            client_key: Some(key.path().to_string()),
+            domain: None,
+        };
+        assert!(build_tls_options(&tls).is_err());
+    }
+
+    #[test]
+    fn create_client_no_tls_keeps_options_plain() {
+        let cfg = Etcd {
+            host: vec!["http://127.0.0.1:2379".to_string()],
+            prefix: "/pingsix".to_string(),
+            timeout: Some(5),
+            connect_timeout: Some(2),
+            user: Some("root".to_string()),
+            password: Some("pw".to_string()),
+            tls: None,
+        };
+        // No TLS configured: options must build without invoking any file reads.
+        assert!(build_connect_options(&cfg).is_ok());
+    }
+
+    #[test]
+    fn build_connect_options_with_tls_succeeds() {
+        let ca = TempFile::new(CA_PEM, "pem");
+        let tls = EtcdTls {
+            ca_cert: ca.path().to_string(),
+            client_cert: None,
+            client_key: None,
+            domain: Some("etcd.example".to_string()),
+        };
+        let cfg = etcd_with_tls(tls);
+        assert!(build_connect_options(&cfg).is_ok());
     }
 }
