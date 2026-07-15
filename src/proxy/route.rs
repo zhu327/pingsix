@@ -16,7 +16,10 @@ use crate::{
     utils::request::get_request_host,
 };
 
-use super::{service::ProxyService, upstream::ProxyUpstream};
+use super::{
+    service::ProxyService,
+    upstream::{inline_key, PreparedUpstreams, ProxyUpstream},
+};
 
 fn build_plugin_name_index(plugins: &[Arc<dyn ProxyPlugin>]) -> Vec<String> {
     let mut names: Vec<String> = plugins.iter().map(|p| p.name().to_string()).collect();
@@ -112,6 +115,7 @@ impl ProxyRoute {
         route: config::Route,
         upstreams: &HashMap<String, Arc<ProxyUpstream>>,
         services: &HashMap<String, Arc<ProxyService>>,
+        prepared: &PreparedUpstreams,
     ) -> ProxyResult<Self> {
         let service = route
             .service_id
@@ -128,7 +132,19 @@ impl ProxyRoute {
 
         let inline_upstream = if let Some(upstream_config) = route.upstream.clone() {
             Some(Arc::new(
-                ProxyUpstream::build(upstream_config).with_context(&format!(
+                ProxyUpstream::build(
+                    upstream_config,
+                    prepared
+                        .get(&inline_key(&format!("route/{}", route.id)))
+                        .cloned()
+                        .ok_or_else(|| {
+                            ProxyError::Configuration(format!(
+                                "Route '{}' inline upstream was not prepared",
+                                route.id
+                            ))
+                        })?,
+                )
+                .with_context(&format!(
                     "Failed to create upstream for route '{}'",
                     route.id
                 ))?,
@@ -160,8 +176,14 @@ impl ProxyRoute {
 
         let mut plugins = Vec::with_capacity(route.plugins.len());
         for (name, value) in route.plugins.clone() {
-            let plugin = build_plugin_with_upstreams(&name, value, upstreams)
-                .map_err(|e| ProxyError::Plugin(format!("Failed to build plugin '{name}': {e}")))?;
+            let plugin = build_plugin_with_upstreams(
+                &name,
+                value,
+                upstreams,
+                prepared,
+                &format!("route/{}", route.id),
+            )
+            .map_err(|e| ProxyError::Plugin(format!("Failed to build plugin '{name}': {e}")))?;
             plugins.push(plugin);
         }
         sort_plugins_by_priority_desc(plugins.as_mut_slice());
@@ -249,6 +271,10 @@ impl RouteContext for ProxyRoute {
 
     fn resolve_upstream(&self) -> Option<Arc<dyn UpstreamSelector>> {
         self.resolved_upstream.clone()
+    }
+
+    fn timeout(&self) -> Option<&config::Timeout> {
+        self.inner.timeout.as_ref()
     }
 }
 
@@ -414,6 +440,65 @@ impl MatchEntry {
 
         // Fall back to non-host URI matching
         Self::match_uri_method(&self.non_host_uri, uri, method)
+    }
+
+    /// Match a syntactically valid CORS preflight using its requested method.
+    /// Normal OPTIONS routes remain preferred because callers invoke this only
+    /// after normal matching fails.
+    pub(crate) fn match_preflight(
+        &self,
+        session: &mut Session,
+        global_has_cors: bool,
+    ) -> RouteMatchResult {
+        let request = session.req_header();
+        if request.method != http::Method::OPTIONS
+            || !request.headers.contains_key(http::header::ORIGIN)
+        {
+            return None;
+        }
+        let method = request
+            .headers
+            .get(http::header::ACCESS_CONTROL_REQUEST_METHOD)
+            .and_then(|value| value.to_str().ok())?;
+        if method.parse::<http::Method>().is_err() {
+            return None;
+        }
+        let uri = request.uri.path();
+        if let Some(host) = get_request_host(request).filter(|host| !host.is_empty()) {
+            let reversed_host = Self::reverse_ascii_lowercase(host);
+            if let Ok(routes) = self.host_uris.at(&reversed_host) {
+                if let Some(result) =
+                    Self::match_preflight_uri(routes.value, uri, method, global_has_cors)
+                {
+                    return Some(result);
+                }
+            }
+        }
+        Self::match_preflight_uri(&self.non_host_uri, uri, method, global_has_cors)
+    }
+
+    fn match_preflight_uri(
+        match_router: &MatchRouter<Vec<Arc<ProxyRoute>>>,
+        uri: &str,
+        method: &str,
+        global_has_cors: bool,
+    ) -> RouteMatchResult {
+        let matched = match_router.at(uri).ok()?;
+        let route = matched.value.iter().find(|route| {
+            (global_has_cors || route.build_plugin_executor().has_plugin("cors"))
+                && (route.inner.methods.is_empty()
+                    || route
+                        .inner
+                        .methods
+                        .iter()
+                        .any(|configured| *configured == method))
+        })?;
+        let params = matched
+            .params
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+        Some((params, route.clone()))
     }
 
     /// Matches a URI to a route.
@@ -635,7 +720,8 @@ mod tests {
 
         let upstreams = HashMap::new();
         let services = HashMap::new();
-        let proxy_route = ProxyRoute::build(route_cfg, &upstreams, &services).unwrap();
+        let proxy_route =
+            ProxyRoute::build(route_cfg, &upstreams, &services, &HashMap::new()).unwrap();
         let exec = proxy_route.build_plugin_executor();
         assert!(Arc::ptr_eq(&exec, &ProxyPluginExecutor::default_shared()));
     }

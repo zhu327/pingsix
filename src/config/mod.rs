@@ -233,6 +233,11 @@ pub struct Defaults {
     /// upstream does not set its own `timeout`.
     #[validate(nested)]
     pub upstream_timeout: Option<Timeout>,
+    /// Maximum time spent resolving an upstream DNS name before the candidate
+    /// is rejected. Defaults to five seconds.
+    #[serde(default = "Defaults::default_dns_resolution_timeout")]
+    #[validate(range(min = 1, max = 60))]
+    pub dns_resolution_timeout: u64,
     #[validate(nested)]
     pub cache: Option<CacheDefaults>,
 }
@@ -245,6 +250,12 @@ pub struct CacheDefaults {
     pub max_memory_bytes: usize,
     #[serde(default = "CacheDefaults::default_max_object_bytes")]
     pub default_max_object_bytes: usize,
+}
+
+impl Defaults {
+    fn default_dns_resolution_timeout() -> u64 {
+        5
+    }
 }
 
 impl CacheDefaults {
@@ -264,6 +275,7 @@ impl CacheDefaults {
 /// upstream does not configure its own `timeout`.
 static DEFAULT_UPSTREAM_TIMEOUT: once_cell::sync::OnceCell<Option<Timeout>> =
     once_cell::sync::OnceCell::new();
+static DNS_RESOLUTION_TIMEOUT: once_cell::sync::OnceCell<u64> = once_cell::sync::OnceCell::new();
 
 /// Populate the global default upstream timeout from configuration. Called once
 /// at startup. Subsequent calls are no-ops (first value wins), which keeps
@@ -277,14 +289,28 @@ pub fn default_upstream_timeout() -> Option<Timeout> {
     DEFAULT_UPSTREAM_TIMEOUT.get().cloned().flatten()
 }
 
-/// Resolve the effective timeout for a route/upstream: an explicit value always
-/// wins; otherwise the global default is used. Extracted as a free function so
-/// it can be unit tested without an `HttpPeer`.
-pub fn resolve_upstream_timeout(
-    explicit: Option<Timeout>,
-    global: Option<Timeout>,
-) -> Option<Timeout> {
-    explicit.or(global)
+/// Populate the finite DNS resolution deadline from configuration.
+pub fn init_dns_resolution_timeout(timeout: u64) {
+    let _ = DNS_RESOLUTION_TIMEOUT.set(timeout);
+}
+
+/// DNS deadline used by discovery when no startup configuration has initialized it.
+pub fn dns_resolution_timeout() -> u64 {
+    *DNS_RESOLUTION_TIMEOUT.get_or_init(Defaults::default_dns_resolution_timeout)
+}
+
+/// Finite peer-I/O fallback used whenever neither a route nor upstream nor
+/// global defaults provide a timeout.
+pub const BUILTIN_UPSTREAM_TIMEOUT: Timeout = Timeout {
+    connect: 5,
+    send: 30,
+    read: 30,
+};
+
+/// Resolve the effective timeout for a route/upstream: explicit > configured
+/// global > built-in fallback. This always produces finite peer timeouts.
+pub fn resolve_upstream_timeout(explicit: Option<Timeout>, global: Option<Timeout>) -> Timeout {
+    explicit.or(global).unwrap_or(BUILTIN_UPSTREAM_TIMEOUT)
 }
 
 /// TLS/mTLS configuration for connecting to etcd.
@@ -333,6 +359,7 @@ impl Listener {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Validate)]
+#[validate(schema(function = "Etcd::validate_connection"))]
 #[serde(deny_unknown_fields)]
 pub struct Etcd {
     #[validate(length(min = 1))]
@@ -345,6 +372,24 @@ pub struct Etcd {
     pub password: Option<String>,
     #[validate(nested)]
     pub tls: Option<EtcdTls>,
+}
+
+impl Etcd {
+    fn validate_connection(&self) -> Result<(), ValidationError> {
+        match (&self.user, &self.password) {
+            (None, None) => {}
+            (Some(user), Some(password))
+                if !user.trim().is_empty() && !password.trim().is_empty() => {}
+            _ => {
+                return Err(ValidationError::new(
+                    "etcd_user_and_password_required_together",
+                ))
+            }
+        }
+        crate::config::etcd::validate_etcd_endpoints(&self.host, self.tls.is_some())
+            .map(|_| ())
+            .map_err(|_| ValidationError::new("invalid_etcd_endpoint"))
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Validate)]
@@ -395,9 +440,42 @@ pub struct Status {
     /// Seconds after which an etcd sync is considered stale (default: 300).
     #[serde(default)]
     pub config_stale_after: Option<u64>,
-    /// When true, readiness returns 503 if config sync is stale.
+    /// Readiness fails when etcd has remained disconnected past the threshold.
+    #[serde(default = "Status::default_fail_readiness_when_stale")]
+    pub fail_readiness_when_stale: bool,
+    /// Required to expose detailed diagnostics on a non-loopback plaintext listener.
     #[serde(default)]
-    pub fail_readiness_when_stale: Option<bool>,
+    pub diagnostics_api_key: Option<String>,
+    /// Explicitly allow protected diagnostics on a non-loopback plaintext listener.
+    #[serde(default)]
+    pub allow_insecure_remote: bool,
+}
+
+impl Status {
+    fn default_fail_readiness_when_stale() -> bool {
+        true
+    }
+
+    pub fn diagnostics_enabled(&self) -> bool {
+        self.address.ip().is_loopback()
+            || (self.allow_insecure_remote
+                && self
+                    .diagnostics_api_key
+                    .as_deref()
+                    .is_some_and(|key| !key.trim().is_empty()))
+    }
+
+    /// Warn about non-loopback binds. Unlike `Admin`, the status endpoint
+    /// exposes no sensitive data without authenticated diagnostics, so an
+    /// insecure bind is warned rather than refused.
+    pub fn log_bind_safety(&self) {
+        if self.diagnostics_enabled() && !self.address.ip().is_loopback() {
+            log::warn!(
+                "Status diagnostics are enabled on non-loopback plaintext address {}. API keys are transmitted in cleartext.",
+                self.address
+            );
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Validate)]
@@ -417,9 +495,43 @@ pub struct Sentry {
 pub struct Log {
     #[validate(length(min = 1), custom(function = "Log::validate_path"))]
     pub path: String,
+    #[serde(default = "Log::default_max_size_bytes")]
+    #[validate(range(min = 1))]
+    pub max_size_bytes: u64,
+    #[serde(default = "Log::default_max_backups")]
+    pub max_backups: u32,
+    /// Internal size-based rotation is the bounded production default. External
+    /// and disabled modes must be selected explicitly.
+    #[serde(default)]
+    pub rotation: LogRotation,
+}
+
+/// Log file rotation strategy.
+///
+/// Only `Internal` rotates in-process. `External` and `Disabled` never reopen
+/// the file: the writer keeps its descriptor open, so an external rotator must
+/// use copytruncate semantics (or the process must be restarted) after a
+/// rename-based rotation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogRotation {
+    #[default]
+    Internal,
+    /// No in-process rotation; rely on an external rotator (copytruncate).
+    External,
+    /// No rotation at all; the file grows unbounded.
+    Disabled,
 }
 
 impl Log {
+    fn default_max_size_bytes() -> u64 {
+        100 * 1024 * 1024
+    }
+
+    fn default_max_backups() -> u32 {
+        5
+    }
+
     fn validate_path(path: &str) -> Result<(), ValidationError> {
         if path.contains('\0') || path.trim().is_empty() {
             return Err(ValidationError::new("Invalid log file path"));
@@ -447,8 +559,11 @@ pub struct UpstreamTls {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
 #[serde(deny_unknown_fields)]
 pub struct Timeout {
+    #[validate(range(min = 1, max = 86400))]
     pub connect: u64,
+    #[validate(range(min = 1, max = 86400))]
     pub send: u64,
+    #[validate(range(min = 1, max = 86400))]
     pub read: u64,
 }
 
@@ -1372,7 +1487,7 @@ routes:
             send: 9,
             read: 9,
         };
-        let t = resolve_upstream_timeout(Some(explicit), Some(global)).unwrap();
+        let t = resolve_upstream_timeout(Some(explicit), Some(global));
         assert_eq!(t.connect, 1);
         assert_eq!(t.read, 3);
     }
@@ -1385,14 +1500,38 @@ routes:
             send: 9,
             read: 9,
         };
-        let t = resolve_upstream_timeout(None, Some(global)).unwrap();
+        let t = resolve_upstream_timeout(None, Some(global));
         assert_eq!(t.connect, 9);
     }
 
     #[test]
-    fn resolve_upstream_timeout_none_when_both_absent() {
+    fn resolve_upstream_timeout_uses_built_in_when_both_absent() {
         init_log();
-        assert!(resolve_upstream_timeout(None, None).is_none());
+        assert_eq!(
+            resolve_upstream_timeout(None, None),
+            BUILTIN_UPSTREAM_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn log_rotation_defaults_internal_and_accepts_explicit_modes() {
+        let internal: Log = serde_yml::from_str("path: /tmp/pingsix.log").unwrap();
+        assert_eq!(internal.rotation, LogRotation::Internal);
+        let external: Log =
+            serde_yml::from_str("path: /tmp/pingsix.log\nrotation: external").unwrap();
+        assert_eq!(external.rotation, LogRotation::External);
+        let disabled: Log =
+            serde_yml::from_str("path: /tmp/pingsix.log\nrotation: disabled").unwrap();
+        assert_eq!(disabled.rotation, LogRotation::Disabled);
+    }
+
+    #[test]
+    fn status_defaults_to_fail_closed_and_protects_remote_diagnostics() {
+        let status: Status = serde_yml::from_str("address: 127.0.0.1:9000").unwrap();
+        assert!(status.fail_readiness_when_stale);
+        assert!(status.diagnostics_enabled());
+        let remote: Status = serde_yml::from_str("address: 0.0.0.0:9000").unwrap();
+        assert!(!remote.diagnostics_enabled());
     }
 
     #[test]
@@ -1644,7 +1783,7 @@ pingsix:
     - address: "[::1]:8080"
   etcd:
     host:
-      - "http://127.0.0.1:2379"
+      - "https://127.0.0.1:2379"
     prefix: "/pingsix"
     tls:
       ca_cert: /a.pem

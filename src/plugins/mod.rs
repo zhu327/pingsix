@@ -26,7 +26,7 @@ use serde_json::Value as JsonValue;
 
 use crate::{
     core::{PluginCreateFn, ProxyError, ProxyPlugin, ProxyResult},
-    proxy::upstream::ProxyUpstream,
+    proxy::upstream::{PreparedUpstreams, ProxyUpstream},
 };
 
 /// Global registry mapping plugin names to their factory functions.
@@ -103,13 +103,17 @@ static PLUGIN_BUILDER_REGISTRY: Lazy<HashMap<&'static str, PluginCreateFn>> = La
 ///
 /// # Errors
 /// Returns `ReadError` for unknown plugin names or configuration parsing failures
-pub fn build_plugin_with_upstreams(
+pub(crate) fn build_plugin_with_upstreams(
     name: &str,
     cfg: JsonValue,
     upstreams: &HashMap<String, Arc<ProxyUpstream>>,
+    prepared: &PreparedUpstreams,
+    owner: &str,
 ) -> ProxyResult<Arc<dyn ProxyPlugin>> {
     if name == traffic_split::PLUGIN_NAME {
-        return traffic_split::create_traffic_split_plugin_with_upstreams(cfg, upstreams);
+        return traffic_split::create_traffic_split_plugin_with_upstreams(
+            cfg, upstreams, prepared, owner,
+        );
     }
     build_plugin(name, cfg)
 }

@@ -6,7 +6,7 @@ use crate::{
         sort_plugins_by_priority_desc, ProxyError, ProxyPlugin, ProxyPluginExecutor, ProxyResult,
     },
     plugins::build_plugin_with_upstreams,
-    proxy::upstream::ProxyUpstream,
+    proxy::upstream::{PreparedUpstreams, ProxyUpstream},
 };
 
 /// Represents a proxy service that manages upstreams.
@@ -29,6 +29,7 @@ impl ProxyGlobalRule {
     pub(crate) fn build(
         rule: config::GlobalRule,
         upstreams: &HashMap<String, Arc<ProxyUpstream>>,
+        prepared: &PreparedUpstreams,
     ) -> ProxyResult<Self> {
         let mut proxy_global_rule = ProxyGlobalRule {
             inner: rule.clone(),
@@ -38,7 +39,14 @@ impl ProxyGlobalRule {
         // Load plugins and log each one
         for (name, value) in rule.plugins {
             log::info!("Loading plugin: {name}");
-            let plugin = build_plugin_with_upstreams(&name, value, upstreams).map_err(|e| {
+            let plugin = build_plugin_with_upstreams(
+                &name,
+                value,
+                upstreams,
+                prepared,
+                &format!("global-rule/{}", rule.id),
+            )
+            .map_err(|e| {
                 ProxyError::Plugin(format!(
                     "Failed to build plugin '{}' for global rule '{}': {}",
                     name, rule.id, e

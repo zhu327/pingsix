@@ -74,6 +74,11 @@ impl PluginConfig {
                 "allow_credential cannot be used with allow_origins='*' or '**'",
             ));
         }
+        if self.allow_credential && self.allow_headers == "*" {
+            return Err(ValidationError::new(
+                "allow_credential cannot be used with allow_headers='*'; use '**' to reflect request headers",
+            ));
+        }
         Ok(())
     }
 
@@ -298,17 +303,28 @@ impl PluginCors {
     }
 
     fn handle_options_request(&self, session: &mut Session) -> Result<Option<ResponseHeader>> {
-        let origin = request::get_req_header_value(session.req_header(), header::ORIGIN.as_str())
-            .map(|s| s.to_string());
-
-        match origin {
-            Some(origin) if self.config.is_origin_allowed(&origin) => {
-                let mut resp = ResponseHeader::build(StatusCode::NO_CONTENT, None)?;
-                self.apply_cors_headers_with_origin(session, &mut resp, &origin)?;
-                Ok(Some(resp))
-            }
-            _ => Ok(None),
+        let req = session.req_header();
+        let Some(requested_method) =
+            request::get_req_header_value(req, header::ACCESS_CONTROL_REQUEST_METHOD.as_str())
+        else {
+            // An OPTIONS request without this header is ordinary application traffic.
+            return Ok(None);
+        };
+        let origin =
+            request::get_req_header_value(req, header::ORIGIN.as_str()).map(str::to_string);
+        let allowed = origin
+            .as_deref()
+            .is_some_and(|origin| self.config.is_origin_allowed(origin))
+            && method_is_allowed(&self.config.allow_methods, requested_method)
+            && request::get_req_header_value(req, header::ACCESS_CONTROL_REQUEST_HEADERS.as_str())
+                .is_none_or(|headers| headers_are_allowed(&self.config.allow_headers, headers));
+        if !allowed {
+            return Ok(Some(ResponseHeader::build(StatusCode::FORBIDDEN, None)?));
         }
+        let origin = origin.expect("checked above");
+        let mut resp = ResponseHeader::build(StatusCode::NO_CONTENT, None)?;
+        self.apply_cors_headers_with_origin(session, &mut resp, &origin)?;
+        Ok(Some(resp))
     }
 }
 
@@ -341,6 +357,30 @@ impl ProxyPlugin for PluginCors {
         self.apply_cors_headers(session, upstream_response)?;
         Ok(())
     }
+}
+
+fn method_is_allowed(allowed: &str, requested: &str) -> bool {
+    const METHODS: &[&str] = &["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"];
+
+    METHODS
+        .iter()
+        .any(|method| method.eq_ignore_ascii_case(requested))
+        && (allowed == "*"
+            || allowed == "**"
+            || allowed
+                .split(',')
+                .any(|method| method.trim().eq_ignore_ascii_case(requested)))
+}
+
+fn headers_are_allowed(allowed: &str, requested: &str) -> bool {
+    allowed == "*"
+        || allowed == "**"
+        || requested.split(',').map(str::trim).all(|requested| {
+            !requested.is_empty()
+                && allowed
+                    .split(',')
+                    .any(|header| header.trim().eq_ignore_ascii_case(requested))
+        })
 }
 
 /// Merge a vary token into an existing Vary header without duplicates.
@@ -390,6 +430,25 @@ mod tests {
             ..Default::default()
         };
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn credentials_rejected_with_wildcard_headers() {
+        let cfg = PluginConfig {
+            allow_origins: "https://example.com".into(),
+            allow_headers: "*".into(),
+            allow_credential: true,
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn wildcard_methods_only_allow_advertised_methods() {
+        assert!(method_is_allowed("**", "GET"));
+        assert!(!method_is_allowed("**", "CONNECT"));
+        assert!(!method_is_allowed("**", "TRACE"));
+        assert!(!method_is_allowed("**", "FOO"));
     }
 
     #[test]

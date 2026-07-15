@@ -17,16 +17,49 @@ use crate::{
 pub const PLUGIN_NAME: &str = "file-logger";
 const PRIORITY: i32 = 399;
 
+fn push_escaped(output: &mut String, value: &str) {
+    for character in value.chars() {
+        match character {
+            '\\' => output.push_str("\\\\"),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            character if character.is_control() => {
+                use std::fmt::Write;
+                let _ = write!(output, "\\u{{{:04x}}}", character as u32);
+            }
+            character => output.push(character),
+        }
+    }
+}
+
+fn redact_query(query: &str, names: &[String]) -> String {
+    query
+        .split('&')
+        .map(|part| match part.split_once('=') {
+            Some((name, _)) if names.iter().any(|candidate| candidate == name) => {
+                format!("{name}=***")
+            }
+            _ => part.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
 /// Creates a file logger plugin instance with the given configuration.
 pub fn create_file_logger_plugin(cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyPlugin>> {
     let config = PluginConfig::try_from(cfg)?;
     let log_format = LogFormat::parse(&config.log_format)?;
 
-    Ok(Arc::new(PluginFileLogger { log_format }))
+    Ok(Arc::new(PluginFileLogger {
+        log_format,
+        redact_query_params: config.redact_query_params,
+    }))
 }
 
 /// Configuration for the file logger plugin.
 #[derive(Default, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PluginConfig {
     /// The log format string, containing static text and variables (e.g., `$remote_addr "$request_method $uri" $status`).
     /// Supported variables include: `request_method`, `uri`, `query_string`, `http_host`, `request_time`,
@@ -34,6 +67,10 @@ struct PluginConfig {
     /// `server_protocol`, `request_id`, `body_bytes_sent`, `error`, and custom variables via `var_<name>`.
     #[serde(default = "PluginConfig::default_log_format")]
     log_format: String,
+
+    /// Query parameter names to redact from `$query_string` output.
+    #[serde(default)]
+    redact_query_params: Vec<String>,
 }
 
 impl PluginConfig {
@@ -54,6 +91,7 @@ impl TryFrom<JsonValue> for PluginConfig {
 /// File logger plugin implementation.
 pub struct PluginFileLogger {
     log_format: LogFormat,
+    redact_query_params: Vec<String>,
 }
 
 #[async_trait]
@@ -67,7 +105,11 @@ impl ProxyPlugin for PluginFileLogger {
     }
 
     async fn logging(&self, session: &mut Session, e: Option<&Error>, ctx: &mut ProxyContext) {
-        info!("{}", self.log_format.render(session, e, ctx));
+        info!(
+            "{}",
+            self.log_format
+                .render(session, e, ctx, &self.redact_query_params)
+        );
     }
 }
 
@@ -148,14 +190,22 @@ impl LogFormat {
     /// via `var_<name>` (e.g., `var_my_custom_data` from `ctx.vars`).
     /// The `error` variable is populated from the `e` parameter, which is guaranteed by
     /// `Pingora::ProxyHttp::logging` to be passed correctly.
-    fn render(&self, session: &mut Session, e: Option<&Error>, ctx: &mut ProxyContext) -> String {
+    fn render(
+        &self,
+        session: &mut Session,
+        e: Option<&Error>,
+        ctx: &mut ProxyContext,
+        redact_query_params: &[String],
+    ) -> String {
         // Create output string with pre-allocated capacity
         let mut output = String::with_capacity(self.estimated_capacity);
 
         for segment in &self.segments {
             match segment {
                 Segment::Static(text) => output.push_str(text),
-                Segment::Variable(var) => self.write_variable(&mut output, var, session, e, ctx),
+                Segment::Variable(var) => {
+                    self.write_variable(&mut output, var, session, e, ctx, redact_query_params)
+                }
             }
         }
 
@@ -171,27 +221,39 @@ impl LogFormat {
         session: &mut Session,
         e: Option<&Error>,
         ctx: &mut ProxyContext,
+        redact_query_params: &[String],
     ) {
         use std::fmt::Write;
 
         if let Some(custom_var_name) = var.strip_prefix("var_") {
-            output.push_str(ctx.get_str(custom_var_name).unwrap_or(""));
+            push_escaped(output, ctx.get_str(custom_var_name).unwrap_or(""));
             return;
         }
 
         match var {
-            "request_method" => output.push_str(session.req_header().method.as_str()),
-            "uri" => output.push_str(session.req_header().uri.path()),
-            "query_string" => output.push_str(session.req_header().uri.query().unwrap_or_default()),
-            "http_host" => output.push_str(session.req_header().uri.host().unwrap_or_default()),
+            "request_method" => push_escaped(output, session.req_header().method.as_str()),
+            "uri" => push_escaped(output, session.req_header().uri.path()),
+            "query_string" => {
+                let query = session.req_header().uri.query().unwrap_or_default();
+                if redact_query_params.is_empty() {
+                    push_escaped(output, query);
+                } else {
+                    push_escaped(output, &redact_query(query, redact_query_params));
+                }
+            }
+            "http_host" => {
+                push_escaped(output, session.req_header().uri.host().unwrap_or_default())
+            }
             "request_time" => {
                 let _ = write!(output, "{}", ctx.elapsed_ms());
             }
-            "http_user_agent" => output.push_str(
+            "http_user_agent" => push_escaped(
+                output,
                 request::get_req_header_value(session.req_header(), "user-agent")
                     .unwrap_or_default(),
             ),
-            "http_referer" => output.push_str(
+            "http_referer" => push_escaped(
+                output,
                 request::get_req_header_value(session.req_header(), "referer").unwrap_or_default(),
             ),
             "remote_addr" => {
@@ -223,13 +285,13 @@ impl LogFormat {
             } else {
                 "http/1.1"
             }),
-            "request_id" => output.push_str(ctx.request_id().unwrap_or("")),
+            "request_id" => push_escaped(output, ctx.request_id().unwrap_or("")),
             "body_bytes_sent" => {
                 let _ = write!(output, "{}", session.body_bytes_sent());
             }
             "error" => {
                 if let Some(error) = e {
-                    let _ = write!(output, "{error}");
+                    push_escaped(output, &format!("{error}"));
                 }
             }
             _ => {}

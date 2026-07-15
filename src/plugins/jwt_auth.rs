@@ -217,7 +217,7 @@ impl ProxyPlugin for PluginJWTAuth {
     }
 
     async fn request_filter(&self, session: &mut Session, ctx: &mut ProxyContext) -> Result<bool> {
-        let token = self.extract_token(session, ctx);
+        let token = self.extract_token(session, ctx)?;
         if token.is_some() {
             ctx.mark_request_has_credentials();
         }
@@ -293,40 +293,49 @@ impl ProxyPlugin for PluginJWTAuth {
 
 impl PluginJWTAuth {
     /// Extracts JWT from header, query, or cookie using a cleaner chain approach
-    fn extract_token(&self, session: &mut Session, ctx: &mut ProxyContext) -> Option<String> {
-        self.extract_from_header(session)
-            .or_else(|| self.extract_from_query(session))
-            .or_else(|| self.extract_from_cookie(session, ctx))
+    fn extract_token(
+        &self,
+        session: &mut Session,
+        ctx: &mut ProxyContext,
+    ) -> Result<Option<String>> {
+        if let Some(token) = self.extract_from_header(session)? {
+            return Ok(Some(token));
+        }
+        if let Some(token) = self.extract_from_query(session)? {
+            return Ok(Some(token));
+        }
+        self.extract_from_cookie(session, ctx)
     }
 
     /// Extract token from header and optionally remove it
-    fn extract_from_header(&self, session: &mut Session) -> Option<String> {
-        let token = {
-            let header_val =
-                request::get_req_header_value(session.req_header(), &self.config.header)?;
-            if header_val.len() >= 7 && header_val[..7].eq_ignore_ascii_case("bearer ") {
-                Some(header_val[7..].to_string())
-            } else {
-                Some(header_val.to_string())
-            }
-        };
-
+    fn extract_from_header(&self, session: &mut Session) -> Result<Option<String>> {
+        let token = request::get_req_header_value(session.req_header(), &self.config.header).map(
+            |header_val| {
+                if header_val.len() >= 7 && header_val[..7].eq_ignore_ascii_case("bearer ") {
+                    header_val[7..].to_string()
+                } else {
+                    header_val.to_string()
+                }
+            },
+        );
         if token.is_some() && self.config.hide_credentials {
             session.req_header_mut().remove_header(&self.config.header);
         }
-
-        token
+        Ok(token)
     }
 
     /// Extract token from query parameter and optionally remove it
-    fn extract_from_query(&self, session: &mut Session) -> Option<String> {
+    fn extract_from_query(&self, session: &mut Session) -> Result<Option<String>> {
         let token = self.extract_token_from_query(session.req_header());
-
         if token.is_some() && self.config.hide_credentials {
-            let _ = request::remove_query_from_header(session.req_header_mut(), &self.config.query);
+            request::remove_query_from_header(session.req_header_mut(), &self.config.query)
+                .map_err(|e| {
+                    ProxyError::validation_error(format!(
+                        "Failed to hide JWT query credential: {e}"
+                    ))
+                })?;
         }
-
-        token
+        Ok(token)
     }
 
     /// Pure query-extraction helper operating on a [`RequestHeader`] directly, so it can be
@@ -342,16 +351,25 @@ impl PluginJWTAuth {
     }
 
     /// Extract token from cookie and optionally remove it
-    fn extract_from_cookie(&self, session: &mut Session, ctx: &mut ProxyContext) -> Option<String> {
+    fn extract_from_cookie(
+        &self,
+        session: &mut Session,
+        ctx: &mut ProxyContext,
+    ) -> Result<Option<String>> {
         let token = request::get_cookie_value(session.req_header(), &self.config.cookie)
-            .map(|c| c.to_string());
-
+            .map(str::to_string);
         if token.is_some() && self.config.hide_credentials {
-            // Store the cookie name in context for later clearing in response phase
+            request::remove_cookie_from_header(session.req_header_mut(), &self.config.cookie)
+                .map_err(|e| {
+                    ProxyError::validation_error(format!(
+                        "Failed to hide JWT cookie credential: {e}"
+                    ))
+                })?;
+            // Best-effort response-side deletion uses Path=/ because request Cookie
+            // fields do not expose the original cookie attributes.
             ctx.set("jwt_auth_clear_cookie", self.config.cookie.clone());
         }
-
-        token
+        Ok(token)
     }
 }
 

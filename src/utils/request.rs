@@ -140,26 +140,62 @@ pub fn get_req_header_value<'a>(req_header: &'a RequestHeader, key: &str) -> Opt
 /// key=value pairs but might not handle complex/encoded cookie values robustly.
 /// Returns the first occurrence of the cookie's value.
 pub fn get_cookie_value<'a>(req_header: &'a RequestHeader, cookie_name: &str) -> Option<&'a str> {
-    if let Some(cookie_header_value) = get_req_header_value(req_header, "Cookie") {
-        for item in cookie_header_value.split(';') {
-            // Trim whitespace around the key-value pair
-            let trimmed_item = item.trim();
-            if let Some((k, v)) = trimmed_item.split_once('=') {
-                // Trim whitespace around the key specifically before comparison
-                if k.trim() == cookie_name {
-                    // Return the value, trimming surrounding whitespace
-                    return Some(v.trim());
+    for cookie_header_value in req_header.headers.get_all(http::header::COOKIE) {
+        if let Ok(cookie_header_value) = cookie_header_value.to_str() {
+            for item in cookie_header_value.split(';') {
+                let trimmed_item = item.trim();
+                if let Some((k, v)) = trimmed_item.split_once('=') {
+                    if k.trim() == cookie_name {
+                        return Some(v.trim());
+                    }
                 }
             }
-            // Note: This simple parsing doesn't handle cookies without '=',
-            // or cookies where the value contains ';', '=', or needs decoding.
         }
-        log::debug!("Cookie '{cookie_name}' not found within Cookie header");
-    } else {
-        log::debug!("No Cookie header found");
     }
+    None
+}
 
-    None // Return None if the header doesn't exist or the cookie isn't found
+/// Remove every cookie named `cookie_name` from all Cookie fields. Other cookie
+/// pairs retain their order; fields that become empty are removed.
+pub fn remove_cookie_from_header(
+    req_header: &mut RequestHeader,
+    cookie_name: &str,
+) -> crate::core::ProxyResult<()> {
+    let retained = req_header
+        .headers
+        .get_all(http::header::COOKIE)
+        .iter()
+        .map(|value| {
+            value.to_str().map_err(|_| {
+                crate::core::ProxyError::validation_error("Cookie header is not valid text")
+            })
+        })
+        .collect::<crate::core::ProxyResult<Vec<_>>>()?
+        .into_iter()
+        .map(|value| {
+            value
+                .split(';')
+                .filter_map(|item| {
+                    let item = item.trim();
+                    let name = item.split_once('=').map_or(item, |(name, _)| name.trim());
+                    (name != cookie_name).then_some(item)
+                })
+                .collect::<Vec<_>>()
+                .join("; ")
+        })
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+
+    req_header.headers.remove(http::header::COOKIE);
+    for value in retained {
+        let value = value.parse().map_err(|e| {
+            crate::core::ProxyError::validation_error(format!(
+                "Failed to rebuild Cookie header: {e}"
+            ))
+        })?;
+        req_header.headers.append(http::header::COOKIE, value);
+    }
+    Ok(())
 }
 
 /// Retrieves the request host (domain name) from the request header.
@@ -205,4 +241,29 @@ pub fn get_direct_client_ip(session: &Session) -> Option<IpAddr> {
         .client_addr()
         .and_then(|addr| addr.as_inet())
         .map(|inet| inet.ip())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn removes_named_cookie_from_every_cookie_header() {
+        let mut req = RequestHeader::build("GET", b"/", None).unwrap();
+        req.headers
+            .append(http::header::COOKIE, "a=1; jwt=first".parse().unwrap());
+        req.headers.append(
+            http::header::COOKIE,
+            "jwt=second; b=2; jwt=third".parse().unwrap(),
+        );
+        remove_cookie_from_header(&mut req, "jwt").unwrap();
+        assert_eq!(
+            req.headers
+                .get_all(http::header::COOKIE)
+                .iter()
+                .map(|v| v.to_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["a=1", "b=2"]
+        );
+    }
 }

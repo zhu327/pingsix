@@ -1,9 +1,12 @@
 use std::collections::{BTreeSet, HashMap};
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use async_trait::async_trait;
-use futures::future::join_all;
+use futures::{future::join_all, FutureExt};
 use hickory_resolver::TokioResolver;
 use once_cell::sync::OnceCell;
 use pingora::{protocols::ALPN, upstreams::peer::HttpPeer};
@@ -16,7 +19,7 @@ use pingora_load_balancing::{
 use regex::Regex;
 
 use crate::{
-    config::{Upstream, UpstreamPassHost, UpstreamScheme, UpstreamTls},
+    config::{self, Upstream, UpstreamPassHost, UpstreamScheme, UpstreamTls},
     core::{ProxyError, ProxyResult},
 };
 
@@ -156,6 +159,97 @@ impl ServiceDiscovery for DnsDiscovery {
 
         // Return backends and an empty HashMap for now
         Ok((backends, HashMap::new()))
+    }
+}
+
+/// DNS and static backend material resolved before a runtime candidate is built.
+#[derive(Clone)]
+pub(crate) struct PreparedUpstream {
+    pub backends: BTreeSet<Backend>,
+    pub health_checks: HashMap<u64, bool>,
+}
+
+/// Resolve an upstream before candidate compilation. The timeout bounds all DNS
+/// lookups in this upstream; a DNS-only upstream with no result is not publishable.
+pub(crate) fn prepare_static_upstream(upstream: &Upstream) -> ProxyResult<PreparedUpstream> {
+    let discovery: HybridDiscovery = upstream.clone().try_into()?;
+    match discovery.discover().now_or_never() {
+        Some(Ok((backends, health_checks))) if !backends.is_empty() => Ok(PreparedUpstream {
+            backends,
+            health_checks,
+        }),
+        Some(Ok(_)) => Err(ProxyError::Configuration(format!(
+            "Upstream '{}' discovery returned no backends",
+            upstream.id
+        ))),
+        Some(Err(e)) => Err(ProxyError::Configuration(format!(
+            "Upstream '{}' discovery failed: {e}",
+            upstream.id
+        ))),
+        None => Err(ProxyError::Configuration(format!(
+            "Upstream '{}' requires asynchronous DNS preparation",
+            upstream.id
+        ))),
+    }
+}
+
+/// Used by the asynchronous control-plane preparation worker. Kept separate
+/// from runtime construction so DNS I/O cannot be introduced into a writer.
+pub(crate) async fn prepare_upstream(upstream: &Upstream) -> ProxyResult<PreparedUpstream> {
+    let timeout = Duration::from_secs(config::dns_resolution_timeout());
+    let discovery: HybridDiscovery = upstream.clone().try_into()?;
+    let (backends, health_checks) = tokio::time::timeout(timeout, discovery.discover())
+        .await
+        .map_err(|_| {
+            ProxyError::Configuration(format!(
+                "Upstream '{}' DNS resolution timed out after {}s",
+                upstream.id,
+                timeout.as_secs()
+            ))
+        })?
+        .map_err(|e| {
+            ProxyError::Configuration(format!("Upstream '{}' discovery failed: {e}", upstream.id))
+        })?;
+    if backends.is_empty() {
+        return Err(ProxyError::Configuration(format!(
+            "Upstream '{}' discovery returned no backends",
+            upstream.id
+        )));
+    }
+    Ok(PreparedUpstream {
+        backends,
+        health_checks,
+    })
+}
+
+/// Returns prepared backends once, then delegates subsequent refreshes to the
+/// normal discovery implementation.
+pub(crate) struct SeededDiscovery {
+    initial: Mutex<Option<PreparedUpstream>>,
+    refresh: HybridDiscovery,
+}
+
+impl SeededDiscovery {
+    pub(crate) fn new(initial: PreparedUpstream, refresh: HybridDiscovery) -> Self {
+        Self {
+            initial: Mutex::new(Some(initial)),
+            refresh,
+        }
+    }
+}
+
+#[async_trait]
+impl ServiceDiscovery for SeededDiscovery {
+    async fn discover(&self) -> Result<(BTreeSet<Backend>, HashMap<u64, bool>)> {
+        if let Some(prepared) = self
+            .initial
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            return Ok((prepared.backends, prepared.health_checks));
+        }
+        self.refresh.discover().await
     }
 }
 

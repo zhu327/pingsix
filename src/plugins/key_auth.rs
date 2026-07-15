@@ -20,8 +20,6 @@ const PRIORITY: i32 = 2500;
 
 /// Default header name for API key
 const DEFAULT_API_KEY_HEADER: &str = "apikey";
-/// Default query parameter name for API key
-const DEFAULT_API_KEY_QUERY: &str = "apikey";
 
 /// Creates a Key Auth plugin instance with the given configuration.
 /// This plugin authenticates requests by matching an API key in the HTTP header or query parameter
@@ -46,7 +44,7 @@ struct PluginConfig {
     #[serde(default = "PluginConfig::default_header")]
     header: String,
 
-    /// Query parameter name containing the API key (default: `apikey`).
+    /// Query parameter name containing the API key. Empty (the default) disables query auth.
     #[serde(default = "PluginConfig::default_query")]
     query: String,
 
@@ -73,7 +71,7 @@ impl PluginConfig {
     }
 
     fn default_query() -> String {
-        DEFAULT_API_KEY_QUERY.to_string()
+        String::new()
     }
 
     fn default_hide_credentials() -> bool {
@@ -140,7 +138,9 @@ impl ProxyPlugin for PluginKeyAuth {
             request::get_req_header_value(session.req_header(), &self.config.header)
                 .map(|val| (val, KeySource::Header))
                 .or_else(|| {
-                    request::get_query_value(session.req_header(), &self.config.query)
+                    (!self.config.query.is_empty())
+                        .then(|| request::get_query_value(session.req_header(), &self.config.query))
+                        .flatten()
                         .map(|val| (val, KeySource::Query))
                 })
                 .unwrap_or(("", KeySource::None));
@@ -168,10 +168,12 @@ impl ProxyPlugin for PluginKeyAuth {
                     session.req_header_mut().remove_header(&self.config.header);
                 }
                 KeySource::Query => {
-                    let _ = request::remove_query_from_header(
-                        session.req_header_mut(),
-                        &self.config.query,
-                    );
+                    request::remove_query_from_header(session.req_header_mut(), &self.config.query)
+                        .map_err(|e| {
+                            ProxyError::validation_error(format!(
+                                "Failed to hide API key query credential: {e}"
+                            ))
+                        })?;
                 }
                 KeySource::None => {}
             }
@@ -193,5 +195,24 @@ impl PluginKeyAuth {
         }
 
         matched != 0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn query_auth_is_disabled_by_default() {
+        let config = PluginConfig::try_from(serde_json::json!({ "keys": ["secret"] })).unwrap();
+        assert!(config.query.is_empty());
+    }
+
+    #[test]
+    fn query_auth_can_be_explicitly_enabled() {
+        let config =
+            PluginConfig::try_from(serde_json::json!({ "keys": ["secret"], "query": "apikey" }))
+                .unwrap();
+        assert_eq!(config.query, "apikey");
     }
 }

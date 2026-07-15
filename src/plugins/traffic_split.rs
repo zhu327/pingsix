@@ -11,7 +11,7 @@ use crate::config::{Upstream, UpstreamHashOn};
 use crate::core::{
     HealthCheckSpec, ProxyContext, ProxyError, ProxyPlugin, ProxyResult, UpstreamSelector,
 };
-use crate::proxy::upstream::ProxyUpstream;
+use crate::proxy::upstream::{traffic_split_key, PreparedUpstreams, ProxyUpstream};
 use crate::utils::request::request_selector_key;
 
 pub const PLUGIN_NAME: &str = "traffic-split";
@@ -170,7 +170,7 @@ impl PluginTrafficSplit {
 pub fn create_traffic_split_plugin(cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyPlugin>> {
     // Admin / registry path: structural validation only. Named upstream existence is
     // checked later by CandidateSnapshot against the same-version resource graph.
-    create_traffic_split_plugin_with_upstreams(cfg, &HashMap::new())
+    create_traffic_split_plugin_with_upstreams(cfg, &HashMap::new(), &HashMap::new(), "admin")
 }
 
 /// Validate traffic-split JSON without resolving named upstreams (Admin pre-check).
@@ -234,6 +234,8 @@ pub fn named_upstream_ids(cfg: &JsonValue) -> ProxyResult<Vec<String>> {
 pub(crate) fn create_traffic_split_plugin_with_upstreams(
     cfg: JsonValue,
     upstreams: &HashMap<String, Arc<ProxyUpstream>>,
+    prepared: &PreparedUpstreams,
+    owner: &str,
 ) -> ProxyResult<Arc<dyn ProxyPlugin>> {
     let config: PluginConfig =
         serde_json::from_value(cfg).map_err(|e| ProxyError::Serialization(e.to_string()))?;
@@ -285,7 +287,15 @@ pub(crate) fn create_traffic_split_plugin_with_upstreams(
                     ))
                 })? as Arc<dyn UpstreamSelector>)
             } else if let Some(ref inline) = wu.upstream {
-                let upstream = Arc::new(ProxyUpstream::build(inline.clone())?);
+                let upstream = Arc::new(ProxyUpstream::build(
+                    inline.clone(),
+                    prepared
+                        .get(&traffic_split_key(owner, rule_idx, upstream_idx))
+                        .cloned()
+                        .ok_or_else(|| ProxyError::Configuration(format!(
+                            "Traffic-split inline upstream {rule_idx}/{upstream_idx} was not prepared"
+                        )))?,
+                )?);
                 health_check_specs.push(HealthCheckSpec {
                     key: format!("traffic-split/{rule_idx}/{upstream_idx}"),
                     fingerprint: crate::proxy::runtime::fingerprint_upstream_for_health_check(
@@ -351,9 +361,11 @@ mod tests {
         let mut upstreams = HashMap::new();
         upstreams.insert(
             "u1".into(),
-            Arc::new(ProxyUpstream::build(sample_upstream("u1")).unwrap()),
+            Arc::new(ProxyUpstream::build_static(sample_upstream("u1")).unwrap()),
         );
-        let plugin = create_traffic_split_plugin_with_upstreams(cfg, &upstreams).unwrap();
+        let plugin =
+            create_traffic_split_plugin_with_upstreams(cfg, &upstreams, &HashMap::new(), "test")
+                .unwrap();
         let specs = plugin.health_check_specs().unwrap();
         assert!(specs.is_empty());
     }
@@ -372,9 +384,15 @@ mod tests {
         let mut upstreams = HashMap::new();
         upstreams.insert(
             "u1".into(),
-            Arc::new(ProxyUpstream::build(sample_upstream("u1")).unwrap()),
+            Arc::new(ProxyUpstream::build_static(sample_upstream("u1")).unwrap()),
         );
-        assert!(create_traffic_split_plugin_with_upstreams(cfg, &upstreams).is_ok());
+        assert!(create_traffic_split_plugin_with_upstreams(
+            cfg,
+            &upstreams,
+            &HashMap::new(),
+            "test"
+        )
+        .is_ok());
     }
 
     #[test]
@@ -390,9 +408,15 @@ mod tests {
         let mut upstreams = HashMap::new();
         upstreams.insert(
             "u1".into(),
-            Arc::new(ProxyUpstream::build(sample_upstream("u1")).unwrap()),
+            Arc::new(ProxyUpstream::build_static(sample_upstream("u1")).unwrap()),
         );
-        assert!(create_traffic_split_plugin_with_upstreams(cfg, &upstreams).is_err());
+        assert!(create_traffic_split_plugin_with_upstreams(
+            cfg,
+            &upstreams,
+            &HashMap::new(),
+            "test"
+        )
+        .is_err());
     }
 
     #[test]
@@ -405,7 +429,13 @@ mod tests {
             }]
         });
         let upstreams = HashMap::new();
-        assert!(create_traffic_split_plugin_with_upstreams(cfg, &upstreams).is_err());
+        assert!(create_traffic_split_plugin_with_upstreams(
+            cfg,
+            &upstreams,
+            &HashMap::new(),
+            "test"
+        )
+        .is_err());
     }
 
     #[test]

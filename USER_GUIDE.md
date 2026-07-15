@@ -1198,15 +1198,15 @@ plugins:
 ```yaml
 plugins:
   key-auth:
-    header: apikey                 # Header name
-    query: apikey                  # Query parameter name
+    header: apikey                 # Header name (preferred)
+    # query: apikey                # Explicit opt-in; disabled by default and not recommended
     key: "your-api-key"           # Single key
     # OR multiple keys for rotation
     keys: 
       - "key1"
       - "key2"
       - "key3"
-    hide_credentials: false        # Keep credentials in request
+    hide_credentials: true         # Remove credentials before proxying upstream
 ```
 
 #### Basic Authentication
@@ -1312,6 +1312,7 @@ plugins:
     rejected_msg: "Rate limit exceeded"
     show_limit_quota_header: true # Include rate limit headers
     key_missing_policy: allow     # allow, deny, default
+    scope: local                  # Only process-local scope is supported
 ```
 
 ### Traffic Management
@@ -1521,6 +1522,7 @@ plugins:
       - ".*no-cache.*"
     vary: ["Accept-Encoding"]     # Vary headers for cache keys
     hide_cache_headers: false     # Hide cache-related headers (default: false)
+    scope: local                  # Entries, locks and SWR state are process-local
     max_file_size_bytes: 1048576  # Max cacheable response size (bytes, 0 = no limit)
     stale_while_revalidate_secs: 60  # Serve stale content while revalidating (optional)
     respect_s_maxage: true        # Respect Cache-Control s-maxage directive (default: true)
@@ -1670,14 +1672,23 @@ pingsix:
   status:
     address: "127.0.0.1:7085"
     config_stale_after: 300
-    fail_readiness_when_stale: false
+    fail_readiness_when_stale: true  # Default; set false only for legacy opt-out
+    # Non-loopback diagnostics require both settings below; plaintext is high risk.
+    # diagnostics_api_key: "separate-diagnostics-key"
+    # allow_insecure_remote: true
 ```
 
-Status endpoints: `/status/live`, `/status/ready`, `/status/config`.
+`/status/live` and `/status/ready` are unauthenticated public probes and expose only stable
+status/reason fields. `/status/config` is available by default only on a loopback listener;
+non-loopback plaintext access requires both a diagnostics API key and explicit insecure opt-in.
 `/status/config` reports `observed_revision` (last successful etcd list/watch cursor),
 `published_revision` (runtime snapshot revision), plus source/connected/last sync/degraded reason.
 `revision` remains an alias of `observed_revision` for compatibility. Stale readiness only applies
-to etcd-backed configs.
+to etcd-backed configs and fails readiness by default after the configured disconnection threshold.
+
+Rate limits and response caches are local to each PingSIX process. With multiple replicas, the
+aggregate effective limit is approximately `count × replicas` (subject to traffic distribution),
+and cache entries, locks, eviction and stale-while-revalidate state are not shared.
 
 ### API Endpoints
 
@@ -2490,6 +2501,11 @@ Enable detailed logging for troubleshooting:
 pingsix:
   log:
     path: /var/log/pingsix/debug.log
+    rotation: internal       # internal (default), external, or disabled
+    # external/disabled do not reopen after logrotate rename; use copytruncate
+    # or restart Pingsix after rotation.
+    max_size_bytes: 104857600
+    max_backups: 5
 
 global_rules:
   - id: "debug-logging"

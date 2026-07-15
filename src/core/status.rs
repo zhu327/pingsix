@@ -1,9 +1,6 @@
 //! Service readiness and etcd sync status for probes and diagnostics.
 
-use std::sync::{
-    atomic::{AtomicBool, AtomicI64, Ordering},
-    Mutex,
-};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use once_cell::sync::Lazy;
@@ -15,6 +12,13 @@ use serde::Serialize;
 pub enum ConfigSource {
     Yaml,
     Etcd,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigErrorKind {
+    EtcdUnavailable,
+    CandidateInvalid,
 }
 
 impl ConfigSource {
@@ -41,6 +45,7 @@ pub struct RuntimeStatusView {
     pub degraded: bool,
     pub degraded_reason: Option<String>,
     pub last_success_age_secs: Option<u64>,
+    pub error_kind: Option<ConfigErrorKind>,
     pub last_error: Option<String>,
 }
 
@@ -50,8 +55,11 @@ struct RuntimeStatusInner {
     revision: Option<i64>,
     published_revision: Option<i64>,
     last_success: Option<Instant>,
+    error_kind: Option<ConfigErrorKind>,
     last_error: Option<String>,
     connected: bool,
+    disconnected_since: Option<Instant>,
+    awaiting_publish_after_reconnect: bool,
     config_stale_after: Duration,
     fail_readiness_when_stale: bool,
 }
@@ -64,20 +72,19 @@ impl Default for RuntimeStatusInner {
             revision: None,
             published_revision: None,
             last_success: None,
+            error_kind: None,
             last_error: None,
             connected: false,
+            disconnected_since: None,
+            awaiting_publish_after_reconnect: false,
             config_stale_after: Duration::from_secs(300),
-            fail_readiness_when_stale: false,
+            fail_readiness_when_stale: true,
         }
     }
 }
 
 static STATUS: Lazy<Mutex<RuntimeStatusInner>> =
     Lazy::new(|| Mutex::new(RuntimeStatusInner::default()));
-
-// Fast path for readiness used on the hot path.
-static READY_FAST: AtomicBool = AtomicBool::new(false);
-static REVISION_FAST: AtomicI64 = AtomicI64::new(-1);
 
 /// Configure stale-sync readiness behavior (typically from YAML status section).
 pub fn configure_status_policy(config_stale_after_secs: u64, fail_readiness_when_stale: bool) {
@@ -92,11 +99,11 @@ pub fn mark_ready(source: ConfigSource) {
     status.initialized = true;
     status.config_source = Some(source);
     status.last_success = Some(Instant::now());
+    status.error_kind = None;
     status.last_error = None;
     if source == ConfigSource::Yaml {
         status.connected = true;
     }
-    READY_FAST.store(true, Ordering::SeqCst);
     log::info!(
         "Configuration loaded from {}, service is ready",
         source.as_str()
@@ -105,38 +112,77 @@ pub fn mark_ready(source: ConfigSource) {
 
 pub fn mark_etcd_connected(connected: bool) {
     let mut status = STATUS.lock().unwrap_or_else(|e| e.into_inner());
+    if connected {
+        status.disconnected_since = None;
+    } else if status.connected || status.disconnected_since.is_none() {
+        status.disconnected_since = Some(Instant::now());
+    }
     status.connected = connected;
+}
+
+/// Identify etcd as the active configuration source without claiming a valid
+/// snapshot has been published yet.
+pub fn begin_etcd_sync() {
+    let mut status = STATUS.lock().unwrap_or_else(|e| e.into_inner());
+    status.config_source = Some(ConfigSource::Etcd);
 }
 
 pub fn set_revision(revision: Option<i64>) {
     let mut status = STATUS.lock().unwrap_or_else(|e| e.into_inner());
     status.revision = revision;
-    REVISION_FAST.store(revision.unwrap_or(-1), Ordering::SeqCst);
 }
 
 pub fn set_published_revision(revision: i64) {
     let mut status = STATUS.lock().unwrap_or_else(|e| e.into_inner());
     status.published_revision = Some(revision);
+    if status.config_source == Some(ConfigSource::Etcd) {
+        status.initialized = true;
+        status.last_success = Some(Instant::now());
+        status.error_kind = None;
+        status.last_error = None;
+        status.awaiting_publish_after_reconnect = false;
+    }
 }
 
+/// Record etcd list/watch progress. This deliberately does not restore readiness:
+/// only a successfully published configuration snapshot can do that.
 pub fn record_sync_success(revision: i64) {
     let mut status = STATUS.lock().unwrap_or_else(|e| e.into_inner());
     status.revision = Some(revision);
     status.last_success = Some(Instant::now());
-    status.last_error = None;
-    status.connected = true;
-    status.initialized = true;
+    // A successful list/watch proves transport recovery; clear a transport
+    // error without touching a candidate-validation error (cleared on publish).
+    if status.error_kind == Some(ConfigErrorKind::EtcdUnavailable) {
+        status.error_kind = None;
+        status.last_error = None;
+    }
     if status.config_source.is_none() {
         status.config_source = Some(ConfigSource::Etcd);
     }
-    READY_FAST.store(true, Ordering::SeqCst);
-    REVISION_FAST.store(revision, Ordering::SeqCst);
+    if !status.connected && status.initialized {
+        // A reconnect/list only proves transport health. Keep readiness closed
+        // until that listed graph has actually compiled and published.
+        status.awaiting_publish_after_reconnect = true;
+    }
+    status.connected = true;
+    status.disconnected_since = None;
 }
 
 pub fn record_sync_error(error: String) {
     let mut status = STATUS.lock().unwrap_or_else(|e| e.into_inner());
+    status.error_kind = Some(ConfigErrorKind::EtcdUnavailable);
     status.last_error = Some(error);
+    if status.connected || status.disconnected_since.is_none() {
+        status.disconnected_since = Some(Instant::now());
+    }
     status.connected = false;
+}
+
+/// Record a rejected async candidate without conflating it with etcd transport health.
+pub fn record_preparation_error(error: String) {
+    let mut status = STATUS.lock().unwrap_or_else(|e| e.into_inner());
+    status.error_kind = Some(ConfigErrorKind::CandidateInvalid);
+    status.last_error = Some(error);
 }
 
 /// Check if the service is ready to handle traffic.
@@ -149,17 +195,36 @@ pub fn is_live() -> bool {
     true
 }
 
+/// Readiness and its stable public reason from one consistent state snapshot.
+pub fn readiness() -> (bool, Option<&'static str>) {
+    let status = STATUS.lock().unwrap_or_else(|e| e.into_inner());
+    let ready = compute_ready(&status);
+    let reason = if ready {
+        None
+    } else if !status.initialized {
+        Some("not_initialized")
+    } else if is_stale(&status) {
+        Some("config_stale")
+    } else {
+        Some("config_invalid")
+    };
+    (ready, reason)
+}
+
 pub fn status_view() -> RuntimeStatusView {
     let status = STATUS.lock().unwrap_or_else(|e| e.into_inner());
     let stale = is_stale(&status);
     let ready = compute_ready(&status);
-    let degraded = status.initialized && (!status.connected || stale);
+    let degraded =
+        status.initialized && (!status.connected || stale || status.error_kind.is_some());
     let degraded_reason = if !status.initialized {
         None
     } else if !status.connected {
         Some("etcd disconnected".into())
     } else if stale {
         Some("configuration sync is stale".into())
+    } else if status.error_kind == Some(ConfigErrorKind::CandidateInvalid) {
+        Some("latest configuration candidate is invalid".into())
     } else {
         None
     };
@@ -175,12 +240,13 @@ pub fn status_view() -> RuntimeStatusView {
         degraded,
         degraded_reason,
         last_success_age_secs: status.last_success.map(|t| t.elapsed().as_secs()),
+        error_kind: status.error_kind,
         last_error: status.last_error.clone(),
     }
 }
 
 fn compute_ready(status: &RuntimeStatusInner) -> bool {
-    if !status.initialized {
+    if !status.initialized || status.awaiting_publish_after_reconnect {
         return false;
     }
     if status.fail_readiness_when_stale && is_stale(status) {
@@ -200,17 +266,15 @@ fn is_stale(status: &RuntimeStatusInner) -> bool {
         return false;
     }
     status
-        .last_success
-        .is_none_or(|t| t.elapsed() > status.config_stale_after)
+        .disconnected_since
+        .is_some_and(|t| t.elapsed() > status.config_stale_after)
 }
 
 /// Reset readiness status (useful for testing)
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn reset() {
     let mut status = STATUS.lock().unwrap_or_else(|e| e.into_inner());
     *status = RuntimeStatusInner::default();
-    READY_FAST.store(false, Ordering::SeqCst);
-    REVISION_FAST.store(-1, Ordering::SeqCst);
     log::debug!("Readiness status reset");
 }
 
@@ -256,15 +320,33 @@ mod tests {
     }
 
     #[test]
-    fn stale_fails_readiness_when_configured() {
+    fn stale_fails_readiness_by_default() {
         let _guard = TEST_LOCK.lock().unwrap();
         reset();
         configure_status_policy(0, true);
         mark_ready(ConfigSource::Etcd);
+        mark_etcd_connected(false);
         // Disconnected etcd with zero threshold: any elapsed time is stale.
         std::thread::sleep(Duration::from_millis(5));
         assert!(!is_ready());
-        configure_status_policy(300, false);
+        configure_status_policy(300, true);
+    }
+
+    #[test]
+    fn watch_progress_does_not_restore_readiness_without_publish() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset();
+        configure_status_policy(0, true);
+        begin_etcd_sync();
+        record_sync_success(10);
+        mark_etcd_connected(false);
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(!is_ready());
+        record_sync_success(11);
+        assert!(!is_ready());
+        set_published_revision(11);
+        assert!(is_ready());
+        configure_status_policy(300, true);
     }
 
     #[test]
@@ -281,6 +363,18 @@ mod tests {
     }
 
     #[test]
+    fn short_disconnection_keeps_last_known_good_ready() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset();
+        configure_status_policy(60, true);
+        mark_ready(ConfigSource::Etcd);
+        mark_etcd_connected(true);
+        mark_etcd_connected(false);
+        assert!(is_ready());
+        configure_status_policy(300, true);
+    }
+
+    #[test]
     fn disconnected_etcd_becomes_stale_after_threshold() {
         let _guard = TEST_LOCK.lock().unwrap();
         reset();
@@ -292,6 +386,22 @@ mod tests {
         std::thread::sleep(Duration::from_millis(5));
         assert!(!is_ready());
         configure_status_policy(300, false);
+    }
+
+    #[test]
+    fn preparation_error_has_stable_diagnostic_category() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset();
+        begin_etcd_sync();
+        mark_ready(ConfigSource::Etcd);
+        mark_etcd_connected(true);
+        record_preparation_error("resolver leaked internal.example".into());
+        let view = status_view();
+        assert_eq!(view.error_kind, Some(ConfigErrorKind::CandidateInvalid));
+        assert_eq!(
+            view.degraded_reason.as_deref(),
+            Some("latest configuration candidate is invalid")
+        );
     }
 
     #[test]

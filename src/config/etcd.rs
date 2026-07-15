@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use url::Url;
+
 use async_trait::async_trait;
 use etcd_client::{
     Client, Compare, CompareOp, ConnectOptions, Event, GetOptions, GetResponse, Txn, TxnOp,
@@ -13,7 +15,10 @@ use tokio::{
 };
 
 use super::{Etcd, EtcdTls};
-use crate::core::{status, ProxyError, ProxyResult};
+use crate::{
+    core::{status, ProxyError, ProxyResult},
+    proxy::control_plane::CONTROL_PLANE,
+};
 
 // Retry delay constants
 const LIST_RETRY_DELAY: Duration = Duration::from_secs(3);
@@ -70,7 +75,7 @@ impl EtcdConfigSync {
             ));
         }
 
-        self.handler.handle_list_response(&response)?;
+        self.handler.handle_list_response(&response).await?;
         status::record_sync_success(self.revision);
         Ok(())
     }
@@ -122,7 +127,7 @@ impl EtcdConfigSync {
                     // Propagate handler failures so the sync loop relists instead of
                     // silently advancing past a rejected revision.
                     // Progress responses have no events; handle_events is a no-op for them.
-                    self.handler.handle_events(response.events())?;
+                    self.handler.handle_events(response.events()).await?;
 
                     if let Some(header) = response.header() {
                         self.revision = header.revision();
@@ -157,6 +162,7 @@ impl EtcdConfigSync {
                 _ = shutdown.changed() => {
                     if *shutdown.borrow() {
                         log::debug!("Shutdown signal received, stopping etcd config sync for prefix '{}'", self.config.prefix);
+                        CONTROL_PLANE.stop_preparation_worker().await;
                         return;
                     }
                 },
@@ -167,6 +173,7 @@ impl EtcdConfigSync {
                         status::record_sync_error(err.to_string());
                         self.reset_client();
                         if sleep_or_shutdown(LIST_RETRY_DELAY, &shutdown).await {
+                            CONTROL_PLANE.stop_preparation_worker().await;
                             return;
                         }
                         continue;
@@ -179,6 +186,7 @@ impl EtcdConfigSync {
                 _ = shutdown.changed() => {
                     if *shutdown.borrow() {
                         log::debug!("Shutdown signal received, stopping etcd config sync for prefix '{}'", self.config.prefix);
+                        CONTROL_PLANE.stop_preparation_worker().await;
                         return;
                     }
                 },
@@ -189,6 +197,7 @@ impl EtcdConfigSync {
                         status::record_sync_error(err.to_string());
                         self.reset_client();
                         if sleep_or_shutdown(WATCH_RETRY_DELAY, &shutdown).await {
+                            CONTROL_PLANE.stop_preparation_worker().await;
                             return;
                         }
                         // Loop continues to list() — full resync after watch failure.
@@ -207,6 +216,7 @@ impl Service for EtcdConfigSync {
         shutdown: ShutdownWatch,
         _listeners_per_fd: usize,
     ) {
+        status::begin_etcd_sync();
         self.run_sync_loop(shutdown).await
     }
 
@@ -219,13 +229,13 @@ impl Service for EtcdConfigSync {
     }
 }
 
+#[async_trait]
 pub trait EtcdEventHandler {
-    /// Apply all events from one etcd watch response.
-    ///
-    /// On `Err`, the sync loop must reset and relist so failed updates are not lost.
-    fn handle_events(&self, events: &[Event]) -> ProxyResult<()>;
+    /// Submit all events from one etcd watch response. Acceptance is fast; DNS
+    /// preparation and publishing are owned by the control-plane worker.
+    async fn handle_events(&self, events: &[Event]) -> ProxyResult<()>;
 
-    fn handle_list_response(&self, response: &GetResponse) -> ProxyResult<()>;
+    async fn handle_list_response(&self, response: &GetResponse) -> ProxyResult<()>;
 }
 
 /// Sleep for `delay`, but return `true` immediately if shutdown is requested.
@@ -244,10 +254,7 @@ async fn sleep_or_shutdown(delay: Duration, shutdown: &ShutdownWatch) -> bool {
 
 async fn create_client(cfg: &Etcd) -> ProxyResult<Client> {
     let options = build_connect_options(cfg)?;
-    // TLS is opt-in via `etcd.tls`. etcd-client auto-enables TLS for any
-    // `https://` URL (even with empty TlsOptions), so normalize the scheme
-    // from the TLS config rather than trusting the configured host prefix.
-    let endpoints = normalize_etcd_endpoints(&cfg.host, cfg.tls.is_some());
+    let endpoints = validate_etcd_endpoints(&cfg.host, cfg.tls.is_some())?;
     Client::connect(endpoints, Some(options))
         .await
         .map_err(|e| {
@@ -258,20 +265,36 @@ async fn create_client(cfg: &Etcd) -> ProxyResult<Client> {
         })
 }
 
-/// Rewrite etcd host URLs so the scheme matches whether TLS is enabled.
-///
-/// Plaintext is the default: without `etcd.tls`, endpoints become `http://...`
-/// even if the config wrote `https://`. With TLS, endpoints become `https://...`.
-fn normalize_etcd_endpoints(hosts: &[String], use_tls: bool) -> Vec<String> {
-    let scheme = if use_tls { "https://" } else { "http://" };
+/// Parse etcd endpoints and require an explicit scheme to agree with TLS.
+/// Bare authorities infer the scheme from the TLS configuration; explicit URLs
+/// are never rewritten, preventing an accidental HTTPS-to-HTTP downgrade.
+pub(crate) fn validate_etcd_endpoints(hosts: &[String], use_tls: bool) -> ProxyResult<Vec<String>> {
     hosts
         .iter()
         .map(|host| {
-            let stripped = host
-                .strip_prefix("https://")
-                .or_else(|| host.strip_prefix("http://"))
-                .unwrap_or(host.as_str());
-            format!("{scheme}{stripped}")
+            let endpoint = if host.contains("://") {
+                host.clone()
+            } else {
+                format!("{}://{host}", if use_tls { "https" } else { "http" })
+            };
+            let parsed = Url::parse(&endpoint)
+                .map_err(|_| ProxyError::validation_error("Invalid etcd endpoint"))?;
+            let scheme_matches_tls = match parsed.scheme() {
+                "http" => !use_tls,
+                "https" => use_tls,
+                _ => false,
+            };
+            if !scheme_matches_tls
+                || parsed.host_str().is_none()
+                || !parsed.username().is_empty()
+                || parsed.password().is_some()
+                || parsed.path() != "/"
+                || parsed.query().is_some()
+                || parsed.fragment().is_some()
+            {
+                return Err(ProxyError::validation_error("Invalid etcd endpoint"));
+            }
+            Ok(endpoint)
         })
         .collect()
 }
@@ -329,6 +352,19 @@ where
     let resource: T = serde_json::from_slice(value)
         .map_err(|e| ProxyError::serialization_error("Failed to deserialize JSON", e))?;
     Ok(resource)
+}
+
+/// Reserved metadata key serializing supported Admin mutations of a resource graph.
+pub const GRAPH_REVISION_KEY: &str = ".pingsix_graph_revision";
+/// Guard value identifies the transaction protocol. Changing this requires an
+/// explicit mixed-version migration; old single-key writers are unsupported.
+pub const GRAPH_PROTOCOL_VERSION: &[u8] = b"pingsix-graph-v1";
+
+/// A complete resource graph plus the revision of its generation guard.
+pub struct FullGraph {
+    pub kvs: std::collections::HashMap<String, Vec<u8>>,
+    pub mod_revisions: std::collections::HashMap<String, i64>,
+    pub guard_mod_revision: Option<i64>,
 }
 
 /// Wrapper for etcd client used by Admin API, ensuring local mutability.
@@ -423,17 +459,8 @@ impl EtcdClientWrapper {
 
     /// Read every key-value pair under the configured prefix.
     ///
-    /// Returns `(key -> value, header revision, key -> mod_revision)` where keys
-    /// are the full physical etcd keys (including the prefix). Used by the Admin
-    /// write path to reconstruct the full resource graph for reference-integrity
-    /// validation before a CAS commit.
-    pub async fn read_full_graph(
-        &self,
-    ) -> ProxyResult<(
-        std::collections::HashMap<String, Vec<u8>>,
-        i64,
-        std::collections::HashMap<String, i64>,
-    )> {
+    /// Read resource keys and the graph-generation guard under the configured prefix.
+    pub async fn read_full_graph(&self) -> ProxyResult<FullGraph> {
         let client_mutex = self.ensure_connected().await?;
         let mut client = client_mutex.lock().await;
 
@@ -449,83 +476,99 @@ impl EtcdClientWrapper {
                 )
             })?;
 
-        let revision = response
-            .header()
-            .map(|h| h.revision())
-            .ok_or_else(|| ProxyError::etcd_error("read_full_graph: missing response header"))?;
-
-        let mut kv_map = std::collections::HashMap::new();
-        let mut mod_map = std::collections::HashMap::new();
+        if response.header().is_none() {
+            return Err(ProxyError::etcd_error(
+                "read_full_graph: missing response header",
+            ));
+        }
+        let guard_key = self.prefixed_key(GRAPH_REVISION_KEY);
+        let mut kvs = std::collections::HashMap::new();
+        let mut mod_revisions = std::collections::HashMap::new();
+        let mut guard_mod_revision = None;
         for kv in response.kvs() {
             let key = String::from_utf8_lossy(kv.key()).into_owned();
-            kv_map.insert(key.clone(), kv.value().to_vec());
-            mod_map.insert(key, kv.mod_revision());
+            if key == guard_key {
+                // `1` was written by the initial graph-guard implementation and
+                // is accepted only as a transition; the next mutation upgrades it.
+                if kv.value() != GRAPH_PROTOCOL_VERSION && kv.value() != b"1" {
+                    return Err(ProxyError::Configuration(
+                        "Unsupported configuration graph guard protocol".into(),
+                    ));
+                }
+                guard_mod_revision = Some(kv.mod_revision());
+            } else {
+                kvs.insert(key.clone(), kv.value().to_vec());
+                mod_revisions.insert(key, kv.mod_revision());
+            }
         }
-        Ok((kv_map, revision, mod_map))
+        Ok(FullGraph {
+            kvs,
+            mod_revisions,
+            guard_mod_revision,
+        })
     }
 
-    /// Compare-and-swap put. `expected_mod_revision = None` means the key must
-    /// not exist yet (create_revision == 0); `Some(r)` means the key's current
-    /// mod_revision must equal `r`. On success returns the committed header
-    /// revision. The `key` is the full physical etcd key (including prefix) and
-    /// is used verbatim — no further prefixing is applied.
-    pub async fn cas_put(
+    /// Atomically mutate a resource and advance the graph generation guard.
+    async fn graph_txn(
         &self,
         key: &str,
-        value: Vec<u8>,
+        value: Option<Vec<u8>>,
         expected_mod_revision: Option<i64>,
+        guard_mod_revision: Option<i64>,
     ) -> ProxyResult<i64> {
         let client_mutex = self.ensure_connected().await?;
         let mut client = client_mutex.lock().await;
-
-        let compare = match expected_mod_revision {
+        let target = match expected_mod_revision {
             None => Compare::create_revision(key.as_bytes(), CompareOp::Equal, 0),
-            Some(r) => Compare::mod_revision(key.as_bytes(), CompareOp::Equal, r),
+            Some(revision) => Compare::mod_revision(key.as_bytes(), CompareOp::Equal, revision),
         };
-        let txn =
-            Txn::new()
-                .when(vec![compare])
-                .and_then(vec![TxnOp::put(key.as_bytes(), value, None)]);
-
-        let response = client.txn(txn).await.map_err(|e| {
-            ProxyError::etcd_error_with_cause(format!("cas_put for key '{key}' failed"), e)
-        })?;
-
+        let guard_key = self.prefixed_key(GRAPH_REVISION_KEY);
+        let guard = match guard_mod_revision {
+            None => Compare::create_revision(guard_key.as_bytes(), CompareOp::Equal, 0),
+            Some(revision) => {
+                Compare::mod_revision(guard_key.as_bytes(), CompareOp::Equal, revision)
+            }
+        };
+        let mutation = match value {
+            Some(value) => TxnOp::put(key.as_bytes(), value, None),
+            None => TxnOp::delete(key.as_bytes(), None),
+        };
+        let txn = Txn::new().when(vec![target, guard]).and_then(vec![
+            mutation,
+            TxnOp::put(guard_key.as_bytes(), GRAPH_PROTOCOL_VERSION.to_vec(), None),
+        ]);
+        let response = client
+            .txn(txn)
+            .await
+            .map_err(|e| ProxyError::etcd_error_with_cause("graph transaction failed", e))?;
         if !response.succeeded() {
-            return Err(ProxyError::CasConflict(format!(
-                "cas_put conflict for key '{key}': expected mod_revision mismatch"
-            )));
+            return Err(ProxyError::CasConflict(
+                "configuration graph changed concurrently".into(),
+            ));
         }
-
         response
             .header()
-            .map(|h| h.revision())
-            .ok_or_else(|| ProxyError::etcd_error("cas_put: missing response header"))
+            .map(|header| header.revision())
+            .ok_or_else(|| ProxyError::etcd_error("graph transaction: missing response header"))
     }
 
-    /// Compare-and-swap delete. The key's current mod_revision must equal
-    /// `expected_mod_revision`, otherwise the transaction fails. The `key` is
-    /// the full physical etcd key (including prefix) and is used verbatim.
-    pub async fn cas_delete(&self, key: &str, expected_mod_revision: i64) -> ProxyResult<()> {
-        let client_mutex = self.ensure_connected().await?;
-        let mut client = client_mutex.lock().await;
+    pub async fn graph_txn_put(
+        &self,
+        key: &str,
+        value: Vec<u8>,
+        expected: Option<i64>,
+        guard: Option<i64>,
+    ) -> ProxyResult<i64> {
+        self.graph_txn(key, Some(value), expected, guard).await
+    }
 
-        let compare =
-            Compare::mod_revision(key.as_bytes(), CompareOp::Equal, expected_mod_revision);
-        let txn = Txn::new()
-            .when(vec![compare])
-            .and_then(vec![TxnOp::delete(key.as_bytes(), None)]);
-
-        let response = client.txn(txn).await.map_err(|e| {
-            ProxyError::etcd_error_with_cause(format!("cas_delete for key '{key}' failed"), e)
-        })?;
-
-        if !response.succeeded() {
-            return Err(ProxyError::CasConflict(format!(
-                "cas_delete conflict for key '{key}': expected mod_revision mismatch"
-            )));
-        }
-        Ok(())
+    pub async fn graph_txn_delete(
+        &self,
+        key: &str,
+        expected: i64,
+        guard: Option<i64>,
+    ) -> ProxyResult<i64> {
+        self.graph_txn(key, None, Some(expected), guard).await
     }
 
     /// Returns the full physical etcd key (prefix + logical key). Exposed so the
@@ -596,37 +639,33 @@ fake-key
     }
 
     #[test]
-    fn normalize_endpoints_default_plaintext() {
-        let hosts = vec![
-            "127.0.0.1:2379".to_string(),
-            "http://etcd:2379".to_string(),
-            "https://etcd:2379".to_string(),
-        ];
+    fn endpoints_infer_scheme_only_for_bare_authorities() {
         assert_eq!(
-            normalize_etcd_endpoints(&hosts, false),
-            vec![
-                "http://127.0.0.1:2379",
-                "http://etcd:2379",
-                "http://etcd:2379",
-            ]
+            validate_etcd_endpoints(&["127.0.0.1:2379".into()], false).unwrap(),
+            vec!["http://127.0.0.1:2379"]
+        );
+        assert_eq!(
+            validate_etcd_endpoints(&["127.0.0.1:2379".into()], true).unwrap(),
+            vec!["https://127.0.0.1:2379"]
         );
     }
 
     #[test]
-    fn normalize_endpoints_tls_uses_https() {
-        let hosts = vec![
-            "127.0.0.1:2379".to_string(),
-            "http://etcd:2379".to_string(),
-            "https://etcd:2379".to_string(),
-        ];
-        assert_eq!(
-            normalize_etcd_endpoints(&hosts, true),
-            vec![
-                "https://127.0.0.1:2379",
-                "https://etcd:2379",
-                "https://etcd:2379",
-            ]
-        );
+    fn endpoints_reject_scheme_tls_mismatch_and_url_components() {
+        assert!(validate_etcd_endpoints(&["https://etcd:2379".into()], false).is_err());
+        assert!(validate_etcd_endpoints(&["http://etcd:2379".into()], true).is_err());
+        for endpoint in [
+            "ftp://etcd:2379",
+            "http://user:secret@etcd:2379",
+            "http://etcd:2379/path",
+            "http://etcd:2379/?query",
+            "http://etcd:2379/#fragment",
+        ] {
+            assert!(
+                validate_etcd_endpoints(&[endpoint.into()], false).is_err(),
+                "{endpoint}"
+            );
+        }
     }
 
     #[test]

@@ -70,6 +70,9 @@ pub trait RouteContext: Send + Sync {
 
     /// Resolve upstream for this route
     fn resolve_upstream(&self) -> Option<Arc<dyn UpstreamSelector>>;
+
+    /// Route-level timeout, applied after an upstream override is selected.
+    fn timeout(&self) -> Option<&crate::config::Timeout>;
 }
 
 // =============================================================================
@@ -151,40 +154,11 @@ impl Default for ProxyContext {
     }
 }
 
-#[allow(dead_code)]
 impl ProxyContext {
     /// Mark that the request carried credentials (regardless of auth success).
     pub fn mark_request_has_credentials(&mut self) {
         self.request_has_credentials = true;
         self.original_request_had_credentials = true;
-    }
-
-    /// Get a route parameter by key.
-    /// Returns None if no params exist or the key is not found.
-    pub fn get_param(&self, key: &str) -> Option<&str> {
-        self.route_params
-            .as_ref()?
-            .iter()
-            .find(|(k, _)| k == key)
-            .map(|(_, v)| v.as_str())
-    }
-
-    /// Get all route parameters as an iterator of (key, value) pairs.
-    pub fn params(&self) -> impl Iterator<Item = (&str, &str)> {
-        self.route_params
-            .iter()
-            .flat_map(|params| params.iter())
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-    }
-
-    /// Check if a specific route parameter exists.
-    pub fn has_param(&self, key: &str) -> bool {
-        self.get_param(key).is_some()
-    }
-
-    /// Get the number of route parameters.
-    pub fn params_len(&self) -> usize {
-        self.route_params.as_ref().map_or(0, |p| p.len())
     }
 
     /// Store a typed value into the context for inter-plugin communication.
@@ -484,6 +458,10 @@ impl ProxyPluginExecutor {
             plugins,
             has_response_body_filter,
         }
+    }
+
+    pub fn has_plugin(&self, name: &str) -> bool {
+        self.plugins.iter().any(|plugin| plugin.name() == name)
     }
 
     /// Returns shared empty executor instance to minimize memory allocation.

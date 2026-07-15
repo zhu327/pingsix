@@ -1,5 +1,8 @@
 use std::{sync::Arc, time::Duration};
 
+use once_cell::sync::Lazy;
+use prometheus::{register_int_counter_vec, IntCounterVec};
+
 use async_trait::async_trait;
 use http::StatusCode;
 use pingora_error::Result;
@@ -18,6 +21,15 @@ use crate::{
 pub const PLUGIN_NAME: &str = "limit-count";
 const PRIORITY: i32 = 1002;
 
+static RATE_LIMIT_REQUESTS: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pingsix_rate_limit_requests_total",
+        "Rate-limit decisions by local outcome",
+        &["outcome", "scope"]
+    )
+    .expect("rate-limit metric registration must succeed")
+});
+
 /// Creates a Limit Count plugin instance with the given configuration.
 /// This plugin enforces rate limiting on requests based on a key derived from the request
 /// (e.g., client IP, header, or custom variable). Exceeding the limit results in a configurable
@@ -32,6 +44,7 @@ pub fn create_limit_count_plugin(cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyPlu
 
 /// Configuration for the Limit Count plugin.
 #[derive(Default, Debug, Serialize, Deserialize, Validate)]
+#[serde(deny_unknown_fields)]
 struct PluginConfig {
     /// Type of key to use for rate limiting (e.g., `IP`, `HEADER`, `VARS`).
     key_type: UpstreamHashOn,
@@ -65,6 +78,10 @@ struct PluginConfig {
     /// Policy for handling requests when key extraction fails (default: allow).
     #[serde(default = "PluginConfig::default_key_missing_policy")]
     key_missing_policy: KeyMissingPolicy,
+
+    /// Rate limiting is process-local in this release; cluster scope needs a shared backend.
+    #[serde(default)]
+    scope: Scope,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, Default)]
@@ -77,6 +94,14 @@ enum KeyMissingPolicy {
     Deny,
     /// Use a default key for all requests with missing keys
     Default,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum Scope {
+    #[default]
+    Local,
+    Cluster,
 }
 
 impl PluginConfig {
@@ -101,6 +126,11 @@ impl TryFrom<JsonValue> for PluginConfig {
             .map_err(|e| ProxyError::serialization_error("Invalid limit count plugin config", e))?;
 
         config.validate()?;
+        if config.scope == Scope::Cluster {
+            return Err(ProxyError::validation_error(
+                "limit-count scope 'cluster' requires a distributed backend",
+            ));
+        }
 
         Ok(config)
     }
@@ -151,10 +181,16 @@ impl ProxyPlugin for PluginRateLimit {
         let (is_limited, current_count, remaining) = self.check_rate_limit(key.as_ref());
 
         if is_limited {
+            RATE_LIMIT_REQUESTS
+                .with_label_values(&["rejected", "local"])
+                .inc();
             return self
                 .handle_rate_limit(session, current_count, remaining)
                 .await;
         }
+        RATE_LIMIT_REQUESTS
+            .with_label_values(&["allowed", "local"])
+            .inc();
 
         // Store rate limit info in context for potential use by other plugins
         if self.config.show_limit_quota_header {
@@ -165,6 +201,32 @@ impl ProxyPlugin for PluginRateLimit {
 
         Ok(false)
     }
+
+    async fn response_filter(
+        &self,
+        _session: &mut Session,
+        upstream_response: &mut pingora_http::ResponseHeader,
+        ctx: &mut ProxyContext,
+    ) -> Result<()> {
+        if self.config.show_limit_quota_header {
+            for (context_key, header) in [
+                ("rate_limit_limit", "X-Rate-Limit-Limit"),
+                ("rate_limit_remaining", "X-Rate-Limit-Remaining"),
+                ("rate_limit_reset", "X-Rate-Limit-Reset"),
+            ] {
+                if let Some(value) = ctx.get_str(context_key) {
+                    upstream_response.insert_header(header, value)?;
+                }
+            }
+            // Only expose the implementation scope when this plugin recorded
+            // quota data for the request. A short-circuited request may still
+            // reach this filter without ever being rate-limited.
+            if ctx.get_str("rate_limit_limit").is_some() {
+                upstream_response.insert_header("X-RateLimit-Scope", "local")?;
+            }
+        }
+        Ok(())
+    }
 }
 
 impl PluginRateLimit {
@@ -172,11 +234,19 @@ impl PluginRateLimit {
     async fn handle_missing_key(
         &self,
         session: &mut Session,
-        _ctx: &mut ProxyContext,
+        ctx: &mut ProxyContext,
     ) -> Result<bool> {
         match self.config.key_missing_policy {
-            KeyMissingPolicy::Allow => Ok(false),
+            KeyMissingPolicy::Allow => {
+                RATE_LIMIT_REQUESTS
+                    .with_label_values(&["allowed", "local"])
+                    .inc();
+                Ok(false)
+            }
             KeyMissingPolicy::Deny => {
+                RATE_LIMIT_REQUESTS
+                    .with_label_values(&["rejected", "local"])
+                    .inc();
                 ResponseBuilder::send_proxy_error(
                     session,
                     StatusCode::BAD_REQUEST,
@@ -192,9 +262,20 @@ impl PluginRateLimit {
                     self.check_rate_limit("_default_rate_limit_key");
 
                 if is_limited {
+                    RATE_LIMIT_REQUESTS
+                        .with_label_values(&["rejected", "local"])
+                        .inc();
                     self.handle_rate_limit(session, current_count, remaining)
                         .await
                 } else {
+                    RATE_LIMIT_REQUESTS
+                        .with_label_values(&["allowed", "local"])
+                        .inc();
+                    if self.config.show_limit_quota_header {
+                        ctx.set("rate_limit_limit", self.config.count.to_string());
+                        ctx.set("rate_limit_remaining", remaining.to_string());
+                        ctx.set("rate_limit_reset", self.config.time_window.to_string());
+                    }
                     Ok(false)
                 }
             }

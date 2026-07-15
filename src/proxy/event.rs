@@ -1,5 +1,6 @@
 //! Etcd event handler that delegates to the unified ControlPlane.
 
+use async_trait::async_trait;
 use etcd_client::{Event, GetResponse};
 
 use crate::{
@@ -23,8 +24,10 @@ impl ProxyEventHandler {
     }
 }
 
+#[async_trait]
 impl EtcdEventHandler for ProxyEventHandler {
-    fn handle_events(&self, events: &[Event]) -> ProxyResult<()> {
+    async fn handle_events(&self, events: &[Event]) -> ProxyResult<()> {
+        CONTROL_PLANE.start_preparation_worker();
         if events.is_empty() {
             return Ok(());
         }
@@ -36,19 +39,21 @@ impl EtcdEventHandler for ProxyEventHandler {
             .max()
             .unwrap_or(0);
 
-        CONTROL_PLANE.apply_events(events, revision)?;
+        CONTROL_PLANE.submit_events(events, revision)?;
         Ok(())
     }
 
-    fn handle_list_response(&self, response: &GetResponse) -> ProxyResult<()> {
+    async fn handle_list_response(&self, response: &GetResponse) -> ProxyResult<()> {
+        CONTROL_PLANE.start_preparation_worker();
         let revision = response.header().map(|h| h.revision()).ok_or_else(|| {
             crate::core::ProxyError::etcd_error("Failed to get header from list response")
         })?;
 
         let resources = ResourceConfigSet::from_etcd_list(response)?;
-        CONTROL_PLANE.replace_all(resources, revision)?;
-        status::mark_ready(status::ConfigSource::Etcd);
-        status::mark_etcd_connected(true);
+        // Mark transport recovery before submitting: a fast publish must be the
+        // operation that clears the reconnect publication fence.
+        status::record_sync_success(revision);
+        CONTROL_PLANE.submit_replace_all(resources, revision)?;
         status::set_revision(Some(revision));
         Ok(())
     }

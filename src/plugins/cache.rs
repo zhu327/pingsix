@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use http::Method;
+use http::{HeaderName, Method};
 use once_cell::sync::OnceCell;
 use pingora_error::Result;
 use pingora_proxy::Session;
@@ -87,6 +87,7 @@ pub struct CacheSettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+#[serde(deny_unknown_fields)]
 pub struct PluginConfig {
     #[validate(range(min = 1))]
     pub ttl: u64,
@@ -104,10 +105,15 @@ pub struct PluginConfig {
     pub no_cache_str: Vec<String>,
 
     #[serde(default)]
+    #[validate(custom(function = "validate_vary_headers"))]
     pub vary: Vec<String>,
 
     #[serde(default)]
     pub hide_cache_headers: bool,
+
+    /// Cache entries, locks and SWR state are local to this process.
+    #[serde(default)]
+    pub scope: Scope,
 
     /// Maximum cacheable response size in bytes.
     /// `None` (default) inherits the global `default_max_object_bytes`
@@ -137,6 +143,14 @@ pub struct PluginConfig {
     /// This is a separate, high-risk opt-in and defaults to false.
     #[serde(default)]
     pub cache_set_cookie_responses: bool,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Scope {
+    #[default]
+    Local,
+    Cluster,
 }
 
 impl PluginConfig {
@@ -178,6 +192,16 @@ fn validate_regexes(patterns: &[String]) -> Result<(), ValidationError> {
     Ok(())
 }
 
+fn validate_vary_headers(headers: &[String]) -> Result<(), ValidationError> {
+    for header in headers {
+        let header = header.trim();
+        if header == "*" || header.parse::<HeaderName>().is_err() {
+            return Err(ValidationError::new("invalid_vary_header"));
+        }
+    }
+    Ok(())
+}
+
 impl TryFrom<JsonValue> for PluginConfig {
     type Error = ProxyError;
 
@@ -187,6 +211,11 @@ impl TryFrom<JsonValue> for PluginConfig {
         })?;
 
         config.validate()?;
+        if config.scope == Scope::Cluster {
+            return Err(ProxyError::validation_error(
+                "cache scope 'cluster' requires a distributed backend",
+            ));
+        }
 
         Ok(config)
     }
@@ -225,6 +254,8 @@ pub fn create_cache_plugin(cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyPlugin>> 
             .iter()
             .map(|h| h.trim().to_ascii_lowercase())
             .filter(|h| !h.is_empty())
+            .collect::<HashSet<_>>()
+            .into_iter()
             .collect(),
     );
 
@@ -331,6 +362,15 @@ mod tests {
 
     fn settings_from_json(value: serde_json::Value) -> CacheSettings {
         settings_from_json_with_default(value, default_max_object_bytes())
+    }
+
+    #[test]
+    fn vary_rejects_wildcard_and_invalid_header_names() {
+        assert!(PluginConfig::try_from(serde_json::json!({ "ttl": 1, "vary": ["*"] })).is_err());
+        assert!(
+            PluginConfig::try_from(serde_json::json!({ "ttl": 1, "vary": ["bad header"] }))
+                .is_err()
+        );
     }
 
     #[test]

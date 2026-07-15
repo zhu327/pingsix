@@ -21,7 +21,9 @@ use crate::{
     utils::request::request_selector_key,
 };
 
-use super::discovery::HybridDiscovery;
+#[cfg(test)]
+use super::discovery::prepare_static_upstream;
+use super::discovery::{HybridDiscovery, PreparedUpstream, SeededDiscovery};
 
 /// Runs a closure over the inner LB for any SelectionLB variant, eliminating repetitive match arms.
 macro_rules! with_lb {
@@ -54,15 +56,27 @@ impl Identifiable for ProxyUpstream {
 }
 
 impl ProxyUpstream {
-    /// Build an upstream without changing the global health-check registry.
-    pub(crate) fn build(mut upstream: config::Upstream) -> ProxyResult<Self> {
+    /// Test-only static-IP constructor. Production candidates must supply
+    /// explicitly prepared material to [`Self::build`].
+    #[cfg(test)]
+    pub(crate) fn build_static(upstream: config::Upstream) -> ProxyResult<Self> {
+        let prepared = prepare_static_upstream(&upstream)?;
+        Self::build(upstream, prepared)
+    }
+
+    /// Build an upstream from material prepared before candidate compilation.
+    /// This constructor never performs discovery I/O.
+    pub(crate) fn build(
+        mut upstream: config::Upstream,
+        prepared: PreparedUpstream,
+    ) -> ProxyResult<Self> {
         // Auto-generate upstream ID if empty (for inline upstreams in route, service, traffic-split)
         if upstream.id.is_empty() {
             upstream.id = format!("inline_{}", uuid::Uuid::new_v4());
             log::debug!("Generated ID for inline upstream: {}", upstream.id);
         }
 
-        let lb = SelectionLB::try_from(upstream.clone()).map_err(|e| {
+        let lb = SelectionLB::from_prepared(upstream.clone(), prepared).map_err(|e| {
             ProxyError::Configuration(format!("Failed to create load balancer: {e}"))
         })?;
 
@@ -90,21 +104,19 @@ impl ProxyUpstream {
         backend
     }
 
-    /// Sets the timeout for an `HttpPeer`.
-    /// Note: Duplicated in ProxyRoute — consider extracting to shared utility if consolidating.
+    /// Sets the finite upstream/global/built-in timeout for an `HttpPeer`.
     fn set_timeout(&self, p: &mut HttpPeer) {
-        if let Some(config::Timeout {
+        let config::Timeout {
             connect,
             read,
             send,
-        }) = config::resolve_upstream_timeout(
+        } = config::resolve_upstream_timeout(
             self.inner.timeout.clone(),
             config::default_upstream_timeout(),
-        ) {
-            p.options.connection_timeout = Some(Duration::from_secs(connect));
-            p.options.read_timeout = Some(Duration::from_secs(read));
-            p.options.write_timeout = Some(Duration::from_secs(send));
-        }
+        );
+        p.options.connection_timeout = Some(Duration::from_secs(connect));
+        p.options.read_timeout = Some(Duration::from_secs(read));
+        p.options.write_timeout = Some(Duration::from_secs(send));
     }
 }
 
@@ -167,21 +179,21 @@ enum SelectionLB {
     Ketama(LB<KetamaHashing>),
 }
 
-impl TryFrom<config::Upstream> for SelectionLB {
-    type Error = ProxyError;
-
-    fn try_from(value: config::Upstream) -> ProxyResult<Self> {
+impl SelectionLB {
+    fn from_prepared(value: config::Upstream, prepared: PreparedUpstream) -> ProxyResult<Self> {
         match value.r#type {
-            config::SelectionType::RoundRobin => {
-                Ok(SelectionLB::RoundRobin(LB::<RoundRobin>::try_from(value)?))
-            }
-            config::SelectionType::Random => {
-                Ok(SelectionLB::Random(LB::<Random>::try_from(value)?))
-            }
-            config::SelectionType::Fnv => Ok(SelectionLB::Fnv(LB::<FVNHash>::try_from(value)?)),
-            config::SelectionType::Ketama => {
-                Ok(SelectionLB::Ketama(LB::<KetamaHashing>::try_from(value)?))
-            }
+            config::SelectionType::RoundRobin => Ok(SelectionLB::RoundRobin(
+                LB::<RoundRobin>::from_prepared(value, prepared)?,
+            )),
+            config::SelectionType::Random => Ok(SelectionLB::Random(LB::<Random>::from_prepared(
+                value, prepared,
+            )?)),
+            config::SelectionType::Fnv => Ok(SelectionLB::Fnv(LB::<FVNHash>::from_prepared(
+                value, prepared,
+            )?)),
+            config::SelectionType::Ketama => Ok(SelectionLB::Ketama(
+                LB::<KetamaHashing>::from_prepared(value, prepared)?,
+            )),
         }
     }
 }
@@ -190,15 +202,14 @@ struct LB<BS: BackendSelection> {
     upstreams: Arc<LoadBalancer<BS>>,
 }
 
-impl<BS> TryFrom<config::Upstream> for LB<BS>
+impl<BS> LB<BS>
 where
     BS: BackendSelection + Send + Sync + 'static,
     BS::Iter: BackendIter,
 {
-    type Error = ProxyError;
-
-    fn try_from(upstream: config::Upstream) -> ProxyResult<Self> {
-        let discovery: HybridDiscovery = upstream.clone().try_into()?;
+    fn from_prepared(upstream: config::Upstream, prepared: PreparedUpstream) -> ProxyResult<Self> {
+        let refresh: HybridDiscovery = upstream.clone().try_into()?;
+        let discovery = SeededDiscovery::new(prepared, refresh);
         let mut upstreams = LoadBalancer::<BS>::from_backends(Backends::new(Box::new(discovery)));
 
         if let Some(check) = upstream.checks {
@@ -222,56 +233,20 @@ where
             background_service(&format!("health check for {}", upstream.id), upstreams);
         let upstreams = background.task();
 
-        // Discover backends before the LB is published. Pingora's Backends start empty;
-        // without this, a newly published runtime can select nothing until the HC task
-        // runs its first update(). Static discovery completes via now_or_never; DNS
-        // discovery runs on a helper thread so we never nest block_on inside Tokio.
-        eager_discover_backends(&upstreams, &upstream.id)?;
+        // The seeded discovery result is immediately ready and never performs
+        // I/O, so populate selection before this LB can be published.
+        upstreams
+            .update()
+            .now_or_never()
+            .expect("seeded discovery must be immediately ready")
+            .map_err(|e| {
+                ProxyError::Configuration(format!(
+                    "Upstream '{}' failed to install prepared backends: {e}",
+                    upstream.id
+                ))
+            })?;
 
         Ok(Self { upstreams })
-    }
-}
-
-fn eager_discover_backends<BS>(lb: &Arc<LoadBalancer<BS>>, upstream_id: &str) -> ProxyResult<()>
-where
-    BS: BackendSelection + Send + Sync + 'static,
-    BS::Iter: BackendIter,
-{
-    match lb.update().now_or_never() {
-        Some(Ok(())) => Ok(()),
-        Some(Err(e)) => Err(ProxyError::Configuration(format!(
-            "Upstream '{upstream_id}' discovery failed: {e}"
-        ))),
-        None => {
-            let lb = lb.clone();
-            let id = upstream_id.to_string();
-            std::thread::Builder::new()
-                .name(format!("upstream-discover-{id}"))
-                .spawn(move || {
-                    let rt = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .map_err(|e| {
-                            ProxyError::Configuration(format!(
-                                "Failed to create discovery runtime for upstream '{id}': {e}"
-                            ))
-                        })?;
-                    rt.block_on(lb.update()).map_err(|e| {
-                        ProxyError::Configuration(format!("Upstream '{id}' discovery failed: {e}"))
-                    })
-                })
-                .map_err(|e| {
-                    ProxyError::Configuration(format!(
-                        "Failed to spawn discovery for upstream '{upstream_id}': {e}"
-                    ))
-                })?
-                .join()
-                .map_err(|_| {
-                    ProxyError::Configuration(format!(
-                        "Discovery thread panicked for upstream '{upstream_id}'"
-                    ))
-                })?
-        }
     }
 }
 
@@ -408,7 +383,7 @@ mod tests {
             send: 5,
             read: 5,
         }));
-        let upstream = ProxyUpstream::build(sample_upstream(
+        let upstream = ProxyUpstream::build_static(sample_upstream(
             "payments",
             Some(Timeout {
                 connect: 30,
@@ -437,7 +412,7 @@ mod tests {
         // First-wins OnceCell: if a prior test already set a different value,
         // resolve via whatever is currently configured.
         let global = crate::config::default_upstream_timeout();
-        let upstream = ProxyUpstream::build(sample_upstream("plain", None)).unwrap();
+        let upstream = ProxyUpstream::build_static(sample_upstream("plain", None)).unwrap();
         let backend = upstream.select_backend_for_test().unwrap();
         let peer = backend.ext.get::<HttpPeer>().unwrap();
         if let Some(g) = global {

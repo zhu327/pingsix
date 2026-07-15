@@ -291,10 +291,10 @@ impl<T: AdminResource> Handler for ResourceHandler<T> {
         // the proposed put (target key replaced with the new body). validate_config_set
         // checks cross-resource references including traffic-split upstream_ids
         // before we touch etcd.
-        let (kv_map, _rev, mod_map) = etcd.read_full_graph().await.map_err(ApiError::from)?;
+        let graph = etcd.read_full_graph().await.map_err(ApiError::from)?;
         let full_key = etcd.prefixed_key(&key);
 
-        let mut candidate_kvs = graph_without(&kv_map, &full_key);
+        let mut candidate_kvs = graph_without(&graph.kvs, &full_key);
         candidate_kvs.push((full_key.clone(), body_data.clone()));
 
         let candidate_set = build_config_set_from_kvs(&candidate_kvs).map_err(|e| {
@@ -304,13 +304,13 @@ impl<T: AdminResource> Handler for ResourceHandler<T> {
             ApiError::ValidationError(format!("Proposed configuration is invalid: {e}"))
         })?;
 
-        let expected_mod_revision = mod_map.get(&full_key).copied();
-        // NOTE: single-key CAS; graph-level atomicity is best-effort (see design D2).
-        // read_full_graph and cas_put are not atomic across keys, so referential
-        // integrity is best-effort and residual races are caught by the watcher's
-        // last-known-good snapshot.
         let committed = etcd
-            .cas_put(&full_key, body_data, expected_mod_revision)
+            .graph_txn_put(
+                &full_key,
+                body_data,
+                graph.mod_revisions.get(&full_key).copied(),
+                graph.guard_mod_revision,
+            )
             .await
             .map_err(cas_api_error)?;
 
@@ -361,17 +361,18 @@ impl<T: AdminResource> Handler for DeleteHandler<T> {
     ) -> ApiResult<ApiResponse> {
         let key = ResourceHandler::<T>::extract_key(&params)?;
 
-        let (kv_map, _rev, mod_map) = etcd.read_full_graph().await.map_err(ApiError::from)?;
+        let graph = etcd.read_full_graph().await.map_err(ApiError::from)?;
         let full_key = etcd.prefixed_key(&key);
 
-        let expected_mod_revision = *mod_map
+        let expected_mod_revision = *graph
+            .mod_revisions
             .get(&full_key)
             .ok_or_else(|| ApiError::NotFound("Resource not found".into()))?;
 
         // Build the candidate graph without the target resource. If anything still
         // references it (including traffic-split upstream_id), validation fails
         // and we refuse the delete with 409.
-        let candidate_kvs = graph_without(&kv_map, &full_key);
+        let candidate_kvs = graph_without(&graph.kvs, &full_key);
         let candidate_set = build_config_set_from_kvs(&candidate_kvs).map_err(|e| {
             ApiError::ValidationError(format!("Failed to build candidate config set: {e}"))
         })?;
@@ -379,11 +380,7 @@ impl<T: AdminResource> Handler for DeleteHandler<T> {
             ApiError::Conflict(format!("Resource is referenced by other resources: {e}"))
         })?;
 
-        // NOTE: single-key CAS; graph-level atomicity is best-effort (see design D2).
-        // Another writer may mutate a referencing key between read_full_graph and
-        // cas_delete; referential integrity is best-effort and residual races are
-        // caught by the watcher's last-known-good snapshot.
-        etcd.cas_delete(&full_key, expected_mod_revision)
+        etcd.graph_txn_delete(&full_key, expected_mod_revision, graph.guard_mod_revision)
             .await
             .map_err(cas_api_error)?;
 
@@ -660,15 +657,16 @@ fn redact_value(
                     redact_string(v)
                 } else if let Some(plugin) = plugin_name {
                     match (plugin, name.as_str()) {
-                        ("jwt-auth", "secret") | ("basic-auth", "password") | ("csrf", "key") => {
-                            redact_string(v)
-                        }
+                        ("jwt-auth", "secret")
+                        | ("basic-auth", "password")
+                        | ("csrf", "key")
+                        | ("key-auth", "key") => redact_string(v),
                         ("key-auth", "keys") => redact_keys_array(v),
                         _ => redact_value(v, resource_type, false, None),
                     }
                 } else if resource_type == "ssls" && name == "key" {
                     redact_string(v)
-                } else if resource_type == "upstreams" && name == "tls" {
+                } else if name == "tls" {
                     redact_value(v, resource_type, true, None)
                 } else if name == "plugins" {
                     redact_plugins(v, resource_type)
@@ -786,9 +784,10 @@ mod tests {
     #[test]
     fn redact_key_auth_keys() {
         let input = serde_json::json!({
-            "plugins": { "key-auth": { "keys": ["k1", "k2"] } },
+            "plugins": { "key-auth": { "key": "k0", "keys": ["k1", "k2"] } },
         });
         let out = redact("routes", input);
+        assert_eq!(out["plugins"]["key-auth"]["key"], "***");
         assert_eq!(
             out["plugins"]["key-auth"]["keys"],
             serde_json::json!(["***", "***"])
@@ -814,9 +813,11 @@ mod tests {
                 }
             }
         });
-        let out = redact("upstreams", input);
-        assert_eq!(out["upstream"]["tls"]["client_key"], "***");
-        assert_eq!(out["upstream"]["tls"]["client_cert"], "cert-data");
+        for resource_type in ["routes", "services", "global_rules"] {
+            let out = redact(resource_type, input.clone());
+            assert_eq!(out["upstream"]["tls"]["client_key"], "***");
+            assert_eq!(out["upstream"]["tls"]["client_cert"], "cert-data");
+        }
     }
 
     #[test]

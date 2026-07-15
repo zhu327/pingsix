@@ -5,16 +5,24 @@ use pingora::{
 };
 use serde::Serialize;
 
-use crate::{config::Status, core::status};
+use crate::{
+    config::Status,
+    core::{constant_time_eq, status},
+};
 
 #[derive(Serialize)]
-struct SimpleStatusResponse {
-    status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
+struct LiveResponse {
+    status: &'static str,
 }
 
-/// HTTP application for serving status/health check endpoints.
+#[derive(Serialize)]
+struct ReadyResponse {
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'static str>,
+}
+
+/// HTTP application for serving public probes and protected diagnostics.
 pub struct StatusHttpApp {
     config: Status,
 }
@@ -33,50 +41,64 @@ impl StatusHttpApp {
         service.add_tcp(addr);
         service
     }
+
+    fn diagnostics_authorized(&self, session: &ServerSession) -> bool {
+        if !self.config.diagnostics_enabled() {
+            return false;
+        }
+        // Loopback diagnostics are intentionally local-only. A remote plaintext
+        // listener requires both explicit opt-in and an API key.
+        if self.config.address.ip().is_loopback() {
+            return true;
+        }
+        let Some(expected) = self.config.diagnostics_api_key.as_deref() else {
+            return false;
+        };
+        let supplied = session
+            .get_header("x-api-key")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("");
+        constant_time_eq(supplied, expected)
+    }
 }
 
 #[async_trait]
 impl ServeHttp for StatusHttpApp {
     async fn response(&self, http_session: &mut ServerSession) -> Response<Vec<u8>> {
         http_session.set_keepalive(None);
-
-        let path = http_session.req_header().uri.path();
-
-        match path {
+        match http_session.req_header().uri.path() {
             "/status/live" => handle_live_endpoint(),
             "/status/ready" => handle_ready_endpoint(),
-            "/status/config" => handle_config_endpoint(),
+            "/status/config" if self.config.diagnostics_enabled() => {
+                if self.diagnostics_authorized(http_session) {
+                    handle_config_endpoint()
+                } else {
+                    forbidden_response()
+                }
+            }
             _ => not_found_response(),
         }
     }
 }
 
 fn handle_live_endpoint() -> Response<Vec<u8>> {
-    let response = SimpleStatusResponse {
-        status: "ok".to_string(),
-        error: None,
-    };
-    json_response(StatusCode::OK, &response)
+    json_response(StatusCode::OK, &LiveResponse { status: "ok" })
 }
 
 fn handle_ready_endpoint() -> Response<Vec<u8>> {
-    if status::is_ready() {
-        let response = SimpleStatusResponse {
-            status: "ok".to_string(),
-            error: None,
-        };
-        json_response(StatusCode::OK, &response)
-    } else {
-        let view = status::status_view();
-        let response = SimpleStatusResponse {
-            status: "error".to_string(),
-            error: Some(
-                view.degraded_reason
-                    .unwrap_or_else(|| "Configuration not loaded yet".to_string()),
-            ),
-        };
-        json_response(StatusCode::SERVICE_UNAVAILABLE, &response)
-    }
+    let (ready, reason) = status::readiness();
+    let response = ReadyResponse {
+        status: if ready { "ok" } else { "error" },
+        reason,
+    };
+    json_response(
+        if ready {
+            StatusCode::OK
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        },
+        &response,
+    )
 }
 
 fn handle_config_endpoint() -> Response<Vec<u8>> {
@@ -88,7 +110,6 @@ fn json_response<T: Serialize>(status: StatusCode, body: &T) -> Response<Vec<u8>
         log::error!("Failed to serialize status response: {e}");
         b"{}".to_vec()
     });
-
     Response::builder()
         .status(status)
         .header("Content-Type", "application/json")
@@ -98,16 +119,20 @@ fn json_response<T: Serialize>(status: StatusCode, body: &T) -> Response<Vec<u8>
             Response::builder()
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
                 .body(b"Internal Server Error".to_vec())
-                .unwrap()
+                .expect("static response must be valid")
         })
+}
+
+fn forbidden_response() -> Response<Vec<u8>> {
+    Response::builder()
+        .status(StatusCode::FORBIDDEN)
+        .body(b"Forbidden".to_vec())
+        .expect("static response must be valid")
 }
 
 fn not_found_response() -> Response<Vec<u8>> {
     Response::builder()
         .status(StatusCode::NOT_FOUND)
         .body(b"Not Found".to_vec())
-        .unwrap_or_else(|e| {
-            log::error!("Failed to build 404 response: {e}");
-            Response::new(b"Not Found".to_vec())
-        })
+        .expect("static response must be valid")
 }

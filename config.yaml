@@ -7,6 +7,11 @@ pingora:
   group: webusers
 
 pingsix:
+  defaults:
+    # DNS preparation has a bounded deadline; dynamic DNS-only updates activate
+    # only after a successful resolution.
+    dns_resolution_timeout: 5
+
   # listener on TCP or TLS
   listeners:
     - address: 0.0.0.0:8080
@@ -29,6 +34,9 @@ pingsix:
   # Useful for Kubernetes readiness probes and load balancer health checks
   status:
     address: "127.0.0.1:7085"
+    # Production etcd deployments fail readiness after five minutes disconnected.
+    config_stale_after: 300
+    fail_readiness_when_stale: true
 
   # Bind Prometheus metrics to loopback only; scrape via a sidecar/forwarder.
   prometheus:

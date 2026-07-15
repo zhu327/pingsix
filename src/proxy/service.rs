@@ -9,7 +9,7 @@ use crate::{
     plugins::build_plugin_with_upstreams,
 };
 
-use super::upstream::ProxyUpstream;
+use super::upstream::{inline_key, PreparedUpstreams, ProxyUpstream};
 
 /// Represents a proxy service that manages upstreams.
 pub struct ProxyService {
@@ -33,10 +33,23 @@ impl ProxyService {
     pub(crate) fn build(
         service: config::Service,
         upstreams: &HashMap<String, Arc<ProxyUpstream>>,
+        prepared: &PreparedUpstreams,
     ) -> ProxyResult<Self> {
         let inline_upstream = if let Some(ref upstream_config) = service.upstream {
             Some(Arc::new(
-                ProxyUpstream::build(upstream_config.clone()).with_context(&format!(
+                ProxyUpstream::build(
+                    upstream_config.clone(),
+                    prepared
+                        .get(&inline_key(&format!("service/{}", service.id)))
+                        .cloned()
+                        .ok_or_else(|| {
+                            ProxyError::Configuration(format!(
+                                "Service '{}' inline upstream was not prepared",
+                                service.id
+                            ))
+                        })?,
+                )
+                .with_context(&format!(
                     "Failed to create upstream for service '{}'",
                     service.id
                 ))?,
@@ -66,7 +79,14 @@ impl ProxyService {
 
         // Load configured plugins
         for (name, value) in service.plugins {
-            let plugin = build_plugin_with_upstreams(&name, value, upstreams).map_err(|e| {
+            let plugin = build_plugin_with_upstreams(
+                &name,
+                value,
+                upstreams,
+                prepared,
+                &format!("service/{}", service.id),
+            )
+            .map_err(|e| {
                 ProxyError::Plugin(format!(
                     "Failed to build plugin '{}' for service '{}': {}",
                     name, service.id, e

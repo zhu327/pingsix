@@ -24,6 +24,7 @@ use pingora_core::upstreams::peer::HttpPeer;
 use pingora_error::{Error, Result};
 use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_proxy::{ProxyHttp, Session};
+use prometheus::{register_int_counter_vec, IntCounterVec};
 
 use crate::{
     config::{self, CacheDefaults},
@@ -37,6 +38,26 @@ pub(crate) fn headers_indicate_shared_cache_credentials(headers: &http::HeaderMa
     headers.contains_key("authorization")
         || headers.contains_key("proxy-authorization")
         || headers.contains_key("cookie")
+}
+
+static CACHE_REQUESTS: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pingsix_cache_requests_total",
+        "Local response-cache outcomes",
+        &["outcome", "scope"]
+    )
+    .expect("cache metric registration must succeed")
+});
+
+/// Whether any `Vary` field contains the wildcard token. RFC semantics make
+/// such a response unsuitable for reuse by a shared cache.
+fn response_has_vary_star(headers: &http::HeaderMap) -> bool {
+    headers
+        .get_all(VARY)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .any(|token| token.trim().eq_ignore_ascii_case("*"))
 }
 
 // --- START: Global Cache Infrastructure ---
@@ -115,9 +136,27 @@ impl ProxyHttp for HttpService {
         // Load one immutable runtime snapshot for all data-plane configuration used here.
         let runtime = RUNTIME.load();
         ctx.global_plugin = runtime.global_plugins.clone();
-        if let Some((route_params, route)) = runtime.route_matcher.match_request(session) {
+        let (route_match, is_fallback_preflight) =
+            match runtime.route_matcher.match_request(session) {
+                Some(route_match) => (Some(route_match), false),
+                None => (
+                    runtime
+                        .route_matcher
+                        .match_preflight(session, runtime.global_plugins.has_plugin("cors")),
+                    true,
+                ),
+            };
+        if let Some((route_params, route)) = route_match {
+            // The preflight matcher itself filters fallback candidates to routes
+            // whose effective route/service/global configuration contains CORS.
+            let executor = route.build_plugin_executor();
+            debug_assert!(
+                !is_fallback_preflight
+                    || executor.has_plugin("cors")
+                    || runtime.global_plugins.has_plugin("cors")
+            );
             ctx.route_params = Some(route_params);
-            ctx.plugin = route.build_plugin_executor();
+            ctx.plugin = executor;
             ctx.route = Some(route);
         }
 
@@ -164,11 +203,14 @@ impl ProxyHttp for HttpService {
             let mut backend = upstream.select_backend(session).ok_or_else(|| {
                 ProxyError::UpstreamSelection("Traffic-split selected no backend".to_string())
             })?;
-            let peer = backend
+            let mut peer = backend
                 .ext
                 .get_mut::<HttpPeer>()
                 .ok_or_else(|| ProxyError::Internal("Peer missing".into()))
                 .map(|p| Box::new(p.clone()))?;
+            if let Some(route) = ctx.route.as_ref() {
+                crate::proxy::route::apply_route_timeout(route.timeout(), &mut peer);
+            }
             (peer, Some(upstream))
         } else {
             let route = ctx
@@ -234,17 +276,21 @@ impl ProxyHttp for HttpService {
     ) -> Result<()> {
         // Add X-Cache-Status header logic
         if let Some(settings) = ctx.get::<Arc<CacheSettings>>(CTX_KEY_CACHE_SETTINGS) {
+            let cache_phase = session.cache.phase();
+            let status_str = match cache_phase {
+                CachePhase::Hit => "HIT",
+                CachePhase::Miss => "MISS",
+                CachePhase::Stale => "STALE",
+                CachePhase::Expired => "EXPIRED",
+                CachePhase::Revalidated => "REVALIDATED",
+                _ => "BYPASS",
+            };
+            CACHE_REQUESTS
+                .with_label_values(&[&status_str.to_ascii_lowercase(), "local"])
+                .inc();
             if !settings.hide_cache_headers {
-                let cache_phase = session.cache.phase();
-                let status_str = match cache_phase {
-                    CachePhase::Hit => "HIT",
-                    CachePhase::Miss => "MISS",
-                    CachePhase::Stale => "STALE",
-                    CachePhase::Expired => "EXPIRED",
-                    CachePhase::Revalidated => "REVALIDATED",
-                    _ => "BYPASS",
-                };
                 upstream_response.insert_header("X-Cache-Status", status_str)?;
+                upstream_response.insert_header("X-Cache-Scope", "local")?;
             }
         }
 
@@ -345,6 +391,13 @@ impl ProxyHttp for HttpService {
             let mut key = VarianceBuilder::new();
             let mut vary_headers: HashSet<String> = HashSet::new();
 
+            // `Vary: *` responses must never enter a shared cache. The response
+            // filter enforces that rule; this is a defensive guard against ever
+            // constructing a stable variance for the literal `*` header name.
+            if response_has_vary_star(meta.headers()) {
+                return None;
+            }
+
             // 1. Add headers from origin's `Vary` response header
             meta.headers()
                 .get_all(VARY)
@@ -402,6 +455,10 @@ impl ProxyHttp for HttpService {
         }
 
         if !settings.cache_set_cookie_responses && resp.headers.contains_key(SET_COOKIE) {
+            return Ok(RespCacheable::Uncacheable(NoCacheReason::NeverEnabled));
+        }
+
+        if response_has_vary_star(&resp.headers) {
             return Ok(RespCacheable::Uncacheable(NoCacheReason::NeverEnabled));
         }
 
@@ -533,6 +590,17 @@ fn ensure_max_age(cc: Option<CacheControl>, settings: &CacheSettings) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vary_star_is_detected_across_all_header_lines() {
+        let mut headers = http::HeaderMap::new();
+        headers.append(VARY, "Accept-Encoding".parse().unwrap());
+        headers.append(VARY, "Origin, *".parse().unwrap());
+        assert!(response_has_vary_star(&headers));
+        headers.clear();
+        headers.insert(VARY, "Origin, Accept-Encoding".parse().unwrap());
+        assert!(!response_has_vary_star(&headers));
+    }
 
     #[test]
     fn shared_cache_credential_headers_include_proxy_authorization() {

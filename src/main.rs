@@ -198,9 +198,10 @@ fn add_optional_services(server: &mut Server, cfg: &config::Pingsix) {
     }
 
     if let Some(status_cfg) = &cfg.status {
+        status_cfg.log_bind_safety();
         core::status::configure_status_policy(
             status_cfg.config_stale_after.unwrap_or(300),
-            status_cfg.fail_readiness_when_stale.unwrap_or(false),
+            status_cfg.fail_readiness_when_stale,
         );
         log::debug!("Configuring status HTTP endpoint on {}", status_cfg.address);
         let status_service_http = StatusHttpApp::status_http_service(status_cfg);
@@ -231,6 +232,9 @@ fn add_optional_services(server: &mut Server, cfg: &config::Pingsix) {
 fn init_pingsix_defaults(cfg: &config::Pingsix) {
     if let Some(cache) = cfg.defaults.as_ref().and_then(|d| d.cache.as_ref()) {
         pingsix::service::http::init_cache_defaults(cache);
+    }
+    if let Some(defaults) = &cfg.defaults {
+        pingsix::config::init_dns_resolution_timeout(defaults.dns_resolution_timeout);
     }
     pingsix::config::init_default_upstream_timeout(
         cfg.defaults
