@@ -100,7 +100,7 @@ impl Logger {
     async fn report_write_failure(fail_count: &mut u64, path: &str, err: io::Error) {
         *fail_count = fail_count.saturating_add(1);
         eprintln!("Failed to write to log file '{path}': {err}");
-        if *fail_count % FAILURE_SUMMARY_EVERY == 0 {
+        if (*fail_count).is_multiple_of(FAILURE_SUMMARY_EVERY) {
             eprintln!(
                 "Log writer has failed {fail_count} consecutive times; \
                  applying backoff and continuing on stderr"

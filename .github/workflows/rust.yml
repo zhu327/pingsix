@@ -57,9 +57,6 @@ jobs:
     - name: Run tests
       run: cargo +stable test --locked --all-targets --all-features --verbose
 
-    - name: Run graceful shutdown integration test
-      run: cargo +stable test --locked --test graceful_shutdown -- --nocapture
-
     - name: Security audit
       run: |
         cargo install cargo-audit --locked --version 0.21.2
