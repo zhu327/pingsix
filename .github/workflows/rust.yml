@@ -59,7 +59,7 @@ jobs:
 
     - name: Security audit
       run: |
-        cargo install cargo-audit --locked --version 0.21.2
+        cargo install cargo-audit --locked --version 0.22.2
         cargo audit
 
   container-smoke:
