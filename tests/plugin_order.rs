@@ -188,9 +188,11 @@ async fn global_short_circuit_skips_route_plugins() {
     let auth_called = Arc::new(AtomicBool::new(false));
 
     let global = Arc::new(ProxyPluginExecutor::new(vec![Arc::new(GlobalShortCircuit)]));
-    let route = Arc::new(ProxyPluginExecutor::new(vec![Arc::new(RouteAuthRecorder {
-        called: auth_called.clone(),
-    })]));
+    let route = Arc::new(ProxyPluginExecutor::new(vec![Arc::new(
+        RouteAuthRecorder {
+            called: auth_called.clone(),
+        },
+    )]));
 
     // Global plugins must be ordered before route plugins by priority. With a
     // 1000 vs 100 split, the global short-circuit wins decisively.
@@ -219,9 +221,11 @@ async fn route_plugins_run_when_global_does_not_short_circuit() {
     let auth_called = Arc::new(AtomicBool::new(false));
 
     let global = Arc::new(ProxyPluginExecutor::new(vec![Arc::new(GlobalNoop)]));
-    let route = Arc::new(ProxyPluginExecutor::new(vec![Arc::new(RouteAuthRecorder {
-        called: auth_called.clone(),
-    })]));
+    let route = Arc::new(ProxyPluginExecutor::new(vec![Arc::new(
+        RouteAuthRecorder {
+            called: auth_called.clone(),
+        },
+    )]));
 
     let mut session = make_session();
     let mut ctx = ProxyContext::default();

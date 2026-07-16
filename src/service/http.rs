@@ -158,9 +158,7 @@ pub async fn run_global_then_route_response_filter(
     global
         .response_filter(session, upstream_response, ctx)
         .await?;
-    route
-        .response_filter(session, upstream_response, ctx)
-        .await
+    route.response_filter(session, upstream_response, ctx).await
 }
 
 /// Run global-rule plugins then route/service plugins for `response_body_filter`.

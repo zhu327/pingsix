@@ -133,9 +133,10 @@ pub async fn delete_resource(
     let graph = etcd.read_full_graph().await?;
     let full_key = etcd.prefixed_key(logical_key);
 
-    let expected_mod_revision = *graph.mod_revisions.get(&full_key).ok_or_else(|| {
-        GraphMutationError::NotFound("Resource not found".into())
-    })?;
+    let expected_mod_revision = *graph
+        .mod_revisions
+        .get(&full_key)
+        .ok_or_else(|| GraphMutationError::NotFound("Resource not found".into()))?;
 
     validate_candidate(&graph, &full_key, None, etcd.prefix())?;
 
@@ -253,11 +254,11 @@ mod tests {
         let prefix = "/pingsix/";
         let upstream_key = format!("{prefix}upstreams/u1");
         let graph = graph_with(vec![
-            (upstream_key.clone(), sample_upstream_json("u1", "10.0.0.1:80")),
             (
-                format!("{prefix}routes/r1"),
-                sample_route_json("r1", "u1"),
+                upstream_key.clone(),
+                sample_upstream_json("u1", "10.0.0.1:80"),
             ),
+            (format!("{prefix}routes/r1"), sample_route_json("r1", "u1")),
         ]);
 
         let err = validate_candidate(&graph, &upstream_key, None, prefix).unwrap_err();
