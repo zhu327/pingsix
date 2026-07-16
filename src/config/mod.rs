@@ -726,7 +726,7 @@ impl Upstream {
     }
 }
 
-#[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Default, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SelectionType {
     #[default]
@@ -839,7 +839,7 @@ impl Unhealthy {
     }
 }
 
-#[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Default, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[allow(clippy::upper_case_acronyms)]
 pub enum UpstreamHashOn {
@@ -849,7 +849,7 @@ pub enum UpstreamHashOn {
     COOKIE,
 }
 
-#[derive(Copy, Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Default, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[allow(clippy::upper_case_acronyms)]
 pub enum UpstreamScheme {
@@ -860,7 +860,7 @@ pub enum UpstreamScheme {
     GRPCS,
 }
 
-#[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Default, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[allow(clippy::upper_case_acronyms)]
 pub enum UpstreamPassHost {

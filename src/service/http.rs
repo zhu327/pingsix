@@ -15,7 +15,7 @@ use pingora_cache::{
     cache_control::{CacheControl, DirectiveMap, DirectiveValue},
     eviction::simple_lru::Manager,
     filters::resp_cacheable,
-    key::HashBinary,
+    key::{CacheKey, HashBinary},
     lock::{CacheKeyLockImpl, CacheLock},
     CacheMeta, CacheMetaDefaults, CachePhase, MemCache, NoCacheReason, RespCacheable,
     VarianceBuilder,
@@ -28,7 +28,7 @@ use prometheus::{register_int_counter_vec, IntCounterVec};
 
 use crate::{
     config::{self, CacheDefaults},
-    core::{ProxyContext, ProxyError, ProxyPlugin, RouteContext},
+    core::{ProxyContext, ProxyError, ProxyPlugin, ProxyPluginExecutor, RouteContext},
     plugins::cache::{self, CacheSettings, CTX_KEY_CACHE_SETTINGS},
     proxy::runtime::RUNTIME,
 };
@@ -104,6 +104,90 @@ static CACHE_LOCK: Lazy<Box<CacheKeyLockImpl>> =
 #[derive(Default)]
 pub struct HttpService;
 
+/// Run global-rule plugins then route/service plugins for `early_request_filter`.
+pub async fn run_global_then_route_early_request_filter(
+    global: Arc<ProxyPluginExecutor>,
+    route: Arc<ProxyPluginExecutor>,
+    session: &mut Session,
+    ctx: &mut ProxyContext,
+) -> Result<()> {
+    global.early_request_filter(session, ctx).await?;
+    route.early_request_filter(session, ctx).await
+}
+
+/// Run global-rule plugins then route/service plugins for `request_filter`.
+///
+/// Returns `true` when a plugin short-circuits the request. Global plugins run
+/// first; a global short-circuit skips the route layer entirely.
+pub async fn run_global_then_route_request_filter(
+    global: Arc<ProxyPluginExecutor>,
+    route: Arc<ProxyPluginExecutor>,
+    session: &mut Session,
+    ctx: &mut ProxyContext,
+) -> Result<bool> {
+    if global.request_filter(session, ctx).await? {
+        return Ok(true);
+    }
+    route.request_filter(session, ctx).await
+}
+
+/// Run global-rule plugins then route/service plugins for `upstream_request_filter`.
+pub async fn run_global_then_route_upstream_request_filter(
+    global: Arc<ProxyPluginExecutor>,
+    route: Arc<ProxyPluginExecutor>,
+    session: &mut Session,
+    upstream_request: &mut RequestHeader,
+    ctx: &mut ProxyContext,
+) -> Result<()> {
+    global
+        .upstream_request_filter(session, upstream_request, ctx)
+        .await?;
+    route
+        .upstream_request_filter(session, upstream_request, ctx)
+        .await
+}
+
+/// Run global-rule plugins then route/service plugins for `response_filter`.
+pub async fn run_global_then_route_response_filter(
+    global: Arc<ProxyPluginExecutor>,
+    route: Arc<ProxyPluginExecutor>,
+    session: &mut Session,
+    upstream_response: &mut ResponseHeader,
+    ctx: &mut ProxyContext,
+) -> Result<()> {
+    global
+        .response_filter(session, upstream_response, ctx)
+        .await?;
+    route
+        .response_filter(session, upstream_response, ctx)
+        .await
+}
+
+/// Run global-rule plugins then route/service plugins for `response_body_filter`.
+pub fn run_global_then_route_response_body_filter(
+    global: Arc<ProxyPluginExecutor>,
+    route: Arc<ProxyPluginExecutor>,
+    session: &mut Session,
+    body: &mut Option<Bytes>,
+    end_of_stream: bool,
+    ctx: &mut ProxyContext,
+) -> Result<()> {
+    global.response_body_filter(session, body, end_of_stream, ctx)?;
+    route.response_body_filter(session, body, end_of_stream, ctx)
+}
+
+/// Run global-rule plugins then route/service plugins for `logging`.
+pub async fn run_global_then_route_logging(
+    global: Arc<ProxyPluginExecutor>,
+    route: Arc<ProxyPluginExecutor>,
+    session: &mut Session,
+    e: Option<&Error>,
+    ctx: &mut ProxyContext,
+) {
+    global.logging(session, e, ctx).await;
+    route.logging(session, e, ctx).await;
+}
+
 #[async_trait]
 impl ProxyHttp for HttpService {
     type CTX = ProxyContext;
@@ -160,14 +244,14 @@ impl ProxyHttp for HttpService {
             ctx.route = Some(route);
         }
 
-        // Execute global rule plugins
-        ctx.global_plugin
-            .clone()
-            .early_request_filter(session, ctx)
-            .await?;
-
-        // Execute plugins
-        ctx.plugin.clone().early_request_filter(session, ctx).await
+        // Execute global rule plugins, then route/service plugins.
+        run_global_then_route_early_request_filter(
+            ctx.global_plugin.clone(),
+            ctx.plugin.clone(),
+            session,
+            ctx,
+        )
+        .await
     }
 
     /// Filters incoming requests
@@ -179,18 +263,13 @@ impl ProxyHttp for HttpService {
             return Ok(true);
         }
 
-        // Execute global rule plugins
-        if ctx
-            .global_plugin
-            .clone()
-            .request_filter(session, ctx)
-            .await?
-        {
-            return Ok(true);
-        };
-
-        // Execute plugins
-        ctx.plugin.clone().request_filter(session, ctx).await
+        run_global_then_route_request_filter(
+            ctx.global_plugin.clone(),
+            ctx.plugin.clone(),
+            session,
+            ctx,
+        )
+        .await
     }
 
     /// Selects an upstream peer for the request
@@ -232,17 +311,14 @@ impl ProxyHttp for HttpService {
         upstream_request: &mut RequestHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
-        // Execute global rule plugins
-        ctx.global_plugin
-            .clone()
-            .upstream_request_filter(session, upstream_request, ctx)
-            .await?;
-
-        // Execute plugins
-        ctx.plugin
-            .clone()
-            .upstream_request_filter(session, upstream_request, ctx)
-            .await?;
+        run_global_then_route_upstream_request_filter(
+            ctx.global_plugin.clone(),
+            ctx.plugin.clone(),
+            session,
+            upstream_request,
+            ctx,
+        )
+        .await?;
 
         // Rewrite host header
         // Priority: upstream_override > route upstream
@@ -294,17 +370,14 @@ impl ProxyHttp for HttpService {
             }
         }
 
-        // Execute global rule plugins
-        ctx.global_plugin
-            .clone()
-            .response_filter(session, upstream_response, ctx)
-            .await?;
-
-        // Execute plugins
-        ctx.plugin
-            .clone()
-            .response_filter(session, upstream_response, ctx)
-            .await
+        run_global_then_route_response_filter(
+            ctx.global_plugin.clone(),
+            ctx.plugin.clone(),
+            session,
+            upstream_response,
+            ctx,
+        )
+        .await
     }
 
     fn response_body_filter(
@@ -314,15 +387,14 @@ impl ProxyHttp for HttpService {
         end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> Result<Option<Duration>> {
-        // Execute global rule plugins
-        ctx.global_plugin
-            .clone()
-            .response_body_filter(session, body, end_of_stream, ctx)?;
-
-        // Execute plugins
-        ctx.plugin
-            .clone()
-            .response_body_filter(session, body, end_of_stream, ctx)?;
+        run_global_then_route_response_body_filter(
+            ctx.global_plugin.clone(),
+            ctx.plugin.clone(),
+            session,
+            body,
+            end_of_stream,
+            ctx,
+        )?;
         Ok(None)
     }
 
@@ -378,6 +450,48 @@ impl ProxyHttp for HttpService {
             }
         }
         Ok(())
+    }
+
+    fn cache_key_callback(&self, session: &Session, ctx: &mut Self::CTX) -> Result<CacheKey> {
+        let req = session.req_header();
+        let host = req
+            .headers
+            .get(http::header::HOST)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let primary = format!("{} {} {}", req.method, host, req.uri);
+
+        let route_fp = ctx
+            .route
+            .as_ref()
+            .map(|r| r.cache_namespace_fingerprint())
+            .unwrap_or(0);
+        let policy_fp = ctx
+            .get::<Arc<CacheSettings>>(CTX_KEY_CACHE_SETTINGS)
+            .map(|s| s.policy_fingerprint)
+            .unwrap_or(0);
+        let upstream_key = if let Some(override_up) = ctx.upstream_override.as_ref() {
+            override_up.cache_isolation_key()
+        } else {
+            ctx.route
+                .as_ref()
+                .and_then(|r| r.resolve_upstream())
+                .map(|u| u.cache_isolation_key())
+                .unwrap_or_default()
+        };
+        let scheme = if session
+            .digest()
+            .and_then(|d| d.ssl_digest.as_ref())
+            .is_some()
+        {
+            "https"
+        } else {
+            "http"
+        };
+        // Route fingerprint covers identity + response-affecting plugins;
+        // upstream isolation covers origin selection (nodes, Host rewrite, TLS).
+        let namespace = format!("rf={route_fp:x}|c={policy_fp:x}|u={upstream_key}|sch={scheme}");
+        Ok(CacheKey::new(namespace, primary, ""))
     }
 
     fn cache_vary_filter(
@@ -446,39 +560,49 @@ impl ProxyHttp for HttpService {
             return Ok(RespCacheable::Uncacheable(NoCacheReason::NeverEnabled));
         };
 
+        // These reasons may run after `session.cache.enable()`; NeverEnabled panics there.
         if crate::plugins::cache::should_bypass_authenticated_request(settings, ctx) {
-            return Ok(RespCacheable::Uncacheable(NoCacheReason::NeverEnabled));
+            return Ok(RespCacheable::Uncacheable(NoCacheReason::OriginNotCache));
         }
 
         if !settings.statuses.contains(&resp.status.as_u16()) {
-            return Ok(RespCacheable::Uncacheable(NoCacheReason::NeverEnabled));
+            return Ok(RespCacheable::Uncacheable(NoCacheReason::OriginNotCache));
         }
 
         if !settings.cache_set_cookie_responses && resp.headers.contains_key(SET_COOKIE) {
-            return Ok(RespCacheable::Uncacheable(NoCacheReason::NeverEnabled));
+            return Ok(RespCacheable::Uncacheable(NoCacheReason::OriginNotCache));
         }
 
         if response_has_vary_star(&resp.headers) {
-            return Ok(RespCacheable::Uncacheable(NoCacheReason::NeverEnabled));
+            return Ok(RespCacheable::Uncacheable(NoCacheReason::OriginNotCache));
         }
 
         let cc = CacheControl::from_resp_headers(resp);
         let final_cc = ensure_max_age(cc, settings);
 
+        // Only treat the request as authorized when credentials were actually
+        // present; the previous hard-coded `true` made every response require
+        // `public`/`s-maxage` and prevented the default TTL path from caching.
+        let authorization_present =
+            ctx.original_request_had_credentials || ctx.request_has_credentials;
+
         Ok(resp_cacheable(
             final_cc.as_ref(),
             resp.clone(),
-            true,
+            authorization_present,
             &CACHE_DEFAULT,
         ))
     }
 
     async fn logging(&self, session: &mut Session, e: Option<&Error>, ctx: &mut Self::CTX) {
-        // Execute global rule plugins
-        ctx.global_plugin.clone().logging(session, e, ctx).await;
-
-        // Execute plugins
-        ctx.plugin.clone().logging(session, e, ctx).await;
+        run_global_then_route_logging(
+            ctx.global_plugin.clone(),
+            ctx.plugin.clone(),
+            session,
+            e,
+            ctx,
+        )
+        .await;
     }
 
     /// This filter is called when there is an error in the process of establishing a connection to the upstream.

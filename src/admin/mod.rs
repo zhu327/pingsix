@@ -23,7 +23,7 @@ use crate::{
     core::{constant_time_eq, ProxyError},
     plugins::{build_plugin, traffic_split},
     proxy::{
-        control_plane::{build_config_set_from_kvs, validate_config_set},
+        graph_mutation::{self, GraphMutationError},
         ssl::ProxySSL,
     },
     utils::response::{CommonErrors, ResponseBuilder},
@@ -72,6 +72,18 @@ impl Error for ApiError {
 impl From<ProxyError> for ApiError {
     fn from(err: ProxyError) -> Self {
         ApiError::ProxyError(err)
+    }
+}
+
+impl From<GraphMutationError> for ApiError {
+    fn from(err: GraphMutationError) -> Self {
+        match err {
+            GraphMutationError::NotFound(msg) => ApiError::NotFound(msg),
+            GraphMutationError::ReferentialConflict(msg) => ApiError::Conflict(msg),
+            GraphMutationError::InvalidCandidate(msg) => ApiError::ValidationError(msg),
+            GraphMutationError::CasConflict(msg) => ApiError::Conflict(msg),
+            GraphMutationError::Storage(proxy_err) => ApiError::from(proxy_err),
+        }
     }
 }
 
@@ -287,32 +299,7 @@ impl<T: AdminResource> Handler for ResourceHandler<T> {
         // Use generic resource validation
         T::validate_resource(&body_data)?;
 
-        // Read the full resource graph, then build a candidate set that reflects
-        // the proposed put (target key replaced with the new body). validate_config_set
-        // checks cross-resource references including traffic-split upstream_ids
-        // before we touch etcd.
-        let graph = etcd.read_full_graph().await.map_err(ApiError::from)?;
-        let full_key = etcd.prefixed_key(&key);
-
-        let mut candidate_kvs = graph_without(&graph.kvs, &full_key);
-        candidate_kvs.push((full_key.clone(), body_data.clone()));
-
-        let candidate_set = build_config_set_from_kvs(&candidate_kvs).map_err(|e| {
-            ApiError::ValidationError(format!("Failed to build candidate config set: {e}"))
-        })?;
-        validate_config_set(&candidate_set).map_err(|e| {
-            ApiError::ValidationError(format!("Proposed configuration is invalid: {e}"))
-        })?;
-
-        let committed = etcd
-            .graph_txn_put(
-                &full_key,
-                body_data,
-                graph.mod_revisions.get(&full_key).copied(),
-                graph.guard_mod_revision,
-            )
-            .await
-            .map_err(cas_api_error)?;
+        let committed = graph_mutation::put_resource(etcd, &key, body_data).await?;
 
         let body = serde_json::json!({ "revision": committed });
         Ok(ResponseBuilder::success_json(&body))
@@ -361,28 +348,7 @@ impl<T: AdminResource> Handler for DeleteHandler<T> {
     ) -> ApiResult<ApiResponse> {
         let key = ResourceHandler::<T>::extract_key(&params)?;
 
-        let graph = etcd.read_full_graph().await.map_err(ApiError::from)?;
-        let full_key = etcd.prefixed_key(&key);
-
-        let expected_mod_revision = *graph
-            .mod_revisions
-            .get(&full_key)
-            .ok_or_else(|| ApiError::NotFound("Resource not found".into()))?;
-
-        // Build the candidate graph without the target resource. If anything still
-        // references it (including traffic-split upstream_id), validation fails
-        // and we refuse the delete with 409.
-        let candidate_kvs = graph_without(&graph.kvs, &full_key);
-        let candidate_set = build_config_set_from_kvs(&candidate_kvs).map_err(|e| {
-            ApiError::ValidationError(format!("Failed to build candidate config set: {e}"))
-        })?;
-        validate_config_set(&candidate_set).map_err(|e| {
-            ApiError::Conflict(format!("Resource is referenced by other resources: {e}"))
-        })?;
-
-        etcd.graph_txn_delete(&full_key, expected_mod_revision, graph.guard_mod_revision)
-            .await
-            .map_err(cas_api_error)?;
+        graph_mutation::delete_resource(etcd, &key).await?;
 
         Ok(ResponseBuilder::success_http(Vec::new(), None))
     }
@@ -583,27 +549,6 @@ fn is_json_content_type(ct_str: &str) -> bool {
         .next()
         .map(str::trim)
         .is_some_and(|media_type| media_type.eq_ignore_ascii_case("application/json"))
-}
-
-/// Collect the full resource graph as `(physical_key, value)` pairs, excluding
-/// `exclude`. Used by the PUT/DELETE handlers to build a candidate snapshot.
-fn graph_without(kv_map: &HashMap<String, Vec<u8>>, exclude: &str) -> Vec<(String, Vec<u8>)> {
-    kv_map
-        .iter()
-        .filter(|(k, _)| *k != exclude)
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect()
-}
-
-/// Map a CAS operation error to an `ApiError`: a `CasConflict` becomes a 409
-/// `Conflict`, any other error is preserved verbatim.
-fn cas_api_error(e: ProxyError) -> ApiError {
-    match e {
-        ProxyError::CasConflict(_) => {
-            ApiError::Conflict("Resource was modified concurrently".into())
-        }
-        other => ApiError::from(other),
-    }
 }
 
 async fn read_request_body(http_session: &mut ServerSession) -> Result<Vec<u8>, ApiError> {

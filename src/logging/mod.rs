@@ -261,7 +261,7 @@ impl Service for Logger {
                 // Shutdown signal handling
                 _ = shutdown.changed() => {
                     if *shutdown.borrow() {
-                        log::debug!("Shutdown signal received, stopping log writer");
+                        log::debug!("Shutdown signal received, draining log writer");
                         break;
                     }
                 },
@@ -419,6 +419,51 @@ impl Service for Logger {
                     }
                 }
             }
+        }
+
+        // Close the channel first so no producer can successfully enqueue after
+        // we observe Empty. Then mark stopped so failed sends fall back to stderr.
+        self.receiver.close();
+        self.stopped.store(true, Ordering::Release);
+
+        // Drain already-accepted lines within a bounded deadline so shutdown
+        // does not lose the final request/error/control-plane logs.
+        const SHUTDOWN_DRAIN: Duration = Duration::from_secs(2);
+        let deadline = tokio::time::Instant::now() + SHUTDOWN_DRAIN;
+        let mut drained = 0u64;
+        let mut dropped = 0u64;
+        loop {
+            match self.receiver.try_recv() {
+                Ok(data) => {
+                    if tokio::time::Instant::now() > deadline {
+                        dropped += 1;
+                        // Count the rest as dropped without further I/O.
+                        while self.receiver.try_recv().is_ok() {
+                            dropped += 1;
+                        }
+                        break;
+                    }
+                    if let Some(ref mut file) = file_writer {
+                        if file.write_all(&data).await.is_err() {
+                            let _ = io::stderr().write_all(&data);
+                            file_writer = None;
+                        }
+                    } else {
+                        let _ = io::stderr().write_all(&data);
+                    }
+                    drained += 1;
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+            }
+        }
+        if dropped > 0 {
+            LOG_DROPPED
+                .with_label_values(&["shutdown_deadline"])
+                .inc_by(dropped);
+        }
+        if drained > 0 || dropped > 0 {
+            eprintln!("Log writer shutdown: drained={drained} dropped_on_shutdown={dropped}");
         }
 
         if let Some(ref mut file) = file_writer {

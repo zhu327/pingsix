@@ -28,6 +28,49 @@ fn build_plugin_name_index(plugins: &[Arc<dyn ProxyPlugin>]) -> Vec<String> {
     names
 }
 
+/// Stable hash of plugin configuration that can change response content or
+/// origin selection (response-rewrite, proxy-rewrite, traffic-split, cache, …).
+fn hash_plugin_map(
+    plugins: &HashMap<String, serde_json::Value>,
+    hasher: &mut impl std::hash::Hasher,
+) {
+    use std::hash::Hash;
+    let mut keys: Vec<_> = plugins.keys().collect();
+    keys.sort();
+    for key in keys {
+        key.hash(hasher);
+        match serde_json::to_string(plugins.get(key).unwrap()) {
+            Ok(encoded) => encoded.hash(hasher),
+            Err(_) => "unencodable".hash(hasher),
+        }
+    }
+}
+
+fn route_cache_namespace_fingerprint(route: &config::Route, service: Option<&ProxyService>) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    route.id.hash(&mut hasher);
+    route.service_id.hash(&mut hasher);
+    route.uri.hash(&mut hasher);
+    route.uris.hash(&mut hasher);
+    route.host.hash(&mut hasher);
+    route.hosts.hash(&mut hasher);
+    route.priority.hash(&mut hasher);
+    if let Some(timeout) = &route.timeout {
+        timeout.connect.hash(&mut hasher);
+        timeout.send.hash(&mut hasher);
+        timeout.read.hash(&mut hasher);
+    }
+    hash_plugin_map(&route.plugins, &mut hasher);
+    if let Some(service) = service {
+        service.inner.id.hash(&mut hasher);
+        hash_plugin_map(&service.inner.plugins, &mut hasher);
+    }
+    hasher.finish()
+}
+
 fn route_overrides_plugin(route_plugin_names: &[String], plugin_name: &str) -> bool {
     // route_plugin_names is sorted
     route_plugin_names
@@ -98,6 +141,8 @@ pub struct ProxyRoute {
     effective_hosts: Vec<String>,
     plugin_executor: Arc<ProxyPluginExecutor>,
     pub inline_upstream: Option<Arc<ProxyUpstream>>,
+    /// Fingerprint of route/service identity and response-affecting plugins.
+    cache_namespace_fingerprint: u64,
 }
 
 impl Identifiable for ProxyRoute {
@@ -200,6 +245,9 @@ impl ProxyRoute {
             Arc::new(ProxyPluginExecutor::new(merged_plugins))
         };
 
+        let cache_namespace_fingerprint =
+            route_cache_namespace_fingerprint(&route, service.as_deref());
+
         Ok(Self {
             inner: route,
             plugins,
@@ -207,6 +255,7 @@ impl ProxyRoute {
             effective_hosts,
             plugin_executor,
             inline_upstream,
+            cache_namespace_fingerprint,
         })
     }
 
@@ -267,6 +316,10 @@ impl RouteContext for ProxyRoute {
 
     fn effective_hosts(&self) -> &[String] {
         &self.effective_hosts
+    }
+
+    fn cache_namespace_fingerprint(&self) -> u64 {
+        self.cache_namespace_fingerprint
     }
 
     fn resolve_upstream(&self) -> Option<Arc<dyn UpstreamSelector>> {

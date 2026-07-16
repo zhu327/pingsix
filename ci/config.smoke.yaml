@@ -9,7 +9,7 @@ pingsix:
   listeners:
     - address: 0.0.0.0:8080
   status:
-    address: 127.0.0.1:7085
+    address: 0.0.0.0:7085
   prometheus:
     address: 0.0.0.0:9091
 

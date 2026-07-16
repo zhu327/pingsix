@@ -44,6 +44,7 @@ COPY config.yaml /app/config.yaml
 RUN mkdir -p /var/log/pingsix /var/run/pingsix && \
     sed -i \
         -e 's|pid_file: /run/pingora.pid|pid_file: /var/run/pingsix/pingora.pid|' \
+        -e 's|address: "127.0.0.1:7085"|address: "0.0.0.0:7085"|' \
         -e '/^  user: nobody$/d' \
         -e '/^  group: webusers$/d' \
         /app/config.yaml && \
@@ -51,7 +52,7 @@ RUN mkdir -p /var/log/pingsix /var/run/pingsix && \
 
 USER pingsix
 
-# Proxy listener and Prometheus. Status binds to 127.0.0.1 inside the container.
-EXPOSE 8080 9091
+# Proxy listener, status/readiness probes, and Prometheus.
+EXPOSE 8080 7085 9091
 
 CMD ["pingsix", "-c", "/app/config.yaml"]

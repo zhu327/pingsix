@@ -10,17 +10,15 @@ use crate::{
 
 use super::control_plane::{ResourceConfigSet, CONTROL_PLANE};
 
-pub struct ProxyEventHandler;
-
-impl Default for ProxyEventHandler {
-    fn default() -> Self {
-        Self::new()
-    }
+pub struct ProxyEventHandler {
+    prefix: String,
 }
 
 impl ProxyEventHandler {
-    pub fn new() -> Self {
-        ProxyEventHandler
+    pub fn new(prefix: impl Into<String>) -> Self {
+        ProxyEventHandler {
+            prefix: prefix.into(),
+        }
     }
 }
 
@@ -49,7 +47,7 @@ impl EtcdEventHandler for ProxyEventHandler {
             crate::core::ProxyError::etcd_error("Failed to get header from list response")
         })?;
 
-        let resources = ResourceConfigSet::from_etcd_list(response)?;
+        let resources = ResourceConfigSet::from_etcd_list(response, &self.prefix)?;
         // Mark transport recovery before submitting: a fast publish must be the
         // operation that clears the reconnect publication fence.
         status::record_sync_success(revision);

@@ -24,9 +24,23 @@ use crate::{
 const LIST_RETRY_DELAY: Duration = Duration::from_secs(3);
 const WATCH_RETRY_DELAY: Duration = Duration::from_secs(1);
 
+/// Normalize an etcd namespace so range queries cannot leak across sibling prefixes.
+///
+/// `/apisix` and `/apisix/` both become `/apisix/`, which excludes `/apisix-other/...`.
+pub fn canonicalize_prefix(prefix: &str) -> String {
+    let trimmed = prefix.trim_end_matches('/');
+    if trimmed.is_empty() {
+        "/".to_string()
+    } else {
+        format!("{trimmed}/")
+    }
+}
+
 /// Service responsible for syncing and watching etcd configuration changes.
 pub struct EtcdConfigSync {
     config: Etcd,
+    /// Trailing-slash form used for list/watch range queries.
+    canonical_prefix: String,
     client: Option<Client>,
     revision: i64,
     handler: Box<dyn EtcdEventHandler + Send + Sync>,
@@ -34,8 +48,11 @@ pub struct EtcdConfigSync {
 
 impl EtcdConfigSync {
     pub fn new(config: Etcd, handler: Box<dyn EtcdEventHandler + Send + Sync>) -> Self {
+        let canonical_prefix = canonicalize_prefix(&config.prefix);
+        CONTROL_PLANE.set_etcd_prefix(canonical_prefix.clone());
         Self {
             config,
+            canonical_prefix,
             client: None,
             revision: 0,
             handler,
@@ -56,7 +73,7 @@ impl EtcdConfigSync {
 
     /// Synchronize etcd data on initialization.
     async fn list(&mut self) -> ProxyResult<()> {
-        let prefix = self.config.prefix.clone();
+        let prefix = self.canonical_prefix.clone();
         let client = self.get_client().await?;
 
         let options = GetOptions::new().with_prefix();
@@ -82,7 +99,7 @@ impl EtcdConfigSync {
 
     /// Watch for etcd data changes.
     async fn watch(&mut self) -> ProxyResult<()> {
-        let prefix = self.config.prefix.clone();
+        let prefix = self.canonical_prefix.clone();
         let start_revision = self.revision + 1;
         let options = WatchOptions::new()
             .with_start_revision(start_revision)
@@ -305,12 +322,11 @@ pub(crate) fn validate_etcd_endpoints(hosts: &[String], use_tls: bool) -> ProxyR
 /// without a live etcd endpoint. TLS is only attached when `etcd.tls` is set.
 fn build_connect_options(cfg: &Etcd) -> ProxyResult<ConnectOptions> {
     let mut options = ConnectOptions::default();
-    if let Some(timeout) = cfg.timeout {
-        options = options.with_timeout(Duration::from_secs(timeout as _));
-    }
-    if let Some(connect_timeout) = cfg.connect_timeout {
-        options = options.with_connect_timeout(Duration::from_secs(connect_timeout as _));
-    }
+    // Production-safe defaults when omitted from YAML.
+    let timeout = cfg.timeout.unwrap_or(5);
+    let connect_timeout = cfg.connect_timeout.unwrap_or(3);
+    options = options.with_timeout(Duration::from_secs(timeout as _));
+    options = options.with_connect_timeout(Duration::from_secs(connect_timeout as _));
     if let (Some(user), Some(password)) = (&cfg.user, &cfg.password) {
         options = options.with_user(user.clone(), password.clone());
     }
@@ -370,15 +386,24 @@ pub struct FullGraph {
 /// Wrapper for etcd client used by Admin API, ensuring local mutability.
 pub struct EtcdClientWrapper {
     config: Etcd,
+    canonical_prefix: String,
     client: OnceCell<Mutex<Client>>,
 }
 
 impl EtcdClientWrapper {
     pub fn new(cfg: Etcd) -> Self {
+        let canonical_prefix = canonicalize_prefix(&cfg.prefix);
+        CONTROL_PLANE.set_etcd_prefix(canonical_prefix.clone());
         Self {
             config: cfg,
+            canonical_prefix,
             client: OnceCell::new(),
         }
+    }
+
+    /// Configured etcd namespace (canonical trailing-slash form).
+    pub fn prefix(&self) -> &str {
+        &self.canonical_prefix
     }
 
     async fn ensure_connected(&self) -> ProxyResult<&Mutex<Client>> {
@@ -464,7 +489,7 @@ impl EtcdClientWrapper {
         let client_mutex = self.ensure_connected().await?;
         let mut client = client_mutex.lock().await;
 
-        let prefixed_key = self.config.prefix.clone();
+        let prefixed_key = self.canonical_prefix.clone();
         let options = GetOptions::new().with_prefix();
         let response = client
             .get(prefixed_key.as_bytes(), Some(options))
@@ -487,6 +512,10 @@ impl EtcdClientWrapper {
         let mut guard_mod_revision = None;
         for kv in response.kvs() {
             let key = String::from_utf8_lossy(kv.key()).into_owned();
+            if !key.starts_with(&self.canonical_prefix) {
+                log::warn!("Ignoring etcd key outside configured namespace: {key}");
+                continue;
+            }
             if key == guard_key {
                 // `1` was written by the initial graph-guard implementation and
                 // is accepted only as a transition; the next mutation upgrades it.
@@ -579,7 +608,7 @@ impl EtcdClientWrapper {
     }
 
     fn with_prefix(&self, key: &str) -> String {
-        format!("{}/{}", self.config.prefix, key)
+        format!("{}{}", self.canonical_prefix, key.trim_start_matches('/'))
     }
 }
 
@@ -636,6 +665,16 @@ fake-key
             password: None,
             tls: Some(tls),
         }
+    }
+
+    #[test]
+    fn canonicalize_prefix_adds_trailing_slash_and_isolates_siblings() {
+        assert_eq!(canonicalize_prefix("/apisix"), "/apisix/");
+        assert_eq!(canonicalize_prefix("/apisix/"), "/apisix/");
+        assert_eq!(canonicalize_prefix("/apisix///"), "/apisix/");
+        let canonical = canonicalize_prefix("/apisix");
+        assert!(!"/apisix-other/routes/1".starts_with(&canonical));
+        assert!("/apisix/routes/1".starts_with(&canonical));
     }
 
     #[test]

@@ -50,8 +50,12 @@ url = "2.5"
 validator = { version = "0.20.0", features = ["derive"] }
 
 [dev-dependencies]
-tokio = { version = "1.41.1", features = ["rt", "rt-multi-thread", "macros"] }
+etcd-client = { version = "0.18.0", features = ["tls"] }
+jsonwebtoken = "9.3.1"
 rustls = "0.23"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.41.1", features = ["rt", "rt-multi-thread", "macros"] }
 
 [profile.release]
 lto = "thin"

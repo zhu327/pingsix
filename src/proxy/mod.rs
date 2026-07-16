@@ -3,6 +3,7 @@
 pub mod control_plane;
 pub mod event;
 pub mod global_rule;
+pub mod graph_mutation;
 pub mod route;
 pub mod runtime;
 pub mod service;

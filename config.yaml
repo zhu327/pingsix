@@ -30,8 +30,9 @@ pingsix:
   #   address: "0.0.0.0:9181"
   #   api_key: pingsix
 
-  # Status/health check endpoint (independent of admin API)
-  # Useful for Kubernetes readiness probes and load balancer health checks
+  # Status/health check endpoint (independent of admin API).
+  # Local default is loopback. For Kubernetes httpGet probes bind 0.0.0.0
+  # (the Docker image does this via sed); /status/config stays loopback-only.
   status:
     address: "127.0.0.1:7085"
     # Production etcd deployments fail readiness after five minutes disconnected.

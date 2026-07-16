@@ -43,6 +43,47 @@ macro_rules! with_lb {
 pub struct ProxyUpstream {
     pub inner: config::Upstream,
     lb: SelectionLB,
+    /// Stable fingerprint of origin-identity fields used for cache namespacing.
+    cache_origin_fingerprint: u64,
+}
+
+/// Fingerprint of every upstream field that can change which origin is contacted
+/// or which virtual host / TLS identity is used. Private key material is hashed
+/// via `secret_digest` and never placed in the cache key in cleartext.
+pub(crate) fn cache_origin_fingerprint(upstream: &config::Upstream) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    upstream.id.hash(&mut hasher);
+    upstream.scheme.hash(&mut hasher);
+    upstream.r#type.hash(&mut hasher);
+    upstream.hash_on.hash(&mut hasher);
+    upstream.key.hash(&mut hasher);
+    upstream.pass_host.hash(&mut hasher);
+    upstream.upstream_host.hash(&mut hasher);
+    upstream.retries.hash(&mut hasher);
+    upstream.retry_timeout.hash(&mut hasher);
+    if let Some(timeout) = &upstream.timeout {
+        timeout.connect.hash(&mut hasher);
+        timeout.send.hash(&mut hasher);
+        timeout.read.hash(&mut hasher);
+    }
+    let mut nodes: Vec<_> = upstream.nodes.iter().collect();
+    nodes.sort_by(|a, b| a.0.cmp(b.0));
+    for (addr, weight) in nodes {
+        addr.hash(&mut hasher);
+        weight.hash(&mut hasher);
+    }
+    if let Some(tls) = &upstream.tls {
+        // Digest PEM material so client identity changes invalidate cache without
+        // embedding secrets in the key.
+        crate::core::secret_digest(&tls.client_cert).hash(&mut hasher);
+        crate::core::secret_digest(&tls.client_key).hash(&mut hasher);
+    } else {
+        0u8.hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 impl Identifiable for ProxyUpstream {
@@ -76,6 +117,7 @@ impl ProxyUpstream {
             log::debug!("Generated ID for inline upstream: {}", upstream.id);
         }
 
+        let cache_origin_fingerprint = cache_origin_fingerprint(&upstream);
         let lb = SelectionLB::from_prepared(upstream.clone(), prepared).map_err(|e| {
             ProxyError::Configuration(format!("Failed to create load balancer: {e}"))
         })?;
@@ -83,6 +125,7 @@ impl ProxyUpstream {
         Ok(ProxyUpstream {
             inner: upstream,
             lb,
+            cache_origin_fingerprint,
         })
     }
 
@@ -169,6 +212,10 @@ impl UpstreamSelector for ProxyUpstream {
                 }
             }
         }
+    }
+
+    fn cache_isolation_key(&self) -> String {
+        format!("{:x}", self.cache_origin_fingerprint)
     }
 }
 
@@ -428,5 +475,26 @@ mod tests {
         } else {
             assert!(peer.options.connection_timeout.is_none());
         }
+    }
+
+    #[test]
+    fn cache_origin_fingerprint_changes_with_host_rewrite() {
+        let base = sample_upstream("u1", None);
+        let fp1 = cache_origin_fingerprint(&base);
+        let mut rewritten = base.clone();
+        rewritten.pass_host = UpstreamPassHost::REWRITE;
+        rewritten.upstream_host = Some("tenant-b.internal".into());
+        let fp2 = cache_origin_fingerprint(&rewritten);
+        assert_ne!(
+            fp1, fp2,
+            "pass_host/upstream_host must change cache origin fingerprint"
+        );
+        let mut nodes_changed = base;
+        nodes_changed.nodes.insert("10.0.0.2:80".into(), 1);
+        assert_ne!(
+            fp1,
+            cache_origin_fingerprint(&nodes_changed),
+            "node set must change cache origin fingerprint"
+        );
     }
 }

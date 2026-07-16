@@ -53,7 +53,7 @@ fn main() {
             "Initializing etcd config sync with prefix: {}",
             etcd_cfg.prefix
         );
-        let event_handler = ProxyEventHandler::new();
+        let event_handler = ProxyEventHandler::new(etcd_cfg.prefix.clone());
         Some(EtcdConfigSync::new(
             etcd_cfg.clone(),
             Box::new(event_handler),

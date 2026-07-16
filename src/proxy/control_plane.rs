@@ -20,7 +20,7 @@ use validator::Validate;
 use crate::{
     config::{
         self,
-        etcd::{json_to_resource, GRAPH_REVISION_KEY},
+        etcd::{canonicalize_prefix, json_to_resource, GRAPH_REVISION_KEY},
         GlobalRule, Identifiable, Route, Service, Upstream, SSL,
     },
     core::{status, ProxyError, ProxyResult},
@@ -85,12 +85,19 @@ impl ResourceConfigSet {
         set
     }
 
-    pub fn from_etcd_list(response: &GetResponse) -> ProxyResult<Self> {
+    pub fn from_etcd_list(response: &GetResponse, prefix: &str) -> ProxyResult<Self> {
+        let canonical = canonicalize_prefix(prefix);
         let mut set = Self::default();
         for kv in response.kvs() {
-            if !is_metadata_key(kv.key()) {
-                insert_kv(&mut set, kv.key(), kv.value())?;
+            if is_metadata_key(kv.key()) {
+                continue;
             }
+            let key = String::from_utf8_lossy(kv.key());
+            if !key.starts_with(&canonical) {
+                log::warn!("Ignoring etcd key outside configured namespace: {key}");
+                continue;
+            }
+            insert_kv(&mut set, kv.key(), kv.value(), &canonical)?;
         }
         Ok(set)
     }
@@ -100,9 +107,14 @@ impl ResourceConfigSet {
 ///
 /// Shared by `from_etcd_list` and the admin CAS path (which builds a candidate
 /// set from a full-graph read before validating references).
-fn insert_kv(set: &mut ResourceConfigSet, key: &[u8], value: &[u8]) -> ProxyResult<()> {
-    let (id, key_type) =
-        parse_key(key).map_err(|e| ProxyError::Configuration(format!("Invalid etcd key: {e}")))?;
+fn insert_kv(
+    set: &mut ResourceConfigSet,
+    key: &[u8],
+    value: &[u8],
+    canonical_prefix: &str,
+) -> ProxyResult<()> {
+    let (id, key_type) = parse_key(key, Some(canonical_prefix))
+        .map_err(|e| ProxyError::Configuration(format!("Invalid etcd key: {e}")))?;
     match key_type.as_str() {
         "upstreams" => {
             let mut resource = json_to_resource::<Upstream>(value)?;
@@ -142,12 +154,21 @@ fn insert_kv(set: &mut ResourceConfigSet, key: &[u8], value: &[u8]) -> ProxyResu
 /// pairs. Used by the Admin write path to reconstruct the full resource graph
 /// from a `read_full_graph` snapshot so `CandidateSnapshot::build` can validate
 /// cross-resource references before a CAS commit.
-pub fn build_config_set_from_kvs(kvs: &[(String, Vec<u8>)]) -> ProxyResult<ResourceConfigSet> {
+pub fn build_config_set_from_kvs(
+    kvs: &[(String, Vec<u8>)],
+    prefix: &str,
+) -> ProxyResult<ResourceConfigSet> {
+    let canonical = canonicalize_prefix(prefix);
     let mut set = ResourceConfigSet::default();
     for (key, value) in kvs {
-        if !is_metadata_key(key.as_bytes()) {
-            insert_kv(&mut set, key.as_bytes(), value)?;
+        if is_metadata_key(key.as_bytes()) {
+            continue;
         }
+        if !key.starts_with(&canonical) {
+            log::warn!("Ignoring etcd key outside configured namespace: {key}");
+            continue;
+        }
+        insert_kv(&mut set, key.as_bytes(), value, &canonical)?;
     }
     Ok(set)
 }
@@ -590,6 +611,8 @@ pub struct ControlPlane {
     worker_tx: Mutex<Option<mpsc::Sender<()>>>,
     worker_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     active_cancellation: Mutex<Option<CancellationToken>>,
+    /// Canonical etcd namespace (`/prefix/`) used to reject foreign keys.
+    etcd_prefix: Mutex<Option<String>>,
 }
 
 impl ControlPlane {
@@ -603,7 +626,14 @@ impl ControlPlane {
             worker_tx: Mutex::new(None),
             worker_task: Mutex::new(None),
             active_cancellation: Mutex::new(None),
+            etcd_prefix: Mutex::new(None),
         }
+    }
+
+    /// Record the active etcd namespace for watch/list key validation.
+    pub fn set_etcd_prefix(&self, prefix: String) {
+        *self.etcd_prefix.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(canonicalize_prefix(&prefix));
     }
 
     /// Start the single bounded preparation worker from a Tokio runtime.
@@ -821,6 +851,31 @@ impl ControlPlane {
         self.build_and_publish_locked(resources, revision)
     }
 
+    /// Publish a candidate whose upstreams were prepared outside the sync writer
+    /// (static boot DNS path).
+    pub(crate) fn replace_all_prepared(
+        &self,
+        resources: ResourceConfigSet,
+        prepared: &PreparedUpstreams,
+        revision: i64,
+    ) -> ProxyResult<Arc<RuntimeSnapshot>> {
+        let _writer = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let candidate = CandidateSnapshot::build_prepared(resources.clone(), prepared)?;
+        let snapshot = RuntimeSnapshot::compile(candidate, revision)?;
+        let published = RUNTIME.publish(snapshot)?;
+        *self.raw.lock().unwrap_or_else(|e| e.into_inner()) = resources.clone();
+        *self.target.lock().unwrap_or_else(|e| e.into_inner()) = Some(CandidatePreparation {
+            generation: *self
+                .latest_generation
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+            revision,
+            raw: resources,
+            cancellation: CancellationToken::new(),
+        });
+        Ok(published)
+    }
+
     pub fn apply_events(
         &self,
         events: &[Event],
@@ -879,10 +934,38 @@ impl ControlPlane {
 
 pub static CONTROL_PLANE: Lazy<ControlPlane> = Lazy::new(ControlPlane::new);
 
-/// Load static YAML configuration through the same publish path as etcd list.
+/// Load static YAML configuration with bounded asynchronous DNS preparation.
+///
+/// Unlike the etcd worker path, static boot must finish preparation before
+/// listeners start. Unresolvable DNS-only upstreams fail the process.
 pub fn load_static_configurations(config: &config::Config) -> ProxyResult<Arc<RuntimeSnapshot>> {
     let resources = ResourceConfigSet::from_yaml_config(config);
-    let snapshot = CONTROL_PLANE.replace_all(resources, 0)?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| {
+            ProxyError::Configuration(format!("Failed to create DNS preparation runtime: {e}"))
+        })?;
+    let prepared = rt.block_on(async {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigterm = signal(SignalKind::terminate()).map_err(|e| {
+                ProxyError::Configuration(format!("Failed to install SIGTERM handler: {e}"))
+            })?;
+            tokio::select! {
+                result = prepare_candidate(&resources) => result,
+                _ = sigterm.recv() => Err(ProxyError::Configuration(
+                    "Static configuration DNS preparation cancelled by SIGTERM".into(),
+                )),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            prepare_candidate(&resources).await
+        }
+    })?;
+    let snapshot = CONTROL_PLANE.replace_all_prepared(resources, &prepared, 0)?;
     status::mark_ready(status::ConfigSource::Yaml);
     Ok(snapshot)
 }
@@ -890,6 +973,11 @@ pub fn load_static_configurations(config: &config::Config) -> ProxyResult<Arc<Ru
 fn apply_coalesced_events(raw: &mut ResourceConfigSet, events: &[Event]) -> ProxyResult<()> {
     // Preserve etcd causal order per key: later events overwrite earlier ones.
     let mut final_by_key: HashMap<String, CoalescedChange> = HashMap::new();
+    let prefix = CONTROL_PLANE
+        .etcd_prefix
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
 
     for event in events {
         let kv = event
@@ -900,7 +988,13 @@ fn apply_coalesced_events(raw: &mut ResourceConfigSet, events: &[Event]) -> Prox
         if is_metadata_key(key_bytes) {
             continue;
         }
-        let (id, resource_type) = parse_key(key_bytes).map_err(|e| {
+        if let Some(ref canonical) = prefix {
+            if !key.starts_with(canonical) {
+                log::warn!("Ignoring etcd event outside configured namespace: {key}");
+                continue;
+            }
+        }
+        let (id, resource_type) = parse_key(key_bytes, prefix.as_deref()).map_err(|e| {
             ProxyError::Configuration(format!("Failed to parse etcd key '{key}': {e}"))
         })?;
 
@@ -1008,19 +1102,39 @@ pub(crate) fn is_metadata_key(key: &[u8]) -> bool {
         .is_some_and(|key| key.rsplit('/').next() == Some(GRAPH_REVISION_KEY))
 }
 
-/// Parses etcd key in the format `/prefix/resource_type/id`.
-pub(crate) fn parse_key(key: &[u8]) -> Result<(String, String), Box<dyn std::error::Error>> {
+/// Parses etcd key in the format `{canonical_prefix}resource_type/id`.
+///
+/// When `canonical_prefix` is provided, the key must strip exactly to
+/// `resource_type/id` (two non-empty segments, no further slashes).
+pub(crate) fn parse_key(
+    key: &[u8],
+    canonical_prefix: Option<&str>,
+) -> Result<(String, String), Box<dyn std::error::Error>> {
     let key = std::str::from_utf8(key)?;
-    let mut parts = key.rsplit('/');
-    let id = parts
-        .next()
-        .ok_or_else(|| format!("Invalid key format: {key}"))?;
-    let key_type = parts
-        .next()
-        .ok_or_else(|| format!("Invalid key format: {key}"))?;
+    let rest = if let Some(prefix) = canonical_prefix {
+        key.strip_prefix(prefix)
+            .ok_or_else(|| format!("Key '{key}' is outside etcd namespace '{prefix}'"))?
+    } else {
+        // Legacy path for callers without a namespace: take the last two segments
+        // but still require at least one parent segment.
+        let mut parts = key.rsplit('/');
+        let id = parts
+            .next()
+            .ok_or_else(|| format!("Invalid key format: {key}"))?;
+        let key_type = parts
+            .next()
+            .ok_or_else(|| format!("Invalid key format: {key}"))?;
+        if id.is_empty() || key_type.is_empty() || parts.next().is_none() {
+            return Err(format!("Invalid key format: {key}").into());
+        }
+        return Ok((id.to_string(), key_type.to_string()));
+    };
 
-    if id.is_empty() || key_type.is_empty() || parts.next().is_none() {
-        return Err(format!("Invalid key format: {key}").into());
+    let (key_type, id) = rest
+        .split_once('/')
+        .ok_or_else(|| format!("Invalid key format under namespace: {key}"))?;
+    if key_type.is_empty() || id.is_empty() || id.contains('/') {
+        return Err(format!("Invalid key format under namespace: {key}").into());
     }
 
     Ok((id.to_string(), key_type.to_string()))
@@ -1361,11 +1475,20 @@ mod tests {
     }
 
     #[test]
+    fn parse_key_rejects_sibling_prefix_pollution() {
+        let canonical = canonicalize_prefix("/apisix");
+        assert!(parse_key(b"/apisix/routes/1", Some(&canonical)).is_ok());
+        assert!(parse_key(b"/apisix-other/routes/2", Some(&canonical)).is_err());
+        assert!(parse_key(b"/apisix/routes/1/extra", Some(&canonical)).is_err());
+        assert!(parse_key(b"/apisix/routes", Some(&canonical)).is_err());
+    }
+
+    #[test]
     fn metadata_key_is_excluded_from_full_graph_build() {
-        let set = build_config_set_from_kvs(&[(
-            "/pingsix/.pingsix_graph_revision".into(),
-            b"1".to_vec(),
-        )])
+        let set = build_config_set_from_kvs(
+            &[("/pingsix/.pingsix_graph_revision".into(), b"1".to_vec())],
+            "/pingsix",
+        )
         .unwrap();
         assert!(set.routes.is_empty());
         assert!(is_metadata_key(b"/pingsix/.pingsix_graph_revision"));

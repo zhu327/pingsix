@@ -26,6 +26,7 @@ use pingora_load_balancing::Backend;
 ///
 /// Decouples route logic from specific upstream implementations, enabling
 /// different load balancing strategies and upstream configurations.
+/// Trait for upstream selection that can be used in proxy context
 pub trait UpstreamSelector: Send + Sync {
     /// Select a backend for the given session
     fn select_backend(&self, session: &mut Session) -> Option<Backend>;
@@ -41,6 +42,11 @@ pub trait UpstreamSelector: Send + Sync {
 
     /// Rewrite the upstream host in the request header if needed
     fn upstream_host_rewrite(&self, upstream_request: &mut RequestHeader);
+
+    /// Stable cache-namespace fragment that changes when upstream identity or
+    /// origin-selection configuration changes, so process-local cache cannot
+    /// reuse stale entries after a dynamic config switch.
+    fn cache_isolation_key(&self) -> String;
 }
 
 /// Trait for route behavior that can be used in proxy context
@@ -63,6 +69,13 @@ pub trait RouteContext: Send + Sync {
     /// instead of attacker-controllable request input. Default is empty.
     fn effective_hosts(&self) -> &[String] {
         &[]
+    }
+
+    /// Fingerprint of the compiled route's cache namespace inputs (route/service
+    /// identity and response-affecting plugin configuration). Combined with the
+    /// live upstream isolation key at request time.
+    fn cache_namespace_fingerprint(&self) -> u64 {
+        0
     }
 
     /// Build plugin executor for this route

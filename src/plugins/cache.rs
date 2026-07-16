@@ -84,6 +84,8 @@ pub struct CacheSettings {
     /// Cache responses that set cookies. Disabled independently because replaying Set-Cookie from
     /// a shared cache can leak or overwrite sessions even for otherwise anonymous requests.
     pub cache_set_cookie_responses: bool,
+    /// Fingerprint of the effective cache policy for cache-key namespacing.
+    pub policy_fingerprint: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
@@ -248,21 +250,43 @@ pub fn create_cache_plugin(cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyPlugin>> 
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let vary = Arc::new(
-        config
-            .vary
-            .iter()
-            .map(|h| h.trim().to_ascii_lowercase())
-            .filter(|h| !h.is_empty())
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect(),
-    );
+    let mut vary: Vec<String> = config
+        .vary
+        .iter()
+        .map(|h| h.trim().to_ascii_lowercase())
+        .filter(|h| !h.is_empty())
+        .collect();
+    vary.sort_unstable();
+    vary.dedup();
+    let vary = Arc::new(vary);
 
     // Resolve the final max object size: None inherits the global default,
     // Some(0) means unlimited, Some(n) is an explicit limit.
     let max_file_size_bytes =
         resolve_max_file_size(config.max_file_size_bytes, default_max_object_bytes());
+
+    let policy_fingerprint = {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        config.ttl.hash(&mut hasher);
+        max_file_size_bytes.hash(&mut hasher);
+        config.hide_cache_headers.hash(&mut hasher);
+        config.respect_s_maxage.hash(&mut hasher);
+        config.cache_authenticated_requests.hash(&mut hasher);
+        config.cache_set_cookie_responses.hash(&mut hasher);
+        config.stale_while_revalidate_secs.hash(&mut hasher);
+        let mut statuses: Vec<_> = config.cache_http_statuses.clone();
+        statuses.sort_unstable();
+        statuses.dedup();
+        for status in statuses {
+            status.hash(&mut hasher);
+        }
+        for h in vary.iter() {
+            h.hash(&mut hasher);
+        }
+        hasher.finish()
+    };
 
     // Pre-build cache settings at plugin creation to avoid per-request overhead
     let cache_settings = Arc::new(CacheSettings {
@@ -275,6 +299,7 @@ pub fn create_cache_plugin(cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyPlugin>> 
         respect_s_maxage: config.respect_s_maxage,
         cache_authenticated_requests: config.cache_authenticated_requests,
         cache_set_cookie_responses: config.cache_set_cookie_responses,
+        policy_fingerprint,
     });
 
     Ok(Arc::new(PluginCache {
@@ -357,6 +382,7 @@ mod tests {
             respect_s_maxage: config.respect_s_maxage,
             cache_authenticated_requests: config.cache_authenticated_requests,
             cache_set_cookie_responses: config.cache_set_cookie_responses,
+            policy_fingerprint: 0,
         }
     }
 

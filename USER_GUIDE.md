@@ -213,8 +213,10 @@ The PingSIX Docker image includes:
 - **Minimal runtime**: Based on Debian Bookworm Slim for security and size
 - **Non-root user**: Runs as `pingsix` user for enhanced security
 - **Pre-configured directories**: Logging and runtime directories with proper permissions
-- **Exposed ports**: 8080 (HTTP proxy), 9091 (Prometheus). Status listens on `127.0.0.1:7085`
-  inside the container; Admin is not enabled in the default image config.
+- **Exposed ports**: 8080 (HTTP proxy), 7085 (status/readiness), 9091 (Prometheus).
+  The image binds status to `0.0.0.0:7085` so Kubernetes `httpGet` probes work.
+  Override back to loopback only if probes use `exec`. Admin is not enabled in the
+  default image config.
 
 ### Running PingSIX with Docker
 
