@@ -47,7 +47,11 @@ fn handle_vars<'a>(session: &'a mut Session, key: &str) -> Cow<'a, str> {
         "query_string" => Cow::Borrowed(session.req_header().uri.query().unwrap_or_default()),
         "remote_addr" => session
             .client_addr()
-            .map_or_else(|| Cow::Borrowed(""), |addr| Cow::Owned(addr.to_string())),
+            .and_then(|addr| addr.as_inet())
+            .map_or_else(
+                || Cow::Borrowed(""),
+                |inet| Cow::Owned(inet.ip().to_string()),
+            ),
         "remote_port" => session
             .client_addr()
             .and_then(|s| s.as_inet())

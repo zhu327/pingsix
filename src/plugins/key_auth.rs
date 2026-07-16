@@ -48,15 +48,17 @@ struct PluginConfig {
     #[serde(default = "PluginConfig::default_query")]
     query: String,
 
-    /// The API key to match against. Must be non-empty.
+    /// The API key to match against. Must be non-empty when present.
     /// For backward compatibility, single key as string.
-    #[validate(length(min = 1))]
+    /// No `length(min = 1)` here — the struct-level TryFrom ensures
+    /// that at least one of `key` or `keys` is non-empty.
     #[serde(skip_serializing_if = "Option::is_none")]
     key: Option<String>,
 
     /// Multiple API keys to match against. Supports key rotation.
     /// Takes precedence over single `key` if both are provided.
-    #[validate(length(min = 1))]
+    /// No `length(min = 1)` here — the struct-level validator ensures
+    /// that at least one of `key` or `keys` is non-empty.
     #[serde(default)]
     keys: Vec<String>,
 
@@ -99,6 +101,13 @@ impl TryFrom<JsonValue> for PluginConfig {
         })?;
 
         config.validate()?;
+
+        // Custom validation: at least one of `key` or `keys` must be non-empty.
+        if config.get_valid_keys().is_empty() {
+            return Err(ProxyError::validation_error(
+                "key-auth plugin requires at least one of 'key' or 'keys' to be non-empty",
+            ));
+        }
 
         Ok(config)
     }

@@ -89,7 +89,6 @@ pub struct CacheSettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
-#[serde(deny_unknown_fields)]
 pub struct PluginConfig {
     #[validate(range(min = 1))]
     pub ttl: u64,

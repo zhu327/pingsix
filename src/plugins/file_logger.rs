@@ -59,7 +59,6 @@ pub fn create_file_logger_plugin(cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyPlu
 
 /// Configuration for the file logger plugin.
 #[derive(Default, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct PluginConfig {
     /// The log format string, containing static text and variables (e.g., `$remote_addr "$request_method $uri" $status`).
     /// Supported variables include: `request_method`, `uri`, `query_string`, `http_host`, `request_time`,

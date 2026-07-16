@@ -44,14 +44,17 @@ pub fn create_limit_count_plugin(cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyPlu
 
 /// Configuration for the Limit Count plugin.
 #[derive(Default, Debug, Serialize, Deserialize, Validate)]
-#[serde(deny_unknown_fields)]
 struct PluginConfig {
     /// Type of key to use for rate limiting (e.g., `IP`, `HEADER`, `VARS`).
+    /// Defaults to `vars` for APISIX compatibility.
+    #[serde(default)]
     key_type: UpstreamHashOn,
 
     /// Key name or value to use for rate limiting (e.g., header name for `HEADER`, variable name for `VARS`).
+    /// Defaults to `remote_addr` for APISIX compatibility.
     /// Must be non-empty and valid for the specified `key_type`.
     #[validate(custom(function = "validate_key"))]
+    #[serde(default = "PluginConfig::default_key")]
     key: String,
 
     /// Time window for rate limiting, in seconds.
@@ -105,6 +108,10 @@ enum Scope {
 }
 
 impl PluginConfig {
+    fn default_key() -> String {
+        "remote_addr".to_string()
+    }
+
     fn default_rejected_code() -> u16 {
         503
     }

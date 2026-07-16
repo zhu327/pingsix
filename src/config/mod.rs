@@ -548,7 +548,6 @@ pub struct Tls {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
-#[serde(deny_unknown_fields)]
 pub struct UpstreamTls {
     #[validate(length(min = 1))]
     pub client_cert: String,
@@ -557,7 +556,6 @@ pub struct UpstreamTls {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
-#[serde(deny_unknown_fields)]
 pub struct Timeout {
     #[validate(range(min = 1, max = 86400))]
     pub connect: u64,
@@ -570,7 +568,6 @@ pub struct Timeout {
 #[serde_as]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
 #[validate(schema(function = "Route::validate"))]
-#[serde(deny_unknown_fields)]
 pub struct Route {
     #[serde(default)]
     pub id: String,
@@ -633,7 +630,6 @@ impl Route {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
 #[validate(schema(function = "Upstream::validate_upstream_host"))]
-#[serde(deny_unknown_fields)]
 pub struct Upstream {
     #[serde(default)]
     pub id: String,
@@ -737,7 +733,6 @@ pub enum SelectionType {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
-#[serde(deny_unknown_fields)]
 pub struct HealthCheck {
     // only support passive check for now
     #[validate(nested)]
@@ -745,7 +740,6 @@ pub struct HealthCheck {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
-#[serde(deny_unknown_fields)]
 pub struct ActiveCheck {
     #[serde(default)]
     pub r#type: ActiveCheckType,
@@ -792,7 +786,6 @@ impl ActiveCheck {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
-#[serde(deny_unknown_fields)]
 pub struct Health {
     #[serde(default = "Health::default_interval")]
     #[validate(range(min = 1))]
@@ -819,7 +812,6 @@ impl Health {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
-#[serde(deny_unknown_fields)]
 pub struct Unhealthy {
     #[serde(default = "Unhealthy::default_http_failures")]
     #[validate(range(min = 1))]
@@ -872,7 +864,6 @@ pub enum UpstreamPassHost {
 
 #[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
 #[validate(schema(function = "Service::validate_upstream"))]
-#[serde(deny_unknown_fields)]
 pub struct Service {
     #[serde(default)]
     pub id: String,
@@ -895,7 +886,6 @@ impl Service {
 }
 
 #[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
-#[serde(deny_unknown_fields)]
 pub struct GlobalRule {
     #[serde(default)]
     pub id: String,
@@ -905,7 +895,6 @@ pub struct GlobalRule {
 
 #[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
 #[allow(clippy::upper_case_acronyms)]
-#[serde(deny_unknown_fields)]
 pub struct SSL {
     #[serde(default)]
     pub id: String,
@@ -1451,9 +1440,11 @@ upstreams:
     }
 
     #[test]
-    fn test_unknown_field_rejected() {
+    fn test_unknown_fields_in_resources_accepted() {
         init_log();
-        // `retry_timout` is a typo of `retry_timeout`; deny_unknown_fields must reject it.
+        // Resource types (Route, Upstream, Service, SSL) must tolerate unknown fields
+        // for compatibility with ingress-controller which embeds metadata fields
+        // (name, description, labels) in the serialized JSON/YAML.
         let conf_str = r#"
 ---
 pingsix:
@@ -1461,6 +1452,9 @@ pingsix:
     - address: "[::1]:8080"
 routes:
   - id: "1"
+    name: "my-route"
+    labels:
+      managed-by: apisix-ingress-controller
     uri: /
     upstream:
       nodes:
@@ -1469,8 +1463,9 @@ routes:
 "#;
         let conf = Config::from_yaml(conf_str);
         assert!(
-            conf.is_err(),
-            "Expected unknown field `retry_timout` to be rejected"
+            conf.is_ok(),
+            "Expected unknown fields in resources to be accepted, got error: {:?}",
+            conf.err()
         );
     }
 
