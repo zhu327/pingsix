@@ -131,7 +131,7 @@ fn merge_route_and_service_plugins(
 }
 
 /// Type alias for route match result: (params, route)
-type RouteMatchResult = Option<(Vec<(String, String)>, Arc<ProxyRoute>)>;
+pub type RouteMatchResult = Option<(Vec<(String, String)>, Arc<ProxyRoute>)>;
 
 /// Proxy route with all service and upstream dependencies bound at build time.
 pub struct ProxyRoute {
@@ -478,11 +478,20 @@ impl MatchEntry {
         let method = session.req_header().method.as_str();
 
         log::debug!("match request: host={host:?}, uri={uri:?}, method={method:?}");
+        self.match_host_uri_method(host, uri, method)
+    }
 
-        // Attempt to match using host_uris if a valid host is provided
+    /// Match host/URI/method without a Pingora session.
+    ///
+    /// Used by request matching and by Criterion microbenchmarks.
+    pub fn match_host_uri_method(
+        &self,
+        host: Option<&str>,
+        uri: &str,
+        method: &str,
+    ) -> RouteMatchResult {
         if let Some(host_str) = host.filter(|h| !h.is_empty()) {
-            // Just reverse the host and let matchit handle the matching
-            // matchit will automatically match "moc.elpmaxe.ipa" against "moc.elpmaxe.{*subdomain}"
+            // Reverse the host and let matchit handle wildcard suffix matching.
             let reversed_host = Self::reverse_ascii_lowercase(host_str);
             if let Ok(v) = self.host_uris.at(&reversed_host) {
                 if let Some(result) = Self::match_uri_method(v.value, uri, method) {
@@ -491,7 +500,6 @@ impl MatchEntry {
             }
         }
 
-        // Fall back to non-host URI matching
         Self::match_uri_method(&self.non_host_uri, uri, method)
     }
 

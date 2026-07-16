@@ -150,8 +150,12 @@ impl ServiceDiscovery for DnsDiscovery {
                     peer.client_cert_key = Some(cert_key.clone());
                 }
 
-                // Insert HttpPeer into the backend
-                debug_assert!(backend.ext.insert::<HttpPeer>(peer).is_none());
+                // Insert HttpPeer into the backend. Must not live only inside
+                // `debug_assert!` — that expression is elided in release builds.
+                assert!(
+                    backend.ext.insert::<HttpPeer>(peer).is_none(),
+                    "backend already had HttpPeer metadata"
+                );
 
                 Some(backend)
             })
@@ -379,7 +383,11 @@ impl TryFrom<Upstream> for HybridDiscovery {
                     peer.client_cert_key = Some(cert_key.clone());
                 }
 
-                debug_assert!(backend.ext.insert::<HttpPeer>(peer).is_none());
+                // Must not live only inside `debug_assert!` — elided in release.
+                assert!(
+                    backend.ext.insert::<HttpPeer>(peer).is_none(),
+                    "backend already had HttpPeer metadata"
+                );
 
                 backends.insert(backend);
             } else {
