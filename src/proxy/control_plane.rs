@@ -20,7 +20,7 @@ use validator::Validate;
 use crate::{
     config::{
         self,
-        etcd::{canonicalize_prefix, json_to_resource, GRAPH_REVISION_KEY},
+        etcd::{canonicalize_prefix, json_to_resource},
         GlobalRule, Identifiable, Route, Service, Upstream, SSL,
     },
     core::{status, ProxyError, ProxyResult},
@@ -83,6 +83,15 @@ impl ResourceConfigSet {
             set.ssls.insert(ssl.id.clone(), ssl.clone());
         }
         set
+    }
+
+    /// True when the set contains no routable/business configuration.
+    pub fn is_business_empty(&self) -> bool {
+        self.upstreams.is_empty()
+            && self.services.is_empty()
+            && self.global_rules.is_empty()
+            && self.routes.is_empty()
+            && self.ssls.is_empty()
     }
 
     pub fn from_etcd_list(response: &GetResponse, prefix: &str) -> ProxyResult<Self> {
@@ -1096,10 +1105,15 @@ fn apply_raw_change(raw: &mut ResourceConfigSet, change: CoalescedChange) -> Pro
 }
 
 /// Whether this is internal control-plane metadata rather than a resource.
+///
+/// Any etcd key whose final path segment starts with `.` is treated as
+/// metadata (e.g. `.pingsix_graph_revision`, ingress-controller-internal
+/// sync-barrier keys). These must not be parsed as business resources.
 pub(crate) fn is_metadata_key(key: &[u8]) -> bool {
     std::str::from_utf8(key)
         .ok()
-        .is_some_and(|key| key.rsplit('/').next() == Some(GRAPH_REVISION_KEY))
+        .and_then(|key| key.rsplit('/').next())
+        .is_some_and(|leaf| leaf.starts_with('.'))
 }
 
 /// Parses etcd key in the format `{canonical_prefix}resource_type/id`.
@@ -1486,12 +1500,17 @@ mod tests {
     #[test]
     fn metadata_key_is_excluded_from_full_graph_build() {
         let set = build_config_set_from_kvs(
-            &[("/pingsix/.pingsix_graph_revision".into(), b"1".to_vec())],
+            &[
+                ("/pingsix/.pingsix_graph_revision".into(), b"1".to_vec()),
+                ("/pingsix/.ingress_sync_barrier".into(), b"{}".to_vec()),
+            ],
             "/pingsix",
         )
         .unwrap();
         assert!(set.routes.is_empty());
         assert!(is_metadata_key(b"/pingsix/.pingsix_graph_revision"));
+        assert!(is_metadata_key(b"/pingsix/.ingress_sync_barrier"));
+        assert!(!is_metadata_key(b"/pingsix/routes/1"));
     }
 
     #[test]
