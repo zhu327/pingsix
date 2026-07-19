@@ -235,6 +235,7 @@ fn init_pingsix_defaults(cfg: &config::Pingsix) {
     }
     if let Some(defaults) = &cfg.defaults {
         pingsix::config::init_dns_resolution_timeout(defaults.dns_resolution_timeout);
+        pingsix::config::init_dns_refresh_interval(defaults.dns_refresh_interval);
     }
     pingsix::config::init_default_upstream_timeout(
         cfg.defaults

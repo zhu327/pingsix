@@ -3,7 +3,8 @@
 //! This is a separate integration-test binary so `OnceCell` globals start fresh.
 
 use pingsix::config::{
-    init_default_upstream_timeout, init_dns_resolution_timeout, CacheDefaults, Defaults, Timeout,
+    init_default_upstream_timeout, init_dns_refresh_interval, init_dns_resolution_timeout,
+    CacheDefaults, Defaults, Timeout,
 };
 use pingsix::plugins::cache::{default_max_object_bytes, resolved_max_file_size_bytes};
 use pingsix::service::http::init_cache_defaults;
@@ -14,6 +15,7 @@ fn init_defaults_like_main(defaults: &Defaults) {
         init_cache_defaults(cache);
     }
     init_dns_resolution_timeout(defaults.dns_resolution_timeout);
+    init_dns_refresh_interval(defaults.dns_refresh_interval);
     init_default_upstream_timeout(defaults.upstream_timeout.clone());
 }
 
@@ -26,6 +28,7 @@ fn static_cache_default_applies_before_plugin_build() {
             read: 5,
         }),
         dns_resolution_timeout: 3,
+        dns_refresh_interval: Some(7),
         cache: Some(CacheDefaults {
             max_memory_bytes: 64 * 1024 * 1024,
             default_max_object_bytes: 10_485_760,
@@ -52,4 +55,5 @@ fn static_cache_default_applies_before_plugin_build() {
     );
 
     assert_eq!(pingsix::config::dns_resolution_timeout(), 3);
+    assert_eq!(pingsix::config::dns_refresh_interval(), Some(7));
 }

@@ -238,6 +238,11 @@ pub struct Defaults {
     #[serde(default = "Defaults::default_dns_resolution_timeout")]
     #[validate(range(min = 1, max = 60))]
     pub dns_resolution_timeout: u64,
+    /// Optional interval for refreshing DNS-based upstream backends after publish.
+    /// `None` disables periodic DNS refresh.
+    #[serde(default)]
+    #[validate(range(min = 1, max = 3600))]
+    pub dns_refresh_interval: Option<u64>,
     #[validate(nested)]
     pub cache: Option<CacheDefaults>,
 }
@@ -276,6 +281,8 @@ impl CacheDefaults {
 static DEFAULT_UPSTREAM_TIMEOUT: once_cell::sync::OnceCell<Option<Timeout>> =
     once_cell::sync::OnceCell::new();
 static DNS_RESOLUTION_TIMEOUT: once_cell::sync::OnceCell<u64> = once_cell::sync::OnceCell::new();
+static DNS_REFRESH_INTERVAL: once_cell::sync::OnceCell<Option<u64>> =
+    once_cell::sync::OnceCell::new();
 
 /// Populate the global default upstream timeout from configuration. Called once
 /// at startup. Subsequent calls are no-ops (first value wins), which keeps
@@ -297,6 +304,16 @@ pub fn init_dns_resolution_timeout(timeout: u64) {
 /// DNS deadline used by discovery when no startup configuration has initialized it.
 pub fn dns_resolution_timeout() -> u64 {
     *DNS_RESOLUTION_TIMEOUT.get_or_init(Defaults::default_dns_resolution_timeout)
+}
+
+/// Populate the optional DNS refresh interval from configuration.
+pub fn init_dns_refresh_interval(interval: Option<u64>) {
+    let _ = DNS_REFRESH_INTERVAL.set(interval);
+}
+
+/// Optional DNS refresh interval for published upstream load balancers.
+pub fn dns_refresh_interval() -> Option<u64> {
+    DNS_REFRESH_INTERVAL.get().cloned().flatten()
 }
 
 /// Finite peer-I/O fallback used whenever neither a route nor upstream nor

@@ -273,6 +273,10 @@ where
             upstreams.health_check_frequency = Some(health_check_frequency);
         }
 
+        if let Some(interval) = config::dns_refresh_interval() {
+            upstreams.update_frequency = Some(Duration::from_secs(interval));
+        }
+
         // Extract the Arc<LoadBalancer> via background_service().task().
         // The wrapper is intentionally dropped — health checks are driven by
         // SHARED_HEALTH_CHECK_SERVICE, not by Pingora's background service mechanism.

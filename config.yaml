@@ -11,6 +11,9 @@ pingsix:
     # DNS preparation has a bounded deadline; dynamic DNS-only updates activate
     # only after a successful resolution.
     dns_resolution_timeout: 5
+    # Optional periodic DNS refresh for DNS-based upstreams (seconds).
+    # Enable for headless Kubernetes Services / DNS-direct Pod discovery.
+    # dns_refresh_interval: 30
 
   # listener on TCP or TLS
   listeners:
