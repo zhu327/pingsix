@@ -116,23 +116,20 @@ fn json_response<T: Serialize>(status: StatusCode, body: &T) -> Response<Vec<u8>
         .body(json_body)
         .unwrap_or_else(|e| {
             log::error!("Failed to build status HTTP response: {e}");
-            Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(b"Internal Server Error".to_vec())
-                .expect("static response must be valid")
+            let mut resp = Response::new(b"Internal Server Error".to_vec());
+            *resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+            resp
         })
 }
 
 fn forbidden_response() -> Response<Vec<u8>> {
-    Response::builder()
-        .status(StatusCode::FORBIDDEN)
-        .body(b"Forbidden".to_vec())
-        .expect("static response must be valid")
+    let mut resp = Response::new(b"Forbidden".to_vec());
+    *resp.status_mut() = StatusCode::FORBIDDEN;
+    resp
 }
 
 fn not_found_response() -> Response<Vec<u8>> {
-    Response::builder()
-        .status(StatusCode::NOT_FOUND)
-        .body(b"Not Found".to_vec())
-        .expect("static response must be valid")
+    let mut resp = Response::new(b"Not Found".to_vec());
+    *resp.status_mut() = StatusCode::NOT_FOUND;
+    resp
 }

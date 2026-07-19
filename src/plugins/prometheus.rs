@@ -317,13 +317,9 @@ impl PluginPrometheus {
                 }
             }
         }
-        let path = if segment_count >= 8 {
-            format!(
-                "{}/...",
-                &path[..truncate_at.expect("recorded at 7th slash")]
-            )
-        } else {
-            path.into_owned()
+        let path = match (segment_count >= 8, truncate_at) {
+            (true, Some(idx)) => format!("{}/...", &path[..idx]),
+            _ => path.into_owned(),
         };
 
         self.limit_path_label(path)

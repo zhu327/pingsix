@@ -286,16 +286,18 @@ where
 
         // The seeded discovery result is immediately ready and never performs
         // I/O, so populate selection before this LB can be published.
-        upstreams
-            .update()
-            .now_or_never()
-            .expect("seeded discovery must be immediately ready")
-            .map_err(|e| {
-                ProxyError::Configuration(format!(
-                    "Upstream '{}' failed to install prepared backends: {e}",
-                    upstream.id
-                ))
-            })?;
+        let update_result = upstreams.update().now_or_never().ok_or_else(|| {
+            ProxyError::Configuration(format!(
+                "Upstream '{}' seeded discovery was not immediately ready",
+                upstream.id
+            ))
+        })?;
+        update_result.map_err(|e| {
+            ProxyError::Configuration(format!(
+                "Upstream '{}' failed to install prepared backends: {e}",
+                upstream.id
+            ))
+        })?;
 
         Ok(Self { upstreams })
     }

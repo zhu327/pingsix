@@ -84,13 +84,15 @@ impl PluginCsrf {
     /// Generates HMAC-SHA256 signature for the token
     ///
     /// Uses standard HMAC-SHA256(key, random || expires).
-    fn gen_sign(&self, random: &str, expires: u64) -> String {
+    fn gen_sign(&self, random: &str, expires: u64) -> Option<String> {
         type HmacSha256 = Hmac<Sha256>;
-        let mut mac = HmacSha256::new_from_slice(self.config.key.as_bytes())
-            .expect("HMAC accepts any key size");
+        // HMAC accepts any key size, so new_from_slice always succeeds.
+        // Return Option so callers can fail closed instead of producing a
+        // sentinel value that could be compared equal.
+        let mut mac = HmacSha256::new_from_slice(self.config.key.as_bytes()).ok()?;
         mac.update(random.as_bytes());
         mac.update(expires.to_string().as_bytes());
-        hex::encode(mac.finalize().into_bytes())
+        Some(hex::encode(mac.finalize().into_bytes()))
     }
 
     /// Generates a new CSRF token string (base64 encoded JSON)
@@ -105,7 +107,7 @@ impl PluginCsrf {
         // Get current timestamp, handle potential system time errors gracefully
         let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
 
-        let sign = self.gen_sign(&random, now);
+        let sign = self.gen_sign(&random, now)?;
 
         let token = CsrfToken {
             random,
@@ -176,7 +178,10 @@ impl PluginCsrf {
         }
 
         // Validate signature using constant-time comparison
-        let expected_sign = self.gen_sign(&token_table.random, token_table.expires);
+        let Some(expected_sign) = self.gen_sign(&token_table.random, token_table.expires) else {
+            log::debug!("CSRF token signature could not be computed");
+            return false;
+        };
         if !constant_time_eq(&token_table.sign, &expected_sign) {
             log::debug!("CSRF token invalid signature");
             return false;
@@ -288,7 +293,7 @@ mod tests {
             .expect("System time should be available in tests")
             .as_secs();
         let random = "0123456789abcdef0123456789abcdef".to_string();
-        let sign = plugin.gen_sign(&random, expires);
+        let sign = plugin.gen_sign(&random, expires).expect("valid key");
         let token = CsrfToken {
             random,
             expires,
@@ -322,7 +327,7 @@ mod tests {
             .as_secs()
             .saturating_sub(10); // Token created 10 seconds ago
         let random = "0123456789abcdef0123456789abcdef".to_string();
-        let sign = plugin.gen_sign(&random, expires);
+        let sign = plugin.gen_sign(&random, expires).expect("valid key");
         let token = CsrfToken {
             random,
             expires,

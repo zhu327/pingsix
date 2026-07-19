@@ -321,7 +321,8 @@ impl PluginCors {
         if !allowed {
             return Ok(Some(ResponseHeader::build(StatusCode::FORBIDDEN, None)?));
         }
-        let origin = origin.expect("checked above");
+        // `allowed` is true only when origin is Some and allowed.
+        let origin = origin.expect("allowed implies origin is Some");
         let mut resp = ResponseHeader::build(StatusCode::NO_CONTENT, None)?;
         self.apply_cors_headers_with_origin(session, &mut resp, &origin)?;
         Ok(Some(resp))

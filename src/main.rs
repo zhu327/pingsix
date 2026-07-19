@@ -191,9 +191,12 @@ fn add_optional_services(server: &mut Server, cfg: &config::Pingsix) {
                 std::process::exit(1);
             }
             log::debug!("Configuring admin HTTP interface");
-            let admin_service_http = AdminHttpApp::admin_http_service(cfg);
-            server.add_service(admin_service_http);
-            log::info!("Admin HTTP interface enabled");
+            if let Some(admin_service_http) = AdminHttpApp::admin_http_service(cfg) {
+                server.add_service(admin_service_http);
+                log::info!("Admin HTTP interface enabled");
+            } else {
+                log::error!("Admin HTTP interface not configured (missing admin or etcd config)");
+            }
         }
     }
 

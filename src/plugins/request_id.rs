@@ -132,13 +132,10 @@ impl PluginRequestID {
         }
 
         let mut rng = rand::thread_rng();
+        // chars is verified non-empty above, so choose() always succeeds.
+        // Use unwrap_or to avoid .expect() in production code.
         (0..self.config.range_id.length)
-            .map(|_| {
-                chars
-                    .choose(&mut rng)
-                    .copied()
-                    .expect("chars is non-empty, choose should succeed")
-            })
+            .map(|_| chars.choose(&mut rng).copied().unwrap_or('?'))
             .collect()
     }
 }

@@ -13,6 +13,9 @@ fn seed_working_graph(etcd: &EtcdFixture, prefix: &str, upstream_addr: &str) {
 
 #[test]
 fn etcd1_cold_start_empty_publishes_empty_graph() {
+    if !docker_available() {
+        return;
+    }
     let etcd = EtcdFixture::start();
     let prefix = etcd.unique_prefix();
     let listen_port = random_port();
@@ -67,6 +70,9 @@ fn etcd1_cold_start_empty_publishes_empty_graph() {
 
 #[test]
 fn etcd2_put_publishes_and_proxies() {
+    if !docker_available() {
+        return;
+    }
     let etcd = EtcdFixture::start();
     let prefix = etcd.unique_prefix();
     let upstream = MockUpstream::start(MockUpstreamConfig {
@@ -120,6 +126,9 @@ fn etcd2_put_publishes_and_proxies() {
 
 #[test]
 fn etcd3_invalid_candidate_keeps_lkg() {
+    if !docker_available() {
+        return;
+    }
     let etcd = EtcdFixture::start();
     let prefix = etcd.unique_prefix();
     let upstream = MockUpstream::start(MockUpstreamConfig {
@@ -200,6 +209,9 @@ fn etcd3_invalid_candidate_keeps_lkg() {
 
 #[test]
 fn etcd4_disconnect_becomes_config_stale() {
+    if !docker_available() {
+        return;
+    }
     let etcd = EtcdFixture::start();
     let prefix = etcd.unique_prefix();
     let upstream = MockUpstream::start(MockUpstreamConfig {
@@ -255,6 +267,9 @@ fn etcd4_disconnect_becomes_config_stale() {
 
 #[test]
 fn etcd5_reconnect_ready_only_after_publish() {
+    if !docker_available() {
+        return;
+    }
     let etcd = EtcdFixture::start();
     let prefix = etcd.unique_prefix();
     let upstream = MockUpstream::start(MockUpstreamConfig {
@@ -317,6 +332,9 @@ fn etcd5_reconnect_ready_only_after_publish() {
 
 #[test]
 fn etcd6_idle_connected_watch_stays_ready() {
+    if !docker_available() {
+        return;
+    }
     let etcd = EtcdFixture::start();
     let prefix = etcd.unique_prefix();
     let upstream = MockUpstream::start(MockUpstreamConfig {

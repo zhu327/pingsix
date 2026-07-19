@@ -15,20 +15,15 @@ use etcd_client::Client;
 pub const ADMIN_API_KEY: &str = "integration-test-key";
 pub const ETCD_IMAGE: &str = "quay.io/coreos/etcd:v3.5.21";
 
-/// Panic with a clear message when Docker is unavailable.
-pub fn require_docker() {
-    let status = Command::new("docker")
+/// Returns `true` when Docker is available, `false` otherwise.
+pub fn docker_available() -> bool {
+    Command::new("docker")
         .args(["info"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
-    match status {
-        Ok(s) if s.success() => {}
-        _ => panic!(
-            "Docker is required for etcd integration tests (image {ETCD_IMAGE}). \
-             `docker info` failed."
-        ),
-    }
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 pub fn random_port() -> u16 {
@@ -317,7 +312,12 @@ pub struct EtcdFixture {
 
 impl EtcdFixture {
     pub fn start() -> Self {
-        require_docker();
+        if !docker_available() {
+            panic!(
+                "Docker is required for etcd integration tests (image {ETCD_IMAGE}). \
+                 `docker info` failed."
+            );
+        }
         let port = random_port();
         let container_name = format!("pingsix-it-etcd-{}-{}", std::process::id(), port);
         let output = Command::new("docker")

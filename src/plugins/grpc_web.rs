@@ -40,10 +40,9 @@ impl ProxyPlugin for PluginGrpcWeb {
         session: &mut Session,
         _ctx: &mut ProxyContext,
     ) -> Result<()> {
-        let grpc = session
-            .downstream_modules_ctx
-            .get_mut::<GrpcWebBridge>()
-            .expect("GrpcWebBridge module added");
+        let Some(grpc) = session.downstream_modules_ctx.get_mut::<GrpcWebBridge>() else {
+            return Ok(());
+        };
 
         // Initialize gRPC module for this request
         grpc.init();

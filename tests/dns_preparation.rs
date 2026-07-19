@@ -48,6 +48,9 @@ fn boot_ready_with_ip_upstream(
 
 #[test]
 fn dns1_localhost_hostname_publishes() {
+    if !docker_available() {
+        return;
+    }
     let etcd = EtcdFixture::start();
     let prefix = etcd.unique_prefix();
     let upstream = MockUpstream::start(MockUpstreamConfig {
@@ -100,6 +103,9 @@ fn dns1_localhost_hostname_publishes() {
 
 #[test]
 fn dns2_invalid_host_keeps_lkg() {
+    if !docker_available() {
+        return;
+    }
     let etcd = EtcdFixture::start();
     let prefix = etcd.unique_prefix();
     let upstream = MockUpstream::start(MockUpstreamConfig {
@@ -166,6 +172,9 @@ fn dns2_invalid_host_keeps_lkg() {
 
 #[test]
 fn dns3_hybrid_static_survives_dns_failure() {
+    if !docker_available() {
+        return;
+    }
     let etcd = EtcdFixture::start();
     let prefix = etcd.unique_prefix();
     let upstream = MockUpstream::start(MockUpstreamConfig {
@@ -219,6 +228,9 @@ fn dns3_hybrid_static_survives_dns_failure() {
 
 #[test]
 fn dns4_burst_updates_publish_latest_only() {
+    if !docker_available() {
+        return;
+    }
     let etcd = EtcdFixture::start();
     let prefix = etcd.unique_prefix();
     let up_old = MockUpstream::start(MockUpstreamConfig {
@@ -282,6 +294,9 @@ fn dns4_burst_updates_publish_latest_only() {
 
 #[test]
 fn dns5_sigterm_during_dns_prep_exits() {
+    if !docker_available() {
+        return;
+    }
     let etcd = EtcdFixture::start();
     let prefix = etcd.unique_prefix();
     let upstream = MockUpstream::start(MockUpstreamConfig::default());
@@ -321,6 +336,9 @@ fn dns5_sigterm_during_dns_prep_exits() {
 
 #[test]
 fn dns6_control_plane_metrics_present() {
+    if !docker_available() {
+        return;
+    }
     let etcd = EtcdFixture::start();
     let prefix = etcd.unique_prefix();
     let upstream = MockUpstream::start(MockUpstreamConfig {

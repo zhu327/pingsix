@@ -49,10 +49,9 @@ impl ResponseBuilder {
             .body(message.as_bytes().to_vec())
             .unwrap_or_else(|e| {
                 log::error!("Failed to build error response: {e}");
-                Response::builder()
-                    .status(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(b"Internal Server Error".to_vec())
-                    .expect("Failed to build fallback error response")
+                let mut resp = Response::new(b"Internal Server Error".to_vec());
+                *resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+                resp
             })
     }
 

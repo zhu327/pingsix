@@ -25,8 +25,10 @@ pub fn create_redirect_plugin(cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyPlugin
     for i in (0..config.regex_uri.len()).step_by(2) {
         let pattern = &config.regex_uri[i];
         let template = &config.regex_uri[i + 1];
-        // Validation ensures regex is valid, so expect is safe
-        let re = Regex::new(pattern).expect("Regex validation should ensure this pattern is valid");
+        // Validation ensures regex is valid; propagate error if it somehow isn't
+        let re = Regex::new(pattern).map_err(|e| {
+            ProxyError::Plugin(format!("Invalid redirect regex pattern '{pattern}': {e}"))
+        })?;
         regex_patterns.push((re, template.clone()));
     }
 

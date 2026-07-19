@@ -73,10 +73,12 @@ impl ProxyPlugin for PluginBrotli {
         session: &mut Session,
         _ctx: &mut ProxyContext,
     ) -> Result<()> {
-        let resp_compression = session
+        let Some(resp_compression) = session
             .downstream_modules_ctx
             .get_mut::<ResponseCompression>()
-            .expect("ResponseCompression module added");
+        else {
+            return Ok(());
+        };
 
         resp_compression.adjust_algorithm_level(Algorithm::Brotli, self.config.comp_level);
 

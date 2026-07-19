@@ -128,7 +128,9 @@ impl ApiError {
                     .status(400)
                     .header("Content-Type", "application/json")
                     .body(response_body.to_string().into_bytes())
-                    .expect("Failed to build HTTP error response")
+                    .unwrap_or_else(|_| {
+                        CommonErrors::internal_server_error("Internal server error")
+                    })
             }
             ProxyError::Validation(_) | ProxyError::Configuration(_) => {
                 CommonErrors::bad_request(&proxy_err.to_string())
@@ -408,10 +410,10 @@ pub struct AdminHttpApp {
 }
 
 impl AdminHttpApp {
-    pub fn new(cfg: &Pingsix) -> Self {
+    pub fn new(admin: Admin, etcd_cfg: crate::config::Etcd) -> Self {
         let mut this = Self {
-            config: cfg.admin.clone().expect("Admin config must be present"),
-            etcd: EtcdClientWrapper::new(cfg.etcd.clone().expect("Etcd config must be present")),
+            config: admin,
+            etcd: EtcdClientWrapper::new(etcd_cfg),
             router: Router::new(),
         };
 
@@ -452,12 +454,14 @@ impl AdminHttpApp {
         self
     }
 
-    pub fn admin_http_service(cfg: &Pingsix) -> Service<Self> {
-        let app = Self::new(cfg);
+    pub fn admin_http_service(cfg: &Pingsix) -> Option<Service<Self>> {
+        let admin = cfg.admin.clone()?;
+        let etcd_cfg = cfg.etcd.clone()?;
+        let app = Self::new(admin, etcd_cfg);
         let addr = &app.config.address.to_string();
         let mut service = Service::new("Admin HTTP".to_string(), app);
         service.add_tcp(addr);
-        service
+        Some(service)
     }
 }
 

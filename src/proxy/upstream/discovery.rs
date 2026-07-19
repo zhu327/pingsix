@@ -25,16 +25,15 @@ use crate::{
 
 static GLOBAL_RESOLVER: OnceCell<Arc<TokioResolver>> = OnceCell::new();
 
-fn get_global_resolver() -> Arc<TokioResolver> {
+fn get_global_resolver() -> ProxyResult<Arc<TokioResolver>> {
     GLOBAL_RESOLVER
-        .get_or_init(|| {
-            Arc::new(
-                TokioResolver::builder_tokio()
-                    .expect("Failed to create DNS resolver builder")
-                    .build(),
-            )
+        .get_or_try_init(|| {
+            let builder = TokioResolver::builder_tokio().map_err(|e| {
+                ProxyError::Configuration(format!("Failed to create DNS resolver builder: {e}"))
+            })?;
+            Ok(Arc::new(builder.build()))
         })
-        .clone()
+        .cloned()
 }
 
 /// Loads a client certificate and key from PEM format strings.
@@ -393,7 +392,7 @@ impl TryFrom<Upstream> for HybridDiscovery {
             } else {
                 // It's a domain name
                 // Handle DNS discovery for domain names
-                let resolver = get_global_resolver();
+                let resolver = get_global_resolver()?;
                 let discovery = DnsDiscovery::new(
                     host,
                     port,

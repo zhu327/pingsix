@@ -71,6 +71,9 @@ fn boot_with_graph() -> (
 
 #[test]
 fn admin1_put_get_roundtrip() {
+    if !docker_available() {
+        return;
+    }
     let (_etcd, _up, listen_port, _status, admin_port, config_path, mut child) = boot_with_graph();
 
     let got = admin_get(admin_port, "routes", "1");
@@ -111,6 +114,9 @@ fn admin1_put_get_roundtrip() {
 
 #[test]
 fn admin2_concurrent_put_one_conflicts() {
+    if !docker_available() {
+        return;
+    }
     let (_etcd, _up, listen_port, _status, admin_port, config_path, mut child) = boot_with_graph();
 
     // Second upstream so both concurrent route updates are individually valid.
@@ -182,6 +188,9 @@ fn admin2_concurrent_put_one_conflicts() {
 
 #[test]
 fn admin3_delete_referenced_upstream_conflicts() {
+    if !docker_available() {
+        return;
+    }
     let (_etcd, _up, listen_port, _status, admin_port, config_path, mut child) = boot_with_graph();
 
     let del = admin_delete(admin_port, "upstreams", "1");
@@ -198,6 +207,9 @@ fn admin3_delete_referenced_upstream_conflicts() {
 
 #[test]
 fn admin4_get_redacts_secrets() {
+    if !docker_available() {
+        return;
+    }
     let (_etcd, _up, listen_port, _status, admin_port, config_path, mut child) = boot_with_graph();
 
     let put = admin_put(
@@ -272,6 +284,9 @@ fn admin4_get_redacts_secrets() {
 
 #[test]
 fn admin5_missing_api_key_forbidden() {
+    if !docker_available() {
+        return;
+    }
     let (_etcd, _up, listen_port, _status, admin_port, config_path, mut child) = boot_with_graph();
 
     let resp = http_exchange(

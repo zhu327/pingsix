@@ -84,6 +84,9 @@ fn warm_and_assert_cached(listen_port: u16, upstream: &MockUpstream, needle: &st
 
 #[test]
 fn cache_nodes_switch_invalidates_namespace() {
+    if !docker_available() {
+        return;
+    }
     let etcd = EtcdFixture::start();
     let prefix = etcd.unique_prefix();
     let upstream_a = MockUpstream::start(MockUpstreamConfig {
@@ -114,6 +117,9 @@ fn cache_nodes_switch_invalidates_namespace() {
 
 #[test]
 fn cache_upstream_host_switch_invalidates_namespace() {
+    if !docker_available() {
+        return;
+    }
     let etcd = EtcdFixture::start();
     let prefix = etcd.unique_prefix();
     let upstream = MockUpstream::start(MockUpstreamConfig {
@@ -153,6 +159,9 @@ fn cache_upstream_host_switch_invalidates_namespace() {
 
 #[test]
 fn cache_response_plugin_switch_invalidates_namespace() {
+    if !docker_available() {
+        return;
+    }
     let etcd = EtcdFixture::start();
     let prefix = etcd.unique_prefix();
     let upstream = MockUpstream::start(MockUpstreamConfig {

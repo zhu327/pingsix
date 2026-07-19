@@ -8,6 +8,9 @@ use common::*;
 
 #[test]
 fn graceful_shutdown_etcd_after_publish() {
+    if !docker_available() {
+        return;
+    }
     let etcd = EtcdFixture::start();
     let prefix = etcd.unique_prefix();
     let upstream = MockUpstream::start(MockUpstreamConfig {
@@ -63,6 +66,9 @@ fn graceful_shutdown_etcd_after_publish() {
 
 #[test]
 fn graceful_shutdown_during_dns_failure_prep() {
+    if !docker_available() {
+        return;
+    }
     let etcd = EtcdFixture::start();
     let prefix = etcd.unique_prefix();
     let upstream = MockUpstream::start(MockUpstreamConfig::default());
