@@ -588,6 +588,8 @@ pub struct Timeout {
 pub struct Route {
     #[serde(default)]
     pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
 
     pub uri: Option<String>,
     #[serde(default)]
@@ -650,6 +652,8 @@ impl Route {
 pub struct Upstream {
     #[serde(default)]
     pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
     pub retries: Option<u32>,
     pub retry_timeout: Option<u64>,
     #[validate(nested)]
@@ -884,6 +888,8 @@ pub enum UpstreamPassHost {
 pub struct Service {
     #[serde(default)]
     pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
     #[serde(default)]
     pub plugins: HashMap<String, JsonValue>,
     pub upstream: Option<Upstream>,

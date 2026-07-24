@@ -343,6 +343,7 @@ mod tests {
         }
         Upstream {
             id: id.to_string(),
+            name: None,
             retries: None,
             retry_timeout: None,
             timeout: None,
@@ -411,6 +412,7 @@ mod tests {
             "r1".into(),
             crate::config::Route {
                 id: "r1".into(),
+                name: None,
                 uri: Some("/".into()),
                 uris: vec![],
                 methods: vec![],
@@ -456,6 +458,7 @@ mod tests {
             "r1".into(),
             crate::config::Route {
                 id: "r1".into(),
+                name: None,
                 uri: Some("/".into()),
                 uris: vec![],
                 methods: vec![],

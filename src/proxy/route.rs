@@ -139,6 +139,8 @@ pub struct ProxyRoute {
     pub plugins: Vec<Arc<dyn ProxyPlugin>>,
     resolved_upstream: Option<Arc<dyn UpstreamSelector>>,
     effective_hosts: Vec<String>,
+    /// Human-readable name of the bound service, when configured.
+    service_name: Option<String>,
     plugin_executor: Arc<ProxyPluginExecutor>,
     pub inline_upstream: Option<Arc<ProxyUpstream>>,
     /// Fingerprint of route/service identity and response-affecting plugins.
@@ -248,11 +250,14 @@ impl ProxyRoute {
         let cache_namespace_fingerprint =
             route_cache_namespace_fingerprint(&route, service.as_deref());
 
+        let service_name = service.as_ref().and_then(|s| s.inner.name.clone());
+
         Ok(Self {
             inner: route,
             plugins,
             resolved_upstream,
             effective_hosts,
+            service_name,
             plugin_executor,
             inline_upstream,
             cache_namespace_fingerprint,
@@ -276,8 +281,16 @@ impl RouteContext for ProxyRoute {
         &self.inner.id
     }
 
+    fn name(&self) -> Option<&str> {
+        self.inner.name.as_deref()
+    }
+
     fn service_id(&self) -> Option<&str> {
         self.inner.service_id.as_deref()
+    }
+
+    fn service_name(&self) -> Option<&str> {
+        self.service_name.as_deref()
     }
 
     fn uri_template(&self) -> Option<&str> {
@@ -766,6 +779,7 @@ mod tests {
     fn test_route_without_service_and_without_plugins_reuses_shared_executor() {
         let route_cfg = config::Route {
             id: "r1".to_string(),
+            name: None,
             uri: Some("/".to_string()),
             uris: vec![],
             methods: vec![],

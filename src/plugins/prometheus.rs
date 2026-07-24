@@ -48,10 +48,10 @@ static STATUS: Lazy<IntCounterVec> = Lazy::new(|| {
         "HTTP status codes per service in pingsix",
         &[
             "code",          // HTTP status code
-            "route",         // Route ID
+            "route",         // Route ID (or name when prefer_name)
             "path_template", // Normalized path template to avoid high cardinality
             "matched_host",  // Matched Host
-            "service",       // Service ID
+            "service",       // Service ID (or name when prefer_name)
             "node",          // Node ID
         ]
     )
@@ -76,8 +76,8 @@ static BANDWIDTH: Lazy<IntCounterVec> = Lazy::new(|| {
         "Total bandwidth in bytes consumed per service in pingsix",
         &[
             "type",    // ingress/egress
-            "route",   // Route ID
-            "service", // Service ID
+            "route",   // Route ID (or name when prefer_name)
+            "service", // Service ID (or name when prefer_name)
             "node",    // Node ID
         ]
     )
@@ -126,6 +126,12 @@ pub struct PrometheusConfig {
     /// Default: 100
     #[serde(default = "PrometheusConfig::default_max_unique_hosts")]
     pub max_unique_hosts: usize,
+
+    /// When true, export route/service `name` in metric labels instead of `id`.
+    /// Falls back to `id` when name is missing or empty.
+    /// Default: false
+    #[serde(default)]
+    pub prefer_name: bool,
 }
 
 impl PrometheusConfig {
@@ -148,6 +154,7 @@ impl Default for PrometheusConfig {
             max_label_length: Self::default_max_label_length(),
             max_unique_paths: Self::default_max_unique_paths(),
             max_unique_hosts: Self::default_max_unique_hosts(),
+            prefer_name: false,
         }
     }
 }
@@ -199,8 +206,12 @@ impl ProxyPlugin for PluginPrometheus {
             .response_written()
             .map_or("", |resp| resp.status.as_str());
 
-        // Extract route information, falling back to empty string if not present
-        let route_id = route.as_ref().map_or_else(|| "", |r| r.id());
+        // Route/service labels: use name when prefer_name is set, else id.
+        // Empty/missing names fall back to id (APISIX-compatible prefer_name).
+        let route_label = route.as_ref().map_or_else(
+            || "",
+            |r| prefer_label(self.config.prefer_name, r.name(), r.id()),
+        );
 
         // Use path template to avoid high cardinality issues
         let path_template = self.normalize_path_template(session, ctx);
@@ -214,9 +225,13 @@ impl ProxyPlugin for PluginPrometheus {
         });
 
         // Extract service, falling back to "unknown" if service_id is None
-        let service = route
-            .as_ref()
-            .map_or_else(|| "unknown", |r| r.service_id().unwrap_or("unknown"));
+        let service = route.as_ref().map_or_else(
+            || "unknown",
+            |r| match r.service_id() {
+                Some(id) => prefer_label(self.config.prefer_name, r.service_name(), id),
+                None => "unknown",
+            },
+        );
 
         // Extract node from context variables (assumes HttpService::upstream_peer sets ctx["upstream"]) as String
         let node = ctx
@@ -228,7 +243,7 @@ impl ProxyPlugin for PluginPrometheus {
         STATUS
             .with_label_values(&[
                 code,
-                route_id,
+                route_label,
                 &path_template,
                 &host,
                 service,
@@ -239,27 +254,41 @@ impl ProxyPlugin for PluginPrometheus {
         // Record request latency
         let elapsed_ms = ctx.elapsed_ms_f64();
         LATENCY
-            .with_label_values(&["request", route_id, service, node.as_ref()])
+            .with_label_values(&["request", route_label, service, node.as_ref()])
             .observe(elapsed_ms);
 
         // Record bandwidth metrics
         BANDWIDTH
-            .with_label_values(&["ingress", route_id, service, node.as_ref()])
+            .with_label_values(&["ingress", route_label, service, node.as_ref()])
             .inc_by(session.body_bytes_read() as _);
 
         BANDWIDTH
-            .with_label_values(&["egress", route_id, service, node.as_ref()])
+            .with_label_values(&["egress", route_label, service, node.as_ref()])
             .inc_by(session.body_bytes_sent() as _);
 
         // Record request and response sizes
         REQUEST_SIZE
-            .with_label_values(&[route_id, service])
+            .with_label_values(&[route_label, service])
             .observe(session.body_bytes_read() as f64);
 
         RESPONSE_SIZE
-            .with_label_values(&[route_id, service])
+            .with_label_values(&[route_label, service])
             .observe(session.body_bytes_sent() as f64);
     }
+}
+
+/// Select a metric label value, preferring `name` when requested.
+///
+/// Empty or missing names fall back to `id` so metrics remain labeled.
+fn prefer_label<'a>(prefer_name: bool, name: Option<&'a str>, id: &'a str) -> &'a str {
+    if prefer_name {
+        if let Some(name) = name {
+            if !name.is_empty() {
+                return name;
+            }
+        }
+    }
+    id
 }
 
 /// Select the `matched_host` label from a route's effective hosts.
@@ -383,10 +412,33 @@ mod tests {
                 max_label_length,
                 max_unique_paths,
                 max_unique_hosts,
+                prefer_name: false,
             },
             seen_paths: Arc::new(DashMap::new()),
             seen_hosts: Arc::new(DashMap::new()),
         }
+    }
+
+    #[test]
+    fn prefer_label_uses_name_when_enabled() {
+        assert_eq!(
+            prefer_label(true, Some("my-route"), "route-1"),
+            "my-route"
+        );
+    }
+
+    #[test]
+    fn prefer_label_falls_back_to_id_when_name_missing() {
+        assert_eq!(prefer_label(true, None, "route-1"), "route-1");
+        assert_eq!(prefer_label(true, Some(""), "route-1"), "route-1");
+    }
+
+    #[test]
+    fn prefer_label_uses_id_when_disabled() {
+        assert_eq!(
+            prefer_label(false, Some("my-route"), "route-1"),
+            "route-1"
+        );
     }
 
     #[test]

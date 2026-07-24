@@ -414,6 +414,7 @@ mod tests {
         nodes.insert("127.0.0.1:18080".to_string(), 1);
         config::Upstream {
             id: id.to_string(),
+            name: None,
             retries: None,
             retry_timeout: None,
             timeout,

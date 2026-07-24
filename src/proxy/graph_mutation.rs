@@ -168,6 +168,7 @@ mod tests {
         nodes.insert(node.to_string(), 1u32);
         let upstream = Upstream {
             id: id.to_string(),
+            name: None,
             retries: None,
             retry_timeout: None,
             timeout: None,
