@@ -1168,6 +1168,7 @@ mod tests {
         nodes.insert(node.to_string(), 1);
         Upstream {
             id: id.to_string(),
+            name: None,
             retries: None,
             retry_timeout: None,
             timeout: None,
@@ -1190,6 +1191,7 @@ mod tests {
             "r1".into(),
             crate::config::Route {
                 id: "r1".into(),
+                name: None,
                 uri: Some("/".into()),
                 uris: vec![],
                 methods: vec![],
@@ -1215,6 +1217,7 @@ mod tests {
             "r1".into(),
             crate::config::Route {
                 id: "r1".into(),
+                name: None,
                 uri: Some("/".into()),
                 uris: vec![],
                 methods: vec![],
@@ -1238,6 +1241,7 @@ mod tests {
             "s1".into(),
             crate::config::Service {
                 id: "s1".into(),
+                name: None,
                 plugins: Default::default(),
                 upstream: None,
                 upstream_id: Some("missing".into()),
@@ -1267,6 +1271,7 @@ mod tests {
             "r1".into(),
             crate::config::Route {
                 id: "r1".into(),
+                name: None,
                 uri: Some("/".into()),
                 uris: vec![],
                 methods: vec![],
@@ -1307,6 +1312,7 @@ mod tests {
             "s1".into(),
             crate::config::Service {
                 id: "s1".into(),
+                name: None,
                 plugins,
                 upstream: None,
                 upstream_id: Some("u1".into()),
@@ -1366,6 +1372,7 @@ mod tests {
             "r1".into(),
             crate::config::Route {
                 id: "r1".into(),
+                name: None,
                 uri: Some("/".into()),
                 uris: vec![],
                 methods: vec![],
@@ -1405,6 +1412,7 @@ mod tests {
             "r1".into(),
             crate::config::Route {
                 id: "r1".into(),
+                name: None,
                 uri: Some("/".into()),
                 uris: vec![],
                 methods: vec![],
@@ -1430,6 +1438,7 @@ mod tests {
             "s1".into(),
             crate::config::Service {
                 id: "s1".into(),
+                name: None,
                 plugins: Default::default(),
                 upstream: None,
                 upstream_id: Some("u1".into()),
@@ -1440,6 +1449,7 @@ mod tests {
             "r1".into(),
             crate::config::Route {
                 id: "r1".into(),
+                name: None,
                 uri: Some("/".into()),
                 uris: vec![],
                 methods: vec![],
@@ -1584,6 +1594,7 @@ mod tests {
             "r1".into(),
             crate::config::Route {
                 id: "r1".into(),
+                name: None,
                 uri: Some("/x".into()),
                 uris: vec![],
                 methods: vec![],
@@ -1620,6 +1631,7 @@ mod tests {
             "r1".into(),
             Route {
                 id: "r1".into(),
+                name: None,
                 uri: Some("/".into()),
                 uris: vec![],
                 methods: vec![],
@@ -1663,6 +1675,7 @@ mod tests {
             "s1".into(),
             crate::config::Service {
                 id: "s1".into(),
+                name: None,
                 plugins: Default::default(),
                 upstream: None,
                 upstream_id: Some("u1".into()),

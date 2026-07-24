@@ -840,6 +840,7 @@ mod tests {
             "r1".into(),
             crate::config::Route {
                 id: "r1".into(),
+                name: None,
                 uri: Some("/".into()),
                 uris: vec![],
                 methods: vec![],

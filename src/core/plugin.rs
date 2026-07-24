@@ -54,8 +54,18 @@ pub trait RouteContext: Send + Sync {
     /// Get the route identifier
     fn id(&self) -> &str;
 
+    /// Optional human-readable route name from configuration.
+    fn name(&self) -> Option<&str> {
+        None
+    }
+
     /// Get the service ID if available
     fn service_id(&self) -> Option<&str>;
+
+    /// Optional human-readable service name from the bound service configuration.
+    fn service_name(&self) -> Option<&str> {
+        None
+    }
 
     /// Return the configured URI template used to match this route.
     fn uri_template(&self) -> Option<&str>;

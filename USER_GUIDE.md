@@ -85,6 +85,7 @@ Routes define how incoming requests are matched and processed. Each route specif
 - **Matching criteria**: URI patterns, hosts, HTTP methods
 - **Destination**: Where to forward the request (upstream or service)
 - **Plugins**: Additional processing to apply
+- **Name** (optional): Human-readable name
 
 ### Upstreams
 
@@ -92,6 +93,7 @@ Upstreams define backend server pools with:
 - **Nodes**: List of backend servers with weights
 - **Load balancing**: Algorithm for distributing requests
 - **Health checks**: Monitoring backend server health
+- **Name** (optional): Human-readable name
 
 ### Services
 
@@ -99,6 +101,7 @@ Services group upstreams and plugins for reusability:
 - **Upstream reference**: Link to an upstream configuration
 - **Plugin configuration**: Shared plugins across multiple routes
 - **Host matching**: Optional host-based routing
+- **Name** (optional): Human-readable name
 
 ### Global Rules
 
@@ -1564,8 +1567,10 @@ plugins:
   prometheus:
     max_label_length: 100         # Maximum path label length (default: 100)
     max_unique_paths: 1000        # Maximum unique paths tracked (default: 1000)
+    max_unique_hosts: 100         # Maximum unique matched_host labels (default: 100)
+    prefer_name: false            # Use route/service name instead of id in labels
   # OR zero-configuration
-  prometheus: {}                  # Use defaults: max_label_length=100, max_unique_paths=1000
+  prometheus: {}                  # Use defaults above
 ```
 
 **Prometheus Plugin Configuration:**
@@ -1574,6 +1579,8 @@ plugins:
 |-----------|------|---------|-------------|
 | `max_label_length` | integer | 100 | Maximum length for path template labels. Paths exceeding this length will be truncated with "..." suffix to prevent memory issues and Prometheus label size limits. |
 | `max_unique_paths` | integer | 1000 | Maximum number of unique normalized path templates to track. Once this limit is reached, new paths will be collapsed to `/...` pattern to prevent metric cardinality explosion. |
+| `max_unique_hosts` | integer | 100 | Maximum number of unique `matched_host` label values to track. Additional hosts collapse to `*` to bound cardinality. |
+| `prefer_name` | boolean | false | When `true`, export route/service `name` in metric labels instead of `id`. Falls back to `id` when name is missing or empty. Ensure names are unique across routes/services to avoid misleading aggregated metrics. |
 
 **Prometheus Plugin Features:**
 - **Cardinality Control**: Limits metric cardinality by normalizing URI paths and enforcing label length limits
@@ -1582,6 +1589,7 @@ plugins:
   - UUIDs: `/items/550e8400-e29b-41d4-a716-446655440000` → `/items/{uuid}`
   - Hash values: `/files/a1b2c3d4e5f6...` → `/files/{hash}`
   - Deep paths: Limits to 8 segments, e.g., `/a/b/c/d/e/f/g/h/i` → `/a/b/c/d/e/f/g/...`
+- **Prefer Name**: Optionally labels metrics with route/service names for readable dashboards (APISIX-compatible `prefer_name`)
 - **Label Length Limit**: Truncates long path labels to `max_label_length` characters (with "..." suffix) to prevent memory issues
 - **Path Tracking Limit**: After tracking `max_unique_paths` unique normalized paths, new paths are collapsed to `/...` to prevent unbounded metric growth
 - **Efficient Tracking**: Uses DashMap for thread-safe path deduplication with minimal overhead
@@ -1607,6 +1615,7 @@ plugins:
   - Medium APIs (100-500 endpoints): 1000-5000
   - Large APIs (> 500 endpoints): 5000-10000
   - Monitor actual unique path count in your metrics to tune this value
+- **prefer_name**: Prefer unique names when enabled; duplicate names merge series and can mislead dashboards
 - **Monitoring**: Regularly check metric cardinality in Prometheus using queries like:
   ```promql
   count(http_status)
@@ -1947,6 +1956,8 @@ global_rules:
       prometheus:
         max_label_length: 100      # Optional: Max path label length (default: 100)
         max_unique_paths: 1000     # Optional: Max unique paths (default: 1000)
+        max_unique_hosts: 100      # Optional: Max unique matched_host values (default: 100)
+        prefer_name: false         # Optional: use route/service name instead of id
       # OR use zero-configuration with defaults
       prometheus: {}
 ```
@@ -1954,6 +1965,8 @@ global_rules:
 **Plugin Configuration Parameters:**
 - `max_label_length` (default: 100) - Maximum length for path template labels. Paths exceeding this length are truncated with "..." suffix.
 - `max_unique_paths` (default: 1000) - Maximum number of unique normalized paths to track. After this limit, new paths are collapsed to `/...`.
+- `max_unique_hosts` (default: 100) - Maximum number of unique `matched_host` labels. Additional hosts collapse to `*`.
+- `prefer_name` (default: false) - When `true`, `route`/`service` labels use the resource `name` instead of `id` (falls back to `id` if name is missing or empty).
 
 **Available Metrics:**
 - `http_requests_total` (Counter) - Total number of client requests since PingSIX started
@@ -1968,8 +1981,8 @@ global_rules:
 
 **Metric Labels:**
 - `path_template` - Normalized URI path to avoid high cardinality (e.g., `/users/{id}` instead of `/users/123`)
-- `route` - Route ID
-- `service` - Service ID
+- `route` - Route ID, or route name when `prefer_name` is `true`
+- `service` - Service ID, or service name when `prefer_name` is `true`
 - `node` - Upstream node address
 - `matched_host` - Matched host from route configuration
 - `type` - Request type (for latency) or traffic direction (ingress/egress for bandwidth)
