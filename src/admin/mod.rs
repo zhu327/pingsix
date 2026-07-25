@@ -301,6 +301,7 @@ impl<T: AdminResource> Handler for ResourceHandler<T> {
         // Use generic resource validation
         T::validate_resource(&body_data)?;
 
+        let body_data = compact_json_bytes(body_data)?;
         let committed = graph_mutation::put_resource(etcd, &key, body_data).await?;
 
         let body = serde_json::json!({ "revision": committed });
@@ -668,6 +669,14 @@ fn redact_keys_array(v: serde_json::Value) -> serde_json::Value {
     }
 }
 
+/// Re-serialize JSON to compact (single-line) form for etcd storage.
+fn compact_json_bytes(value: Vec<u8>) -> ApiResult<Vec<u8>> {
+    let parsed: serde_json::Value = serde_json::from_slice(&value)
+        .map_err(|e| ApiError::ValidationError(format!("Invalid JSON: {e}")))?;
+    serde_json::to_vec(&parsed)
+        .map_err(|e| ApiError::ValidationError(format!("Failed to compact JSON: {e}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -855,5 +864,21 @@ mod tests {
             },
         );
         assert!(CandidateSnapshot::build(set).is_err());
+    }
+
+    #[test]
+    fn compact_json_bytes_collapses_pretty_input() {
+        let pretty = br#"{
+            "id": "1",
+            "nodes": ["b", "a"]
+            }"#;
+        let compact = compact_json_bytes(pretty.to_vec()).unwrap();
+        let s = String::from_utf8(compact).unwrap();
+        assert!(!s.contains('\n'));
+        assert!(!s.contains(' '));
+        // array order preserved
+        assert!(s.contains(r#"["b","a"]"#) || s.contains(r#"[ "b", "a" ]"#) == false);
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["nodes"], serde_json::json!(["b", "a"]));
     }
 }
