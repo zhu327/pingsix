@@ -421,10 +421,7 @@ mod tests {
 
     #[test]
     fn prefer_label_uses_name_when_enabled() {
-        assert_eq!(
-            prefer_label(true, Some("my-route"), "route-1"),
-            "my-route"
-        );
+        assert_eq!(prefer_label(true, Some("my-route"), "route-1"), "my-route");
     }
 
     #[test]
@@ -435,10 +432,7 @@ mod tests {
 
     #[test]
     fn prefer_label_uses_id_when_disabled() {
-        assert_eq!(
-            prefer_label(false, Some("my-route"), "route-1"),
-            "route-1"
-        );
+        assert_eq!(prefer_label(false, Some("my-route"), "route-1"), "route-1");
     }
 
     #[test]
