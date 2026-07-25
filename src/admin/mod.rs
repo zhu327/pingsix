@@ -877,7 +877,7 @@ mod tests {
         assert!(!s.contains('\n'));
         assert!(!s.contains(' '));
         // array order preserved
-        assert!(s.contains(r#"["b","a"]"#) || s.contains(r#"[ "b", "a" ]"#) == false);
+        assert!(s.contains(r#"["b","a"]"#) || !s.contains(r#"[ "b", "a" ]"#));
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
         assert_eq!(v["nodes"], serde_json::json!(["b", "a"]));
     }
