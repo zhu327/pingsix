@@ -295,7 +295,8 @@ mod tests {
             ]),
         );
         // Hand-encrypt to verify leaf shapes without relying on process keyring.
-        for key in ["password"] {
+        {
+            let key = "password";
             let s = obj[key].as_str().unwrap().to_string();
             obj.insert(key.into(), JsonValue::String(kr.encrypt(&s).unwrap()));
         }
