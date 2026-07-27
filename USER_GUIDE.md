@@ -140,7 +140,7 @@ routes: []          # Route configurations
 upstreams: []       # Upstream server pools
 services: []        # Service definitions
 global_rules: []    # Global plugin rules
-ssls: []           # SSL certificates
+ssls: []            # SSL certificates
 ```
 
 ### Listeners
