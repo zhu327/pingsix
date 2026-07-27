@@ -21,6 +21,7 @@ RUN mkdir src && \
     rm -rf src
 
 COPY src ./src
+COPY pingsix-macros ./
 
 RUN cargo build --release --locked
 
