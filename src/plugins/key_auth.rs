@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use http::StatusCode;
 use pingora_error::Result;
 use pingora_proxy::Session;
+use pingsix_macros::EncryptFields;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use validator::Validate;
@@ -38,7 +39,8 @@ pub fn create_key_auth_plugin(cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyPlugin
 }
 
 /// Configuration for the Key Auth plugin.
-#[derive(Default, Debug, Serialize, Deserialize, Validate)]
+#[derive(Default, Debug, Serialize, Deserialize, Validate, EncryptFields)]
+#[encrypt_fields(export)]
 struct PluginConfig {
     /// HTTP header field name containing the API key (default: `apikey`).
     #[serde(default = "PluginConfig::default_header")]
@@ -52,6 +54,7 @@ struct PluginConfig {
     /// For backward compatibility, single key as string.
     /// No `length(min = 1)` here — the struct-level TryFrom ensures
     /// that at least one of `key` or `keys` is non-empty.
+    #[encrypt]
     #[serde(skip_serializing_if = "Option::is_none")]
     key: Option<String>,
 
@@ -59,6 +62,7 @@ struct PluginConfig {
     /// Takes precedence over single `key` if both are provided.
     /// No `length(min = 1)` here — the struct-level validator ensures
     /// that at least one of `key` or `keys` is non-empty.
+    #[encrypt]
     #[serde(default)]
     keys: Vec<String>,
 
@@ -210,6 +214,45 @@ impl PluginKeyAuth {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::encryption::{EncryptFields, CIPHERTEXT_PREFIX};
+
+    #[test]
+    fn transform_secrets_touches_key_and_keys_not_header() {
+        let mut cfg = serde_json::json!({
+            "header": "apikey",
+            "key": "single-secret",
+            "keys": ["a", "b"],
+        });
+        // Encryption disabled → plaintext pass-through.
+        PluginConfig::transform_secrets(&mut cfg, false).unwrap();
+        assert_eq!(cfg["header"], "apikey");
+        assert_eq!(cfg["key"], "single-secret");
+        assert_eq!(cfg["keys"], serde_json::json!(["a", "b"]));
+    }
+
+    #[test]
+    fn transform_secrets_visits_keys_array_elements() {
+        let mut cfg = serde_json::json!({
+            "header": "apikey",
+            "keys": [format!("{CIPHERTEXT_PREFIX}deadbeef"), "plain"],
+        });
+        // Ciphertext with encryption disabled proves the array walk ran.
+        let err = PluginConfig::transform_secrets(&mut cfg, false).unwrap_err();
+        assert!(
+            err.to_string().contains("data_encryption is disabled")
+                || err.to_string().contains("Encrypted value"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn secrets_transform_const_matches_trait_method() {
+        let mut via_const = serde_json::json!({ "keys": ["s"] });
+        let mut via_trait = via_const.clone();
+        (SECRETS_TRANSFORM)(&mut via_const, false).unwrap();
+        PluginConfig::transform_secrets(&mut via_trait, false).unwrap();
+        assert_eq!(via_const, via_trait);
+    }
 
     #[test]
     fn query_auth_is_disabled_by_default() {

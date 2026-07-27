@@ -10,6 +10,7 @@ use http::Method;
 use once_cell::sync::Lazy;
 use pingora::server::configuration::{Opt, ServerConf};
 use pingora_error::{Error, ErrorType::*, OrErr, Result};
+use pingsix_macros::EncryptFields;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -223,6 +224,39 @@ pub struct Pingsix {
 
     #[validate(nested)]
     pub defaults: Option<Defaults>,
+
+    /// Encrypt sensitive fields (e.g. SSL private keys) when storing them in etcd.
+    #[validate(nested)]
+    pub data_encryption: Option<DataEncryption>,
+}
+
+/// Keyring used to encrypt/decrypt sensitive configuration fields in etcd.
+///
+/// The first keyring entry encrypts new values. On read, every entry is tried
+/// in order so rotated keys can still decrypt older ciphertext.
+#[derive(Clone, Default, Debug, Serialize, Deserialize, Validate)]
+#[validate(schema(function = "DataEncryption::validate_keyring"))]
+#[serde(deny_unknown_fields)]
+pub struct DataEncryption {
+    #[serde(default)]
+    pub enable: bool,
+    #[serde(default)]
+    pub keyring: Vec<String>,
+}
+
+impl DataEncryption {
+    fn validate_keyring(&self) -> Result<(), ValidationError> {
+        if !self.enable {
+            return Ok(());
+        }
+        if self.keyring.is_empty() {
+            return Err(ValidationError::new("data_encryption_keyring_required"));
+        }
+        if self.keyring.iter().any(|k| k.is_empty()) {
+            return Err(ValidationError::new("data_encryption_keyring_entry_empty"));
+        }
+        Ok(())
+    }
 }
 
 /// Global default settings applied when a route/upstream does not override them.
@@ -314,6 +348,36 @@ pub fn init_dns_refresh_interval(interval: Option<u64>) {
 /// Optional DNS refresh interval for published upstream load balancers.
 pub fn dns_refresh_interval() -> Option<u64> {
     DNS_REFRESH_INTERVAL.get().cloned().flatten()
+}
+
+/// Install the process-wide data-encryption keyring used when reading/writing
+/// sensitive fields in etcd. First call wins.
+pub fn init_data_encryption(enable: bool, keyring: &[String]) -> crate::core::ProxyResult<()> {
+    crate::utils::encryption::init(enable, keyring)
+}
+
+/// Encrypt (`encrypting = true`) or decrypt sensitive fields of a resource's
+/// JSON representation, dispatched by etcd resource type.
+///
+/// This is the single wiring point shared by the admin write path (encrypt) and
+/// the control-plane load path (decrypt). Each resource type delegates to its
+/// own `#[derive(EncryptFields)]` implementation, so marking a new secret field
+/// with `#[encrypt]` on the struct is all that is required — no changes here.
+/// Unknown resource types pass through unchanged.
+pub fn transform_resource_secrets(
+    resource_type: &str,
+    value: &mut JsonValue,
+    encrypting: bool,
+) -> crate::core::ProxyResult<()> {
+    use crate::utils::encryption::EncryptFields;
+    match resource_type {
+        "ssls" => SSL::transform_secrets(value, encrypting),
+        "upstreams" => Upstream::transform_secrets(value, encrypting),
+        "routes" => Route::transform_secrets(value, encrypting),
+        "services" => Service::transform_secrets(value, encrypting),
+        "global_rules" => GlobalRule::transform_secrets(value, encrypting),
+        _ => Ok(()),
+    }
 }
 
 /// Finite peer-I/O fallback used whenever neither a route nor upstream nor
@@ -564,10 +628,11 @@ pub struct Tls {
     pub key_path: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Validate, EncryptFields)]
 pub struct UpstreamTls {
     #[validate(length(min = 1))]
     pub client_cert: String,
+    #[encrypt]
     #[validate(length(min = 1))]
     pub client_key: String,
 }
@@ -583,7 +648,7 @@ pub struct Timeout {
 }
 
 #[serde_as]
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Validate, EncryptFields)]
 #[validate(schema(function = "Route::validate"))]
 pub struct Route {
     #[serde(default)]
@@ -604,8 +669,10 @@ pub struct Route {
     pub priority: u32,
 
     #[serde(default)]
+    #[encrypt(plugins)]
     pub plugins: HashMap<String, JsonValue>,
     #[validate(nested)]
+    #[encrypt(nested)]
     pub upstream: Option<Upstream>,
     pub upstream_id: Option<String>,
     pub service_id: Option<String>,
@@ -647,7 +714,7 @@ impl Route {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Validate, EncryptFields)]
 #[validate(schema(function = "Upstream::validate_upstream_host"))]
 pub struct Upstream {
     #[serde(default)]
@@ -673,6 +740,7 @@ pub struct Upstream {
     #[serde(default)]
     pub pass_host: UpstreamPassHost,
     pub upstream_host: Option<String>,
+    #[encrypt(nested)]
     #[validate(nested)]
     pub tls: Option<UpstreamTls>,
 }
@@ -883,7 +951,7 @@ pub enum UpstreamPassHost {
     NODE,
 }
 
-#[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
+#[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize, Validate, EncryptFields)]
 #[validate(schema(function = "Service::validate_upstream"))]
 pub struct Service {
     #[serde(default)]
@@ -891,7 +959,9 @@ pub struct Service {
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
+    #[encrypt(plugins)]
     pub plugins: HashMap<String, JsonValue>,
+    #[encrypt(nested)]
     pub upstream: Option<Upstream>,
     pub upstream_id: Option<String>,
     #[serde(default)]
@@ -908,20 +978,22 @@ impl Service {
     }
 }
 
-#[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
+#[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize, Validate, EncryptFields)]
 pub struct GlobalRule {
     #[serde(default)]
     pub id: String,
     #[serde(default)]
+    #[encrypt(plugins)]
     pub plugins: HashMap<String, JsonValue>,
 }
 
-#[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize, Validate)]
+#[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize, Validate, EncryptFields)]
 #[allow(clippy::upper_case_acronyms)]
 pub struct SSL {
     #[serde(default)]
     pub id: String,
     pub cert: String,
+    #[encrypt]
     pub key: String,
     #[validate(length(min = 1))]
     pub snis: Vec<String>,
@@ -930,6 +1002,7 @@ pub struct SSL {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::encryption::EncryptFields;
     use http::Method;
 
     fn init_log() {
@@ -1436,6 +1509,75 @@ upstreams:
     }
 
     #[test]
+    fn upstream_tls_encrypt_fields_visits_client_key_not_cert() {
+        use crate::utils::encryption::CIPHERTEXT_PREFIX;
+
+        let mut cfg = serde_json::json!({
+            "nodes": { "127.0.0.1:443": 1 },
+            "tls": {
+                "client_cert": "cert-pem",
+                "client_key": format!("{CIPHERTEXT_PREFIX}deadbeef"),
+            }
+        });
+        let err = Upstream::transform_secrets(&mut cfg, false).unwrap_err();
+        assert!(
+            err.to_string().contains("data_encryption is disabled")
+                || err.to_string().contains("Encrypted value"),
+            "{err}"
+        );
+        assert_eq!(cfg["tls"]["client_cert"], "cert-pem");
+    }
+
+    /// A resource's derived `EncryptFields` must descend into its `plugins`
+    /// map (via `#[encrypt(plugins)]`) and its inline `upstream`, so wiring a
+    /// new secret only requires marking the plugin/struct field.
+    #[test]
+    fn route_transform_secrets_walks_plugins_and_inline_upstream() {
+        use crate::utils::encryption::CIPHERTEXT_PREFIX;
+
+        // Ciphertext with encryption disabled surfaces an error, proving the
+        // walk reached the plugin secret field.
+        let mut route = serde_json::json!({
+            "uri": "/",
+            "plugins": {
+                "basic-auth": {
+                    "username": "demo",
+                    "password": format!("{CIPHERTEXT_PREFIX}deadbeef"),
+                }
+            }
+        });
+        let err = transform_resource_secrets("routes", &mut route, false).unwrap_err();
+        assert!(
+            err.to_string().contains("data_encryption is disabled")
+                || err.to_string().contains("Encrypted value"),
+            "{err}"
+        );
+
+        // Same for an inline upstream TLS private key.
+        let mut route = serde_json::json!({
+            "uri": "/",
+            "upstream": {
+                "nodes": { "127.0.0.1:443": 1 },
+                "tls": {
+                    "client_cert": "cert-pem",
+                    "client_key": format!("{CIPHERTEXT_PREFIX}deadbeef"),
+                }
+            }
+        });
+        let err = transform_resource_secrets("routes", &mut route, false).unwrap_err();
+        assert!(
+            err.to_string().contains("data_encryption is disabled")
+                || err.to_string().contains("Encrypted value"),
+            "{err}"
+        );
+
+        // Unknown resource types are a no-op pass-through.
+        let mut other = serde_json::json!({ "foo": "bar" });
+        transform_resource_secrets("unknown", &mut other, false).unwrap();
+        assert_eq!(other["foo"], "bar");
+    }
+
+    #[test]
     fn admin_bind_rejects_non_loopback_without_insecure_flag() {
         let admin = Admin {
             address: "0.0.0.0:9181".parse().unwrap(),
@@ -1460,6 +1602,39 @@ upstreams:
             allow_insecure_remote: true,
         };
         assert!(remote.validate_bind_safety().is_ok());
+    }
+
+    #[test]
+    fn data_encryption_requires_keyring_when_enabled() {
+        let conf_str = r#"
+---
+pingsix:
+  listeners:
+    - address: "127.0.0.1:8080"
+  data_encryption:
+    enable: true
+    keyring: []
+"#;
+        assert!(Config::from_yaml(conf_str).is_err());
+    }
+
+    #[test]
+    fn data_encryption_accepts_keyring() {
+        let conf_str = r#"
+---
+pingsix:
+  listeners:
+    - address: "127.0.0.1:8080"
+  data_encryption:
+    enable: true
+    keyring:
+      - "12387412834"
+      - "89731823413"
+"#;
+        let conf = Config::from_yaml(conf_str).unwrap();
+        let enc = conf.pingsix.data_encryption.unwrap();
+        assert!(enc.enable);
+        assert_eq!(enc.keyring.len(), 2);
     }
 
     #[test]

@@ -1,0 +1,5 @@
+error: unsupported encrypt_fields attribute; use #[encrypt_fields(export)]
+ --> tests/ui/fail_unknown_export_attr.rs:6:18
+  |
+6 | #[encrypt_fields(bogus)]
+  |                  ^^^^^

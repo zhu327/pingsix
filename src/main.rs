@@ -245,6 +245,25 @@ fn init_pingsix_defaults(cfg: &config::Pingsix) {
             .as_ref()
             .and_then(|d| d.upstream_timeout.clone()),
     );
+    if let Err(e) = init_data_encryption(cfg.data_encryption.as_ref()) {
+        eprintln!("Error initializing data encryption: {e}");
+        std::process::exit(1);
+    }
+}
+
+fn init_data_encryption(cfg: Option<&config::DataEncryption>) -> Result<(), String> {
+    let (enable, keyring) = match cfg {
+        Some(c) => (c.enable, c.keyring.as_slice()),
+        None => (false, &[][..]),
+    };
+    pingsix::config::init_data_encryption(enable, keyring).map_err(|e| e.to_string())?;
+    if enable {
+        log::info!(
+            "Data encryption enabled with {} keyring key(s)",
+            keyring.len()
+        );
+    }
+    Ok(())
 }
 
 fn validate_admin_bind(admin_cfg: &config::Admin) -> Result<(), String> {

@@ -7,6 +7,7 @@ use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use pingora_error::Result;
 use pingora_http::RequestHeader;
 use pingora_proxy::Session;
+use pingsix_macros::EncryptFields;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
@@ -45,7 +46,8 @@ pub fn create_jwt_auth_plugin(cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyPlugin
 }
 
 /// Configuration for the JWT Auth plugin.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, EncryptFields)]
+#[encrypt_fields(export)]
 pub struct PluginConfig {
     /// HTTP header field name containing the JWT (default: `authorization`).
     /// If the header starts with "Bearer ", the prefix is stripped.
@@ -69,6 +71,7 @@ pub struct PluginConfig {
     pub store_in_ctx: bool,
 
     /// Symmetric secret key (or base64-encoded secret) for HMAC algorithms (HS256, HS512).
+    #[encrypt]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub secret: Option<String>,
 
@@ -376,6 +379,7 @@ impl PluginJWTAuth {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::encryption::{EncryptFields, CIPHERTEXT_PREFIX};
     use jsonwebtoken::{encode, EncodingKey, Header};
     use serde::Serialize;
 
@@ -421,6 +425,51 @@ mod tests {
 
     fn far_future_exp() -> Option<u64> {
         Some(9_999_999_999)
+    }
+
+    #[test]
+    fn transform_secrets_touches_secret_not_public_key() {
+        let mut cfg = serde_json::json!({
+            "secret": "hmac-secret",
+            "public_key": "-----BEGIN PUBLIC KEY-----\nABC\n-----END PUBLIC KEY-----",
+            "header": "authorization",
+        });
+        // Encryption disabled → plaintext pass-through.
+        PluginConfig::transform_secrets(&mut cfg, false).unwrap();
+        assert_eq!(cfg["secret"], "hmac-secret");
+        assert_eq!(
+            cfg["public_key"],
+            "-----BEGIN PUBLIC KEY-----\nABC\n-----END PUBLIC KEY-----"
+        );
+        assert_eq!(cfg["header"], "authorization");
+    }
+
+    #[test]
+    fn transform_secrets_visits_secret_field() {
+        let mut cfg = serde_json::json!({
+            "secret": format!("{CIPHERTEXT_PREFIX}deadbeef"),
+            "public_key": "-----BEGIN PUBLIC KEY-----\nABC\n-----END PUBLIC KEY-----",
+        });
+        let err = PluginConfig::transform_secrets(&mut cfg, false).unwrap_err();
+        assert!(
+            err.to_string().contains("data_encryption is disabled")
+                || err.to_string().contains("Encrypted value"),
+            "{err}"
+        );
+        // public_key must remain untouched even when secret decrypt fails.
+        assert_eq!(
+            cfg["public_key"],
+            "-----BEGIN PUBLIC KEY-----\nABC\n-----END PUBLIC KEY-----"
+        );
+    }
+
+    #[test]
+    fn secrets_transform_const_matches_trait_method() {
+        let mut via_const = serde_json::json!({ "secret": "s" });
+        let mut via_trait = via_const.clone();
+        (SECRETS_TRANSFORM)(&mut via_const, false).unwrap();
+        PluginConfig::transform_secrets(&mut via_trait, false).unwrap();
+        assert_eq!(via_const, via_trait);
     }
 
     #[test]

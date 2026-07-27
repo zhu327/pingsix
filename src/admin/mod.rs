@@ -301,7 +301,9 @@ impl<T: AdminResource> Handler for ResourceHandler<T> {
         // Use generic resource validation
         T::validate_resource(&body_data)?;
 
-        let body_data = compact_json_bytes(body_data)?;
+        let value: serde_json::Value = serde_json::from_slice(&body_data)
+            .map_err(|e| ApiError::ValidationError(format!("Invalid JSON: {e}")))?;
+        let body_data = encrypt_resource_for_storage(T::RESOURCE_TYPE, value)?;
         let committed = graph_mutation::put_resource(etcd, &key, body_data).await?;
 
         let body = serde_json::json!({ "revision": committed });
@@ -669,12 +671,25 @@ fn redact_keys_array(v: serde_json::Value) -> serde_json::Value {
     }
 }
 
-/// Re-serialize JSON to compact (single-line) form for etcd storage.
-fn compact_json_bytes(value: Vec<u8>) -> ApiResult<Vec<u8>> {
-    let parsed: serde_json::Value = serde_json::from_slice(&value)
-        .map_err(|e| ApiError::ValidationError(format!("Invalid JSON: {e}")))?;
-    serde_json::to_vec(&parsed)
-        .map_err(|e| ApiError::ValidationError(format!("Failed to compact JSON: {e}")))
+/// Compact a validated resource to storage bytes, encrypting sensitive fields
+/// first when data encryption is enabled.
+///
+/// The JSON is parsed once by the caller. Validation already ran against
+/// plaintext. Only resource types with known secret fields are rewritten;
+/// others pass through unchanged but are still compacted by `to_vec`.
+fn encrypt_resource_for_storage(
+    resource_type: &str,
+    mut value: serde_json::Value,
+) -> ApiResult<Vec<u8>> {
+    if crate::utils::encryption::is_enabled() {
+        config::transform_resource_secrets(resource_type, &mut value, true).map_err(|e| {
+            ApiError::ValidationError(format!("Failed to encrypt resource secrets: {e}"))
+        })?;
+    }
+
+    serde_json::to_vec(&value).map_err(|e| {
+        ApiError::ValidationError(format!("Failed to serialize resource for storage: {e}"))
+    })
 }
 
 #[cfg(test)]
@@ -718,6 +733,71 @@ mod tests {
             "-----BEGIN CERTIFICATE-----\ncert\n-----END CERTIFICATE-----"
         );
         assert_eq!(out["key"], "***");
+    }
+
+    #[test]
+    fn encrypt_resource_for_storage_noop_when_disabled() {
+        let input = serde_json::json!({
+            "id": "1",
+            "cert": "c",
+            "key": "-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----",
+            "snis": ["example.com"],
+        });
+        let out = encrypt_resource_for_storage("ssls", input.clone()).unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(parsed["key"], input["key"]);
+    }
+
+    #[test]
+    fn encrypt_resource_leaves_basic_auth_password_when_disabled() {
+        let input = serde_json::json!({
+            "id": "1",
+            "uri": "/",
+            "plugins": {
+                "basic-auth": {
+                    "username": "demo",
+                    "password": "s3cret"
+                }
+            }
+        });
+        let out = encrypt_resource_for_storage("routes", input).unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(parsed["plugins"]["basic-auth"]["password"], "s3cret");
+        assert_eq!(parsed["plugins"]["basic-auth"]["username"], "demo");
+    }
+
+    #[test]
+    fn encrypt_resource_leaves_upstream_client_key_when_disabled() {
+        let input = serde_json::json!({
+            "id": "1",
+            "nodes": { "127.0.0.1:443": 1 },
+            "tls": {
+                "client_cert": "-----BEGIN CERTIFICATE-----\ncert\n-----END CERTIFICATE-----",
+                "client_key": "-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----"
+            }
+        });
+        let out = encrypt_resource_for_storage("upstreams", input.clone()).unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(parsed["tls"]["client_key"], input["tls"]["client_key"]);
+        assert_eq!(parsed["tls"]["client_cert"], input["tls"]["client_cert"]);
+    }
+
+    #[test]
+    fn encrypt_resource_leaves_inline_upstream_client_key_when_disabled() {
+        let input = serde_json::json!({
+            "id": "1",
+            "uri": "/",
+            "upstream": {
+                "nodes": { "127.0.0.1:443": 1 },
+                "tls": {
+                    "client_cert": "cert",
+                    "client_key": "key-material"
+                }
+            }
+        });
+        let out = encrypt_resource_for_storage("routes", input).unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(parsed["upstream"]["tls"]["client_key"], "key-material");
     }
 
     #[test]
@@ -867,17 +947,21 @@ mod tests {
     }
 
     #[test]
-    fn compact_json_bytes_collapses_pretty_input() {
-        let pretty = br#"{
+    fn encrypt_resource_for_storage_compacts_output() {
+        let pretty: serde_json::Value = serde_json::from_str(
+            r#"{
             "id": "1",
             "nodes": ["b", "a"]
-            }"#;
-        let compact = compact_json_bytes(pretty.to_vec()).unwrap();
+            }"#,
+        )
+        .unwrap();
+        // Unknown resource type → no encryption, but output must be compacted.
+        let compact = encrypt_resource_for_storage("unknown", pretty).unwrap();
         let s = String::from_utf8(compact).unwrap();
         assert!(!s.contains('\n'));
         assert!(!s.contains(' '));
         // array order preserved
-        assert!(s.contains(r#"["b","a"]"#) || !s.contains(r#"[ "b", "a" ]"#));
+        assert!(s.contains(r#"["b","a"]"#));
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
         assert_eq!(v["nodes"], serde_json::json!(["b", "a"]));
     }

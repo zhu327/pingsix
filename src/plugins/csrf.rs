@@ -8,6 +8,7 @@ use http::{header, Method, StatusCode};
 use pingora_error::Result;
 use pingora_http::ResponseHeader;
 use pingora_proxy::Session;
+use pingsix_macros::EncryptFields;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -28,8 +29,10 @@ pub fn create_csrf_plugin(cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyPlugin>> {
     Ok(Arc::new(PluginCsrf { config }))
 }
 
-#[derive(Debug, Serialize, Deserialize, Validate)]
+#[derive(Debug, Serialize, Deserialize, Validate, EncryptFields)]
+#[encrypt_fields(export)]
 struct PluginConfig {
+    #[encrypt]
     #[validate(length(min = 1))]
     key: String,
     #[serde(default = "PluginConfig::default_expires")]
@@ -274,6 +277,7 @@ impl ProxyPlugin for PluginCsrf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::encryption::EncryptFields;
 
     fn build_plugin(expires: u64) -> PluginCsrf {
         PluginCsrf {
@@ -283,6 +287,18 @@ mod tests {
                 name: "csrf-token".to_string(),
             },
         }
+    }
+
+    #[test]
+    fn transform_secrets_touches_key_not_name() {
+        let mut cfg = serde_json::json!({
+            "key": "unit-test-key",
+            "name": "csrf-token",
+            "expires": 7200,
+        });
+        PluginConfig::transform_secrets(&mut cfg, false).unwrap();
+        assert_eq!(cfg["key"], "unit-test-key");
+        assert_eq!(cfg["name"], "csrf-token");
     }
 
     #[test]

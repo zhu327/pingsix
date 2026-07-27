@@ -5,6 +5,7 @@ use base64::{engine::general_purpose, Engine as _};
 use http::{header, StatusCode};
 use pingora_error::Result;
 use pingora_proxy::Session;
+use pingsix_macros::EncryptFields;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use validator::Validate;
@@ -31,10 +32,12 @@ pub fn create_basic_auth_plugin(cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyPlug
     }))
 }
 
-#[derive(Debug, Serialize, Deserialize, Validate)]
+#[derive(Debug, Serialize, Deserialize, Validate, EncryptFields)]
+#[encrypt_fields(export)]
 struct PluginConfig {
     #[validate(length(min = 1))]
     username: String,
+    #[encrypt]
     #[validate(length(min = 1))]
     password: String,
     #[serde(default)]
@@ -144,6 +147,7 @@ impl ProxyPlugin for PluginBasicAuth {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::encryption::EncryptFields;
 
     fn build_plugin(username: &str, password: &str) -> PluginBasicAuth {
         PluginBasicAuth {
@@ -155,6 +159,18 @@ mod tests {
             username_digest: secret_digest(username),
             password_digest: secret_digest(password),
         }
+    }
+
+    #[test]
+    fn transform_secrets_touches_password_not_username() {
+        let mut cfg = serde_json::json!({
+            "username": "demo",
+            "password": "s3cret",
+        });
+        // Encryption disabled → plaintext pass-through.
+        PluginConfig::transform_secrets(&mut cfg, false).unwrap();
+        assert_eq!(cfg["username"], "demo");
+        assert_eq!(cfg["password"], "s3cret");
     }
 
     #[test]

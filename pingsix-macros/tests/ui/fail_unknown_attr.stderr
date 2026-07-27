@@ -1,0 +1,5 @@
+error: unsupported encrypt attribute; use #[encrypt], #[encrypt(nested)] or #[encrypt(plugins)]
+ --> tests/ui/fail_unknown_attr.rs:7:15
+  |
+7 |     #[encrypt(bogus)]
+  |               ^^^^^
