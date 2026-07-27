@@ -20,7 +20,7 @@ use validator::Validate;
 use crate::{
     config::{
         self,
-        etcd::{canonicalize_prefix, json_to_resource},
+        etcd::canonicalize_prefix,
         GlobalRule, Identifiable, Route, Service, Upstream, SSL,
     },
     core::{status, ProxyError, ProxyResult},
@@ -106,10 +106,23 @@ impl ResourceConfigSet {
                 log::warn!("Ignoring etcd key outside configured namespace: {key}");
                 continue;
             }
-            insert_kv(&mut set, kv.key(), kv.value(), &canonical)?;
+            insert_kv(&mut set, kv.key(), kv.value(), &canonical, Decrypt::Yes)?;
         }
         Ok(set)
     }
+}
+
+/// Whether to decrypt `#[encrypt]` fields while building a `ResourceConfigSet`.
+///
+/// The runtime load path needs plaintext (`Yes`) to build TLS contexts, plugin
+/// instances, etc. The Admin candidate-validation path only checks structure and
+/// cross-resource references, which never touch secret values, so it uses `No` —
+/// this keeps a single undecryptable resource from blocking all Admin writes and
+/// lets operators overwrite a bad resource to recover.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Decrypt {
+    Yes,
+    No,
 }
 
 /// Insert a single `(key, value)` pair into a `ResourceConfigSet`.
@@ -121,32 +134,33 @@ fn insert_kv(
     key: &[u8],
     value: &[u8],
     canonical_prefix: &str,
+    decrypt: Decrypt,
 ) -> ProxyResult<()> {
     let (id, key_type) = parse_key(key, Some(canonical_prefix))
         .map_err(|e| ProxyError::Configuration(format!("Invalid etcd key: {e}")))?;
     match key_type.as_str() {
         "upstreams" => {
-            let mut resource = json_to_resource::<Upstream>(value)?;
+            let mut resource = resource_from_etcd::<Upstream>(value, "upstreams", decrypt)?;
             resource.set_id(id.clone());
             set.upstreams.insert(id, resource);
         }
         "services" => {
-            let mut resource = json_to_resource::<Service>(value)?;
+            let mut resource = resource_from_etcd::<Service>(value, "services", decrypt)?;
             resource.set_id(id.clone());
             set.services.insert(id, resource);
         }
         "global_rules" => {
-            let mut resource = json_to_resource::<GlobalRule>(value)?;
+            let mut resource = resource_from_etcd::<GlobalRule>(value, "global_rules", decrypt)?;
             resource.set_id(id.clone());
             set.global_rules.insert(id, resource);
         }
         "routes" => {
-            let mut resource = json_to_resource::<Route>(value)?;
+            let mut resource = resource_from_etcd::<Route>(value, "routes", decrypt)?;
             resource.set_id(id.clone());
             set.routes.insert(id, resource);
         }
         "ssls" => {
-            let mut resource = json_to_resource::<SSL>(value)?;
+            let mut resource = resource_from_etcd::<SSL>(value, "ssls", decrypt)?;
             resource.set_id(id.clone());
             set.ssls.insert(id, resource);
         }
@@ -159,10 +173,34 @@ fn insert_kv(
     Ok(())
 }
 
+/// Deserialize a resource from etcd. When `decrypt` is `Yes`, `#[encrypt]` fields
+/// are decrypted at the JSON stage so the typed struct is built from plaintext;
+/// the set of secret fields is driven entirely by the resource's `EncryptFields`
+/// derive, so no per-type wiring lives here. When `No`, ciphertext is left as-is
+/// (used for structural/referential validation, which never reads secrets).
+fn resource_from_etcd<T: serde::de::DeserializeOwned>(
+    value: &[u8],
+    resource_type: &str,
+    decrypt: Decrypt,
+) -> ProxyResult<T> {
+    let mut json = serde_json::from_slice::<serde_json::Value>(value)
+        .map_err(|e| ProxyError::serialization_error("Failed to parse resource JSON", e))?;
+    if decrypt == Decrypt::Yes {
+        config::transform_resource_secrets(resource_type, &mut json, false)?;
+    }
+    serde_json::from_value(json)
+        .map_err(|e| ProxyError::serialization_error("Failed to deserialize resource", e))
+}
+
 /// Build a `ResourceConfigSet` from an arbitrary list of `(physical_key, value)`
-/// pairs. Used by the Admin write path to reconstruct the full resource graph
-/// from a `read_full_graph` snapshot so `CandidateSnapshot::build` can validate
-/// cross-resource references before a CAS commit.
+/// pairs for **validation only**. Used by the Admin write path to reconstruct the
+/// full resource graph from a `read_full_graph` snapshot so `validate_config_set`
+/// can check cross-resource references before a CAS commit.
+///
+/// Secrets are intentionally **not** decrypted here: reference/structural checks
+/// never read secret values, and skipping decryption means a single resource that
+/// was encrypted with a now-unavailable key does not block writes to other
+/// resources (the operator can overwrite the bad resource to recover).
 pub fn build_config_set_from_kvs(
     kvs: &[(String, Vec<u8>)],
     prefix: &str,
@@ -177,7 +215,7 @@ pub fn build_config_set_from_kvs(
             log::warn!("Ignoring etcd key outside configured namespace: {key}");
             continue;
         }
-        insert_kv(&mut set, key.as_bytes(), value, &canonical)?;
+        insert_kv(&mut set, key.as_bytes(), value, &canonical, Decrypt::No)?;
     }
     Ok(set)
 }
@@ -1048,27 +1086,28 @@ fn apply_raw_change(raw: &mut ResourceConfigSet, change: CoalescedChange) -> Pro
             value,
         } => match resource_type.as_str() {
             "upstreams" => {
-                let mut resource = json_to_resource::<Upstream>(&value)?;
+                let mut resource = resource_from_etcd::<Upstream>(&value, "upstreams", Decrypt::Yes)?;
                 resource.set_id(id.clone());
                 raw.upstreams.insert(id, resource);
             }
             "services" => {
-                let mut resource = json_to_resource::<Service>(&value)?;
+                let mut resource = resource_from_etcd::<Service>(&value, "services", Decrypt::Yes)?;
                 resource.set_id(id.clone());
                 raw.services.insert(id, resource);
             }
             "global_rules" => {
-                let mut resource = json_to_resource::<GlobalRule>(&value)?;
+                let mut resource =
+                    resource_from_etcd::<GlobalRule>(&value, "global_rules", Decrypt::Yes)?;
                 resource.set_id(id.clone());
                 raw.global_rules.insert(id, resource);
             }
             "routes" => {
-                let mut resource = json_to_resource::<Route>(&value)?;
+                let mut resource = resource_from_etcd::<Route>(&value, "routes", Decrypt::Yes)?;
                 resource.set_id(id.clone());
                 raw.routes.insert(id, resource);
             }
             "ssls" => {
-                let mut resource = json_to_resource::<SSL>(&value)?;
+                let mut resource = resource_from_etcd::<SSL>(&value, "ssls", Decrypt::Yes)?;
                 resource.set_id(id.clone());
                 raw.ssls.insert(id, resource);
             }
@@ -1521,6 +1560,35 @@ mod tests {
         assert!(is_metadata_key(b"/pingsix/.pingsix_graph_revision"));
         assert!(is_metadata_key(b"/pingsix/.ingress_sync_barrier"));
         assert!(!is_metadata_key(b"/pingsix/routes/1"));
+    }
+
+    /// The Admin candidate-validation build must not decrypt secrets, so a
+    /// resource encrypted with a now-unavailable key cannot block writes to
+    /// other resources. The runtime load path, by contrast, still fails closed.
+    #[test]
+    fn candidate_build_does_not_decrypt_siblings() {
+        let prefix = "/pingsix";
+        // `key` holds ciphertext this process cannot read (encryption disabled).
+        let ssl = serde_json::to_vec(&serde_json::json!({
+            "id": "s1",
+            "cert": "c",
+            "key": format!("{}deadbeef", crate::utils::encryption::CIPHERTEXT_PREFIX),
+            "snis": ["example.com"],
+        }))
+        .unwrap();
+
+        // Validation build succeeds despite the unreadable ciphertext.
+        let set =
+            build_config_set_from_kvs(&[(format!("{prefix}/ssls/s1"), ssl.clone())], prefix).unwrap();
+        assert!(set.ssls.contains_key("s1"));
+
+        // Runtime load path decrypts and surfaces the failure (fail-closed).
+        let err = resource_from_etcd::<crate::config::SSL>(&ssl, "ssls", Decrypt::Yes).unwrap_err();
+        assert!(
+            err.to_string().contains("data_encryption is disabled")
+                || err.to_string().contains("Encrypted value"),
+            "{err}"
+        );
     }
 
     #[test]

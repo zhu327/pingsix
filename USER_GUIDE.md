@@ -13,11 +13,12 @@
 9. [Services](#services)
 10. [Global Rules](#global-rules)
 11. [Plugins](#plugins)
-12. [Admin API](#admin-api)
-13. [SSL/TLS Configuration](#ssltls-configuration)
-14. [Monitoring and Observability](#monitoring-and-observability)
-15. [Examples](#examples)
-16. [Troubleshooting](#troubleshooting)
+12. [Plugin Development](#plugin-development)
+13. [Admin API](#admin-api)
+14. [SSL/TLS Configuration](#ssltls-configuration)
+15. [Monitoring and Observability](#monitoring-and-observability)
+16. [Examples](#examples)
+17. [Troubleshooting](#troubleshooting)
 
 ## Introduction
 
@@ -126,12 +127,13 @@ pingora:
 
 # PingSIX specific settings
 pingsix:
-  listeners: []      # Network listeners
-  etcd: {}          # etcd configuration (optional)
-  admin: {}         # Admin API (optional)
-  prometheus: {}    # Metrics endpoint (optional)
-  sentry: {}        # Error tracking (optional)
-  log: {}           # File logging (optional)
+  listeners: []       # Network listeners
+  etcd: {}            # etcd configuration (optional)
+  data_encryption: {} # Encrypt secrets in etcd (optional; see Data Encryption)
+  admin: {}           # Admin API (optional)
+  prometheus: {}      # Metrics endpoint (optional)
+  sentry: {}          # Error tracking (optional)
+  log: {}             # File logging (optional)
 
 # Resource definitions
 routes: []          # Route configurations
@@ -191,6 +193,73 @@ Formal control-plane state and the published runtime snapshot are updated only a
 succeeds. On failure the previous snapshot keeps serving traffic (last-known-good). Watch apply
 failures interrupt the watch stream and force a full relist so rejected revisions are not skipped.
 Empty watch batches do not publish.
+
+### Data Encryption
+
+When configuration is stored in etcd, sensitive fields can be encrypted at rest.
+Enable this under `pingsix.data_encryption`:
+
+```yaml
+pingsix:
+  etcd:
+    host: ["http://127.0.0.1:2379"]
+    prefix: /pingsix
+
+  data_encryption:
+    enable: true
+    keyring:
+      - "new-primary-key"   # used to encrypt new values
+      - "previous-key"      # kept so older ciphertext still decrypts
+```
+
+**Behavior:**
+
+- Admin API writes encrypt marked fields before they are stored in etcd.
+- etcd load/watch decrypts them into memory; the data plane always sees plaintext.
+- Static YAML config is not encrypted (only the etcd store path).
+- The first keyring entry encrypts. On decrypt, every entry is tried in order
+  (newest first) so keys can be rotated without rewriting all resources.
+
+**What is encrypted today:**
+
+| Resource / plugin | Field(s) |
+|-------------------|----------|
+| `ssls` | `key` (TLS private key) |
+| `upstreams` / inline `upstream` | `tls.client_key` |
+| `basic-auth` | `password` |
+| `jwt-auth` | `secret` |
+| `key-auth` | `key`, `keys[]` |
+| `csrf` | `key` |
+
+**Key rotation:** add the new key at the top of `keyring`, keep old keys below
+until all stored values have been rewritten (or you no longer need them).
+
+> Do not remove an old keyring entry while etcd still holds ciphertext produced
+> with that key — decryption will fail and the resource will not load.
+
+**Disabling encryption (`enable: false`):** decryption is fail-closed. Once
+`data_encryption` is turned off (or a keyring entry that produced existing
+ciphertext is removed/changed), any affected value in etcd can no longer be read
+and the **affected resource fails to load** on startup/watch (the last-known-good
+snapshot keeps serving traffic in the meantime).
+
+> ℹ️ Admin writes to *other* resources are not blocked by an undecryptable
+> resource: the write path validates only structure and cross-resource
+> references, which never read secret values. This means you can recover by
+> overwriting (re-`PUT`) the affected resource with a value the current keyring
+> can handle.
+
+> ⚠️ **Before disabling encryption, rewrite every encrypted value back to
+> plaintext first** (e.g. re-`PUT` each affected `ssls`, `upstreams`, and any
+> route/service/global_rule carrying encrypted plugin secrets *while encryption
+> is still enabled with a matching keyring*), then set `enable: false`.
+> Likewise, **do not change the key derivation or the value of an in-use keyring
+> entry** while its ciphertext remains in etcd — the derived key would change and
+> old values become undecryptable. If you hit
+> `Failed to decrypt value with any configured keyring key`, it means etcd holds
+> ciphertext that the current configuration cannot decrypt; restore the correct
+> keyring, or clear/rewrite the affected keys (e.g. `etcdctl del --prefix <prefix>`
+> for throwaway/test data).
 
 ## Docker Deployment
 
@@ -1662,6 +1731,73 @@ plugins:
   grpc-web: {}                    # Enable gRPC-Web support (zero-configuration)
 ```
 
+## Plugin Development
+
+New plugins live under `src/plugins/`. Register the factory in
+`src/plugins/mod.rs` (`PLUGIN_BUILDER_REGISTRY`) and implement `ProxyPlugin`.
+
+### Encrypting Sensitive Plugin Fields
+
+If the plugin config stores secrets in etcd (passwords, API keys, HMAC keys),
+mark them with `EncryptFields` so Admin write / etcd load encrypt and decrypt
+automatically when `pingsix.data_encryption.enable` is true.
+
+**1. Derive and mark fields** on the plugin config struct. Put `#[encrypt_fields(export)]` only on the **root** config (not on
+nested types) so the derive emits a module-level `SECRETS_TRANSFORM`:
+
+```rust
+use pingsix_macros::EncryptFields;
+use crate::utils::encryption::EncryptFields;
+
+#[derive(Debug, Serialize, Deserialize, EncryptFields)]
+struct Credentials {
+    #[encrypt]
+    token: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Validate, EncryptFields)]
+#[encrypt_fields(export)]
+struct PluginConfig {
+    username: String,          // not a secret — leave unmarked
+
+    #[encrypt]
+    password: String,          // string secret
+
+    #[encrypt]
+    keys: Vec<String>,         // each array element is encrypted
+
+    #[encrypt(nested)]
+    credentials: Credentials,  // nested struct that also derives EncryptFields
+
+    #[encrypt(nested)]
+    optional: Option<Credentials>,  // null is skipped
+}
+```
+
+**2. Register** the exported transform in `PLUGIN_ENCRYPT_FIELDS`
+(`src/plugins/mod.rs`):
+
+```rust
+(my_plugin::PLUGIN_NAME, my_plugin::SECRETS_TRANSFORM),
+```
+
+`SECRETS_TRANSFORM` is a module-level `const` from `#[encrypt_fields(export)]`. Do not add a hand-written wrapper.
+
+**Rules of thumb:**
+
+- Encrypt credentials and private material only (not public keys, usernames,
+  header *names*, or non-secret selectors like `limit-count.key`).
+- Nested secrets use `#[encrypt(nested)]`; the nested type must also derive
+  `EncryptFields` but must **not** use `#[encrypt_fields(export)]` (one export
+  per plugin module).
+- `#[serde(rename = "...")]` is honoured: encryption uses the JSON field name.
+- Keep Admin GET redaction in sync (`redact` in `src/admin/mod.rs`) so secrets
+  are not echoed in API responses.
+
+Resource-level secrets outside plugins (SSL `key`, upstream `tls.client_key`)
+are wired in the Admin encrypt path and control-plane decrypt path the same
+way — see [Data Encryption](#data-encryption).
+
 ## Admin API
 
 The Admin API allows dynamic configuration management when etcd is enabled.
@@ -1938,6 +2074,10 @@ curl -X PUT http://127.0.0.1:9181/apisix/admin/ssls/example-com \
     "snis": ["example.com", "*.example.com"]
   }'
 ```
+
+With [`data_encryption`](#data-encryption) enabled, the Admin API encrypts the
+`key` field before writing it to etcd. Submit plaintext PEM as usual; GET
+responses continue to redact the private key.
 
 ## Monitoring and Observability
 

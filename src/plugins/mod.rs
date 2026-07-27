@@ -89,6 +89,20 @@ static PLUGIN_BUILDER_REGISTRY: Lazy<HashMap<&'static str, PluginCreateFn>> = La
     arr.into_iter().collect()
 });
 
+/// Plugin name → secret-field transform derived from `#[encrypt]` markers.
+///
+/// Used by admin (encrypt before etcd write) and control-plane (decrypt on load).
+pub(crate) static PLUGIN_ENCRYPT_FIELDS: Lazy<
+    HashMap<&'static str, crate::utils::encryption::PluginSecretsTransform>,
+> = Lazy::new(|| {
+    HashMap::from([
+        (basic_auth::PLUGIN_NAME, basic_auth::SECRETS_TRANSFORM),
+        (csrf::PLUGIN_NAME, csrf::SECRETS_TRANSFORM),
+        (key_auth::PLUGIN_NAME, key_auth::SECRETS_TRANSFORM),
+        (jwt_auth::PLUGIN_NAME, jwt_auth::SECRETS_TRANSFORM),
+    ])
+});
+
 /// Creates plugin instances from configuration using a factory pattern.
 ///
 /// Looks up the plugin builder function in the global registry and invokes it

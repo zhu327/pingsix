@@ -4,7 +4,12 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.88"
 
+[workspace]
+members = [".", "pingsix-macros"]
+resolver = "2"
+
 [dependencies]
+pingsix-macros = { path = "pingsix-macros" }
 arc-swap = "1.7.1"
 async-trait = "0.1.42"
 base64 = "0.22.1"
@@ -48,6 +53,8 @@ tokio-util = "0.7"
 uuid = { version = "1.16.0", features = ["v4"] }
 url = "2.5"
 validator = { version = "0.20.0", features = ["derive"] }
+aes-gcm = "0.10"
+argon2 = "0.5"
 
 [dev-dependencies]
 etcd-client = { version = "0.18.0", features = ["tls"] }

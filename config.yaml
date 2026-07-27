@@ -23,11 +23,20 @@ pingsix:
     #     cert_path: /etc/ssl/server.crt
     #     key_path: /etc/ssl/server.key
     #   offer_h2: true
-  
+
   # etcd:
   #   host:
   #     - "http://192.168.2.141:2379"
   #   prefix: /apisix
+
+  # Encrypt sensitive fields (SSL private keys and plugin secrets) in etcd.
+  # The first keyring entry encrypts new values; keep older keys below it so
+  # previously encrypted data can still be decrypted after rotation.
+  # data_encryption:
+  #   enable: true
+  #   keyring:
+  #     - "12387412834"
+  #     - "89731823413"
 
   # admin:
   #   address: "0.0.0.0:9181"

@@ -1,0 +1,5 @@
+error: EncryptFields only supports structs with named fields
+ --> tests/ui/fail_tuple_struct.rs:4:8
+  |
+4 | struct Tuple(String, String);
+  |        ^^^^^

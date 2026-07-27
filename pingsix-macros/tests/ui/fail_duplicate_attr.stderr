@@ -1,0 +1,5 @@
+error: duplicate #[encrypt] attribute on field
+ --> tests/ui/fail_duplicate_attr.rs:8:5
+  |
+8 |     #[encrypt]
+  |     ^^^^^^^^^^
