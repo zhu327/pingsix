@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 COPY Cargo.toml Cargo.lock ./
+COPY pingsix-macros ./
 
 RUN mkdir src && \
     echo "fn main() {}" > src/main.rs && \
@@ -21,7 +22,6 @@ RUN mkdir src && \
     rm -rf src
 
 COPY src ./src
-COPY pingsix-macros ./
 
 RUN cargo build --release --locked
 
