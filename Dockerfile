@@ -14,7 +14,8 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 COPY Cargo.toml Cargo.lock ./
-COPY pingsix-macros ./
+RUN mkdir ./pingsix-macros
+COPY pingsix-macros ./pingsix-macros
 
 RUN mkdir src && \
     echo "fn main() {}" > src/main.rs && \
