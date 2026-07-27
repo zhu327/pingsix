@@ -19,9 +19,7 @@ use validator::Validate;
 
 use crate::{
     config::{
-        self,
-        etcd::canonicalize_prefix,
-        GlobalRule, Identifiable, Route, Service, Upstream, SSL,
+        self, etcd::canonicalize_prefix, GlobalRule, Identifiable, Route, Service, Upstream, SSL,
     },
     core::{status, ProxyError, ProxyResult},
 };
@@ -1086,7 +1084,8 @@ fn apply_raw_change(raw: &mut ResourceConfigSet, change: CoalescedChange) -> Pro
             value,
         } => match resource_type.as_str() {
             "upstreams" => {
-                let mut resource = resource_from_etcd::<Upstream>(&value, "upstreams", Decrypt::Yes)?;
+                let mut resource =
+                    resource_from_etcd::<Upstream>(&value, "upstreams", Decrypt::Yes)?;
                 resource.set_id(id.clone());
                 raw.upstreams.insert(id, resource);
             }
@@ -1578,8 +1577,8 @@ mod tests {
         .unwrap();
 
         // Validation build succeeds despite the unreadable ciphertext.
-        let set =
-            build_config_set_from_kvs(&[(format!("{prefix}/ssls/s1"), ssl.clone())], prefix).unwrap();
+        let set = build_config_set_from_kvs(&[(format!("{prefix}/ssls/s1"), ssl.clone())], prefix)
+            .unwrap();
         assert!(set.ssls.contains_key("s1"));
 
         // Runtime load path decrypts and surfaces the failure (fail-closed).
