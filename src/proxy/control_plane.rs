@@ -184,7 +184,11 @@ fn resource_from_etcd<T: serde::de::DeserializeOwned>(
     let mut json = serde_json::from_slice::<serde_json::Value>(value)
         .map_err(|e| ProxyError::serialization_error("Failed to parse resource JSON", e))?;
     if decrypt == Decrypt::Yes {
-        config::transform_resource_secrets(resource_type, &mut json, false)?;
+        config::transform_resource_secrets(
+            resource_type,
+            &mut json,
+            crate::utils::encryption::SecretOp::Decrypt,
+        )?;
     }
     serde_json::from_value(json)
         .map_err(|e| ProxyError::serialization_error("Failed to deserialize resource", e))

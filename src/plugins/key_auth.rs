@@ -214,7 +214,7 @@ impl PluginKeyAuth {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::encryption::{EncryptFields, CIPHERTEXT_PREFIX};
+    use crate::utils::encryption::{EncryptFields, SecretOp, CIPHERTEXT_PREFIX};
 
     #[test]
     fn transform_secrets_touches_key_and_keys_not_header() {
@@ -224,7 +224,7 @@ mod tests {
             "keys": ["a", "b"],
         });
         // Encryption disabled → plaintext pass-through.
-        PluginConfig::transform_secrets(&mut cfg, false).unwrap();
+        PluginConfig::transform_secrets(&mut cfg, SecretOp::Decrypt).unwrap();
         assert_eq!(cfg["header"], "apikey");
         assert_eq!(cfg["key"], "single-secret");
         assert_eq!(cfg["keys"], serde_json::json!(["a", "b"]));
@@ -237,7 +237,7 @@ mod tests {
             "keys": [format!("{CIPHERTEXT_PREFIX}deadbeef"), "plain"],
         });
         // Ciphertext with encryption disabled proves the array walk ran.
-        let err = PluginConfig::transform_secrets(&mut cfg, false).unwrap_err();
+        let err = PluginConfig::transform_secrets(&mut cfg, SecretOp::Decrypt).unwrap_err();
         assert!(
             err.to_string().contains("data_encryption is disabled")
                 || err.to_string().contains("Encrypted value"),
@@ -249,8 +249,8 @@ mod tests {
     fn secrets_transform_const_matches_trait_method() {
         let mut via_const = serde_json::json!({ "keys": ["s"] });
         let mut via_trait = via_const.clone();
-        (SECRETS_TRANSFORM)(&mut via_const, false).unwrap();
-        PluginConfig::transform_secrets(&mut via_trait, false).unwrap();
+        (SECRETS_TRANSFORM)(&mut via_const, SecretOp::Decrypt).unwrap();
+        PluginConfig::transform_secrets(&mut via_trait, SecretOp::Decrypt).unwrap();
         assert_eq!(via_const, via_trait);
     }
 

@@ -1,8 +1,15 @@
 //! Field-level encryption for sensitive values stored in etcd.
 //!
-//! Ciphertext is AES-256-GCM with a detectable prefix so plaintext legacy
-//! values continue to load, and keyring rotation works by trying keys in
-//! order (newest first).
+//! Ciphertext uses a versioned envelope: `$pingsix-enc:<version>$<payload>`.
+//! The scheme marker makes ciphertext detectable (so plaintext legacy values
+//! still load), and the explicit version lets the on-disk format evolve
+//! (algorithm, KDF parameters, layout) while older ciphertext stays
+//! identifiable and migratable. The current version is:
+//!
+//! - `v1`: AES-256-GCM with an Argon2id-derived key; payload is
+//!   `base64(nonce || ciphertext)`.
+//!
+//! Keyring rotation works by trying keys in order (newest first).
 //!
 //! Plugin configs mark secrets with `#[encrypt]` / `#[encrypt(nested)]`
 //! (via `EncryptFields`); the admin write path and etcd load path call the
@@ -19,19 +26,45 @@ use serde_json::Value as JsonValue;
 
 use crate::core::{ProxyError, ProxyResult};
 
+/// Operation applied to every `#[encrypt]`-marked field during a walk.
+///
+/// This is the single lever that drives all three secret paths from the same
+/// field metadata: write-side encryption, read/load-side decryption, and the
+/// Admin read API's redaction. Adding `#[encrypt]` to a field therefore wires
+/// up encrypt, decrypt *and* redaction at once.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SecretOp {
+    /// Encrypt plaintext leaves into the versioned envelope.
+    Encrypt,
+    /// Decrypt envelope leaves back to plaintext.
+    Decrypt,
+    /// Replace secret leaves with a fixed mask (never touches the keyring).
+    Redact,
+}
+
+/// Mask written over secret values by [`SecretOp::Redact`].
+pub const REDACTED: &str = "***";
+
 /// Implemented by `#[derive(EncryptFields)]` for plugin (or nested) config structs.
 ///
 /// Walks `#[encrypt]` leaf fields and `#[encrypt(nested)]` child structs.
 pub trait EncryptFields {
-    /// Encrypt (`encrypting = true`) or decrypt sensitive fields in-place.
-    fn transform_secrets(config: &mut JsonValue, encrypting: bool) -> ProxyResult<()>;
+    /// Apply `op` to sensitive fields in-place (encrypt, decrypt, or redact).
+    fn transform_secrets(config: &mut JsonValue, op: SecretOp) -> ProxyResult<()>;
 }
 
 /// Plugin registry entry: transform a plugin's config JSON in place.
-pub type PluginSecretsTransform = fn(&mut JsonValue, bool) -> ProxyResult<()>;
+pub type PluginSecretsTransform = fn(&mut JsonValue, SecretOp) -> ProxyResult<()>;
 
-/// Wire prefix identifying ciphertext produced by this module.
-pub const CIPHERTEXT_PREFIX: &str = "$aes-256-gcm$";
+/// Version-agnostic scheme marker every ciphertext envelope starts with.
+///
+/// Used to detect ciphertext regardless of version. The concrete versioned
+/// prefix (e.g. [`ENVELOPE_V1_PREFIX`]) follows.
+pub const CIPHERTEXT_PREFIX: &str = "$pingsix-enc:";
+
+/// Current envelope: `$pingsix-enc:v1$base64(nonce || ciphertext)`
+/// (AES-256-GCM, Argon2id-derived key).
+const ENVELOPE_V1_PREFIX: &str = "$pingsix-enc:v1$";
 
 static KEYRING: OnceCell<Option<Keyring>> = OnceCell::new();
 
@@ -42,7 +75,7 @@ pub struct Keyring {
 }
 
 impl Keyring {
-    /// Build a keyring from configured secret strings (SHA-256 → 32-byte keys).
+    /// Build a keyring from configured secret strings (Argon2id → 32-byte keys).
     pub fn from_secrets(secrets: &[String]) -> ProxyResult<Self> {
         if secrets.is_empty() {
             return Err(ProxyError::Configuration(
@@ -76,7 +109,7 @@ impl Keyring {
         let mut packed = Vec::with_capacity(nonce.len() + ciphertext.len());
         packed.extend_from_slice(nonce.as_slice());
         packed.extend_from_slice(&ciphertext);
-        Ok(format!("{CIPHERTEXT_PREFIX}{}", BASE64.encode(packed)))
+        Ok(format!("{ENVELOPE_V1_PREFIX}{}", BASE64.encode(packed)))
     }
 
     /// Decrypt by trying each keyring entry until one succeeds.
@@ -84,11 +117,18 @@ impl Keyring {
         if !is_ciphertext(value) {
             return Ok(value.to_string());
         }
-        let packed = BASE64
-            .decode(&value.as_bytes()[CIPHERTEXT_PREFIX.len()..])
-            .map_err(|e| {
-                ProxyError::Configuration(format!("Invalid encrypted value encoding: {e}"))
-            })?;
+        // Dispatch on the envelope version. Unknown versions are rejected rather
+        // than silently mishandled, so a future format is a clear error on an
+        // old binary instead of a corrupt decrypt.
+        let Some(payload) = value.strip_prefix(ENVELOPE_V1_PREFIX) else {
+            return Err(ProxyError::Configuration(format!(
+                "Unsupported encryption envelope version in value starting with '{}'",
+                &value[..value.len().min(24)]
+            )));
+        };
+        let packed = BASE64.decode(payload.as_bytes()).map_err(|e| {
+            ProxyError::Configuration(format!("Invalid encrypted value encoding: {e}"))
+        })?;
 
         // 12-byte nonce + at least 16-byte GCM tag
         if packed.len() < 12 + 16 {
@@ -186,36 +226,37 @@ pub fn decrypt(value: &str) -> ProxyResult<String> {
     }
 }
 
-/// Encrypt or decrypt a single leaf field (string or array of strings).
+/// Apply `op` to a single leaf field (string or array of strings).
 ///
 /// Called from `#[derive(EncryptFields)]` for `#[encrypt]` fields.
 pub fn transform_leaf_field(
     obj: &mut serde_json::Map<String, JsonValue>,
     field: &str,
-    encrypting: bool,
+    op: SecretOp,
 ) -> ProxyResult<()> {
     match obj.get_mut(field) {
         Some(JsonValue::String(value)) => {
-            *value = if encrypting {
-                encrypt(value)?
-            } else {
-                decrypt(value)?
-            };
+            *value = apply_secret_op(value, op)?;
         }
         Some(JsonValue::Array(items)) => {
             for item in items {
                 if let JsonValue::String(value) = item {
-                    *value = if encrypting {
-                        encrypt(value)?
-                    } else {
-                        decrypt(value)?
-                    };
+                    *value = apply_secret_op(value, op)?;
                 }
             }
         }
         _ => {}
     }
     Ok(())
+}
+
+/// Map a single string leaf through the requested secret operation.
+fn apply_secret_op(value: &str, op: SecretOp) -> ProxyResult<String> {
+    match op {
+        SecretOp::Encrypt => encrypt(value),
+        SecretOp::Decrypt => decrypt(value),
+        SecretOp::Redact => Ok(REDACTED.to_string()),
+    }
 }
 
 #[cfg(test)]
@@ -263,6 +304,26 @@ mod tests {
         let kr = Keyring::from_secrets(&["k".into()]).unwrap();
         let ct = kr.encrypt("once").unwrap();
         assert_eq!(kr.encrypt(&ct).unwrap(), ct);
+    }
+
+    #[test]
+    fn encrypt_uses_versioned_envelope() {
+        let kr = Keyring::from_secrets(&["k".into()]).unwrap();
+        let ct = kr.encrypt("secret").unwrap();
+        assert!(ct.starts_with(ENVELOPE_V1_PREFIX));
+        assert!(is_ciphertext(&ct));
+    }
+
+    #[test]
+    fn decrypt_rejects_unknown_envelope_version() {
+        let kr = Keyring::from_secrets(&["k".into()]).unwrap();
+        // Same scheme marker, unsupported version → detected but rejected.
+        let err = kr.decrypt("$pingsix-enc:v999$deadbeef").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Unsupported encryption envelope version"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -342,7 +403,7 @@ mod tests {
             "inner": { "secret": format!("{CIPHERTEXT_PREFIX}deadbeef") },
             "maybe": null,
         });
-        let err = Outer::transform_secrets(&mut cfg, false).unwrap_err();
+        let err = Outer::transform_secrets(&mut cfg, SecretOp::Decrypt).unwrap_err();
         assert!(
             err.to_string().contains("data_encryption is disabled")
                 || err.to_string().contains("Encrypted value"),
@@ -355,7 +416,7 @@ mod tests {
             "inner": { "secret": "plain-secret" },
             "maybe": null,
         });
-        Outer::transform_secrets(&mut ok, false).unwrap();
+        Outer::transform_secrets(&mut ok, SecretOp::Decrypt).unwrap();
         assert_eq!(ok["inner"]["secret"], "plain-secret");
     }
 }

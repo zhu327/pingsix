@@ -379,7 +379,7 @@ impl PluginJWTAuth {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::encryption::{EncryptFields, CIPHERTEXT_PREFIX};
+    use crate::utils::encryption::{EncryptFields, SecretOp, CIPHERTEXT_PREFIX};
     use jsonwebtoken::{encode, EncodingKey, Header};
     use serde::Serialize;
 
@@ -435,7 +435,7 @@ mod tests {
             "header": "authorization",
         });
         // Encryption disabled → plaintext pass-through.
-        PluginConfig::transform_secrets(&mut cfg, false).unwrap();
+        PluginConfig::transform_secrets(&mut cfg, SecretOp::Decrypt).unwrap();
         assert_eq!(cfg["secret"], "hmac-secret");
         assert_eq!(
             cfg["public_key"],
@@ -450,7 +450,7 @@ mod tests {
             "secret": format!("{CIPHERTEXT_PREFIX}deadbeef"),
             "public_key": "-----BEGIN PUBLIC KEY-----\nABC\n-----END PUBLIC KEY-----",
         });
-        let err = PluginConfig::transform_secrets(&mut cfg, false).unwrap_err();
+        let err = PluginConfig::transform_secrets(&mut cfg, SecretOp::Decrypt).unwrap_err();
         assert!(
             err.to_string().contains("data_encryption is disabled")
                 || err.to_string().contains("Encrypted value"),
@@ -467,8 +467,8 @@ mod tests {
     fn secrets_transform_const_matches_trait_method() {
         let mut via_const = serde_json::json!({ "secret": "s" });
         let mut via_trait = via_const.clone();
-        (SECRETS_TRANSFORM)(&mut via_const, false).unwrap();
-        PluginConfig::transform_secrets(&mut via_trait, false).unwrap();
+        (SECRETS_TRANSFORM)(&mut via_const, SecretOp::Decrypt).unwrap();
+        PluginConfig::transform_secrets(&mut via_trait, SecretOp::Decrypt).unwrap();
         assert_eq!(via_const, via_trait);
     }
 

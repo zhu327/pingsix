@@ -216,9 +216,25 @@ pingsix:
 
 - Admin API writes encrypt marked fields before they are stored in etcd.
 - etcd load/watch decrypts them into memory; the data plane always sees plaintext.
+- Admin **read** API (GET/LIST) decrypts to the logical resource first, then
+  masks secret fields with `***`. Responses never contain ciphertext, and the
+  output is identical whether or not encryption is enabled.
+- **Resaving a redacted response is safe.** The `***` mask is a reserved
+  sentinel: on PUT, any secret field still set to `***` is restored from the
+  currently stored value, so a GET → edit → PUT round-trip keeps untouched
+  secrets instead of persisting the mask (which would also fail validation, e.g.
+  an SSL key). To rotate a secret, send its new value instead of `***`.
+  (Consequently `***` cannot be used as a literal secret value.)
 - Static YAML config is not encrypted (only the etcd store path).
 - The first keyring entry encrypts. On decrypt, every entry is tried in order
   (newest first) so keys can be rotated without rewriting all resources.
+
+**Ciphertext format:** values are stored as a versioned envelope
+`$pingsix-enc:<version>$<payload>`. The current version `v1` is
+`base64(nonce || ciphertext)` of AES-256-GCM with an Argon2id-derived key. The
+scheme marker makes ciphertext detectable (plaintext passes through unchanged),
+and the version tag lets the format evolve safely; an unknown version is a clear
+error rather than a silent bad decrypt.
 
 **What is encrypted today:**
 
@@ -230,6 +246,33 @@ pingsix:
 | `jwt-auth` | `secret` |
 | `key-auth` | `key`, `keys[]` |
 | `csrf` | `key` |
+
+**Adding a new secret field:** the `#[encrypt]` markers are the single source of
+truth — encrypt-on-write, decrypt-on-read *and* Admin GET/LIST redaction all walk
+the same fields (redaction is just `SecretOp::Redact` over that walk). So:
+
+1. Mark the field with `#[encrypt]` (or `#[encrypt(nested)]` / `#[encrypt(plugins)]`)
+   on the config struct. This alone wires up encrypt, decrypt and redaction.
+2. For a plugin, register the plugin's `SECRETS_TRANSFORM` in
+   `PLUGIN_ENCRYPT_FIELDS` (`src/plugins/mod.rs`) so the resource's `plugins`
+   walk can reach it.
+
+There is no separate redaction list to maintain — masking follows the schema.
+
+**Enabling encryption on an existing store (lazy migration):** turning
+`data_encryption` on does *not* rewrite resources already in etcd — they stay
+plaintext and continue to load normally (decrypt is a no-op on plaintext). Each
+resource migrates to ciphertext the next time it is written through the Admin
+API. Notably, **resaving a redacted GET body is enough**: on GET the secret is
+returned masked as `***`; on the resave PUT that sentinel is restored from the
+in-memory stored value and the write path encrypts it, so the operator does not
+need to re-enter the secret. Untouched resources remain plaintext until they are
+re-`PUT`, so plan a rewrite pass (re-`PUT` each `ssls`/`upstreams` and any
+route/service/global_rule carrying plugin secrets) if you want the whole store
+encrypted at rest.
+
+> Because `***` is a reserved sentinel, a resave restores the previously stored
+> secret; to actually change a secret, send its new value instead of `***`.
 
 **Key rotation:** add the new key at the top of `keyring`, keep old keys below
 until all stored values have been rewritten (or you no longer need them).
@@ -249,17 +292,42 @@ snapshot keeps serving traffic in the meantime).
 > overwriting (re-`PUT`) the affected resource with a value the current keyring
 > can handle.
 
-> ⚠️ **Before disabling encryption, rewrite every encrypted value back to
-> plaintext first** (e.g. re-`PUT` each affected `ssls`, `upstreams`, and any
-> route/service/global_rule carrying encrypted plugin secrets *while encryption
-> is still enabled with a matching keyring*), then set `enable: false`.
-> Likewise, **do not change the key derivation or the value of an in-use keyring
-> entry** while its ciphertext remains in etcd — the derived key would change and
-> old values become undecryptable. If you hit
+> ⚠️ **Disabling encryption is a manual migration.** The Admin write path always
+> encrypts while `enable: true`, so you cannot rewrite values to plaintext by
+> re-`PUT`ting them with encryption still on. And once `enable: false`, any
+> ciphertext left in etcd can no longer be read (fail-closed). Because the read
+> API only ever returns secrets masked as `***`, **you must already hold the
+> plaintext secret values** (SSL keys, plugin secrets) out of band. To disable:
+>
+> 1. Set `enable: false` (and drop the keyring). Affected resources whose etcd
+>    value is still ciphertext will fail to load until rewritten; a running
+>    instance keeps serving its last-known-good snapshot in the meantime.
+> 2. Re-`PUT` each affected `ssls`, `upstreams`, and any
+>    route/service/global_rule carrying plugin secrets, **supplying the real
+>    plaintext values** (not the `***` mask — a masked resave cannot be restored
+>    once decryption is off). With encryption disabled these are stored as
+>    plaintext, overwriting the ciphertext.
+>
+> For throwaway/test data you can instead clear and recreate the affected keys
+> (e.g. `etcdctl del --prefix <prefix>`).
+
+> ⚠️ **Do not change the key derivation or the value of an in-use keyring entry**
+> while its ciphertext remains in etcd — the derived key would change and old
+> values become undecryptable. If you hit
 > `Failed to decrypt value with any configured keyring key`, it means etcd holds
 > ciphertext that the current configuration cannot decrypt; restore the correct
-> keyring, or clear/rewrite the affected keys (e.g. `etcdctl del --prefix <prefix>`
-> for throwaway/test data).
+> keyring, or clear/rewrite the affected keys.
+
+**Interoperability (writers other than the Admin API):** encryption happens on
+the Admin write path. Any component that writes resources **directly to etcd**
+(for example the
+[pingsix-ingress-controller](https://github.com/zhu327/pingsix-ingress-controller))
+bypasses that path and would store secrets in plaintext, producing a mixed
+plaintext/ciphertext store. If you enable `data_encryption`, ensure every writer
+is encryption-aware, or keep such writers on a deployment where encryption is
+off. Note also that APISIX-style `consumers` (which carry per-consumer plugin
+credentials) are a further place secrets live; they are **not** encrypted yet and
+should be considered when planning ingress-controller compatibility.
 
 ## Docker Deployment
 
@@ -1791,8 +1859,9 @@ struct PluginConfig {
   `EncryptFields` but must **not** use `#[encrypt_fields(export)]` (one export
   per plugin module).
 - `#[serde(rename = "...")]` is honoured: encryption uses the JSON field name.
-- Keep Admin GET redaction in sync (`redact` in `src/admin/mod.rs`) so secrets
-  are not echoed in API responses.
+- Admin GET/LIST redaction is automatic: it reuses the same `#[encrypt]` walk
+  (`SecretOp::Redact`), so a marked field is masked in API responses without any
+  extra bookkeeping.
 
 Resource-level secrets outside plugins (SSL `key`, upstream `tls.client_key`)
 are wired in the Admin encrypt path and control-plane decrypt path the same

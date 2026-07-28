@@ -17,6 +17,10 @@ use serde_json::Value as JsonValue;
 use serde_with::{serde_as, DisplayFromStr};
 use validator::{Validate, ValidationError};
 
+/// Re-export so external callers (integration tests, other crates) can name the
+/// argument type of [`transform_resource_secrets`].
+pub use crate::utils::encryption::SecretOp;
+
 // Pre-compiled regex for upstream node validation to avoid per-request compilation overhead
 static NODE_KEY_REGEX: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
@@ -356,26 +360,27 @@ pub fn init_data_encryption(enable: bool, keyring: &[String]) -> crate::core::Pr
     crate::utils::encryption::init(enable, keyring)
 }
 
-/// Encrypt (`encrypting = true`) or decrypt sensitive fields of a resource's
+/// Apply `op` (encrypt / decrypt / redact) to sensitive fields of a resource's
 /// JSON representation, dispatched by etcd resource type.
 ///
-/// This is the single wiring point shared by the admin write path (encrypt) and
-/// the control-plane load path (decrypt). Each resource type delegates to its
-/// own `#[derive(EncryptFields)]` implementation, so marking a new secret field
-/// with `#[encrypt]` on the struct is all that is required — no changes here.
+/// This is the single wiring point shared by the admin write path (encrypt),
+/// the control-plane load path (decrypt) and the admin read API (redact). Each
+/// resource type delegates to its own `#[derive(EncryptFields)]` implementation,
+/// so marking a new secret field with `#[encrypt]` on the struct wires up all
+/// three paths at once — no changes here, and no separate redaction list.
 /// Unknown resource types pass through unchanged.
 pub fn transform_resource_secrets(
     resource_type: &str,
     value: &mut JsonValue,
-    encrypting: bool,
+    op: SecretOp,
 ) -> crate::core::ProxyResult<()> {
     use crate::utils::encryption::EncryptFields;
     match resource_type {
-        "ssls" => SSL::transform_secrets(value, encrypting),
-        "upstreams" => Upstream::transform_secrets(value, encrypting),
-        "routes" => Route::transform_secrets(value, encrypting),
-        "services" => Service::transform_secrets(value, encrypting),
-        "global_rules" => GlobalRule::transform_secrets(value, encrypting),
+        "ssls" => SSL::transform_secrets(value, op),
+        "upstreams" => Upstream::transform_secrets(value, op),
+        "routes" => Route::transform_secrets(value, op),
+        "services" => Service::transform_secrets(value, op),
+        "global_rules" => GlobalRule::transform_secrets(value, op),
         _ => Ok(()),
     }
 }
@@ -1519,7 +1524,7 @@ upstreams:
                 "client_key": format!("{CIPHERTEXT_PREFIX}deadbeef"),
             }
         });
-        let err = Upstream::transform_secrets(&mut cfg, false).unwrap_err();
+        let err = Upstream::transform_secrets(&mut cfg, SecretOp::Decrypt).unwrap_err();
         assert!(
             err.to_string().contains("data_encryption is disabled")
                 || err.to_string().contains("Encrypted value"),
@@ -1546,7 +1551,7 @@ upstreams:
                 }
             }
         });
-        let err = transform_resource_secrets("routes", &mut route, false).unwrap_err();
+        let err = transform_resource_secrets("routes", &mut route, SecretOp::Decrypt).unwrap_err();
         assert!(
             err.to_string().contains("data_encryption is disabled")
                 || err.to_string().contains("Encrypted value"),
@@ -1564,7 +1569,7 @@ upstreams:
                 }
             }
         });
-        let err = transform_resource_secrets("routes", &mut route, false).unwrap_err();
+        let err = transform_resource_secrets("routes", &mut route, SecretOp::Decrypt).unwrap_err();
         assert!(
             err.to_string().contains("data_encryption is disabled")
                 || err.to_string().contains("Encrypted value"),
@@ -1573,7 +1578,7 @@ upstreams:
 
         // Unknown resource types are a no-op pass-through.
         let mut other = serde_json::json!({ "foo": "bar" });
-        transform_resource_secrets("unknown", &mut other, false).unwrap();
+        transform_resource_secrets("unknown", &mut other, SecretOp::Decrypt).unwrap();
         assert_eq!(other["foo"], "bar");
     }
 

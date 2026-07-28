@@ -19,6 +19,8 @@ use syn::{
 /// - `#[encrypt]` — encrypt this string (or string-array) field
 /// - `#[encrypt(nested)]` — recurse into a nested struct that also derives
 ///   `EncryptFields` (supports `Option<T>` and plain `T`)
+/// - `#[encrypt(plugins)]` — treat this field as a `name -> config` map and
+///   transform each entry via the `PLUGIN_ENCRYPT_FIELDS` registry
 /// - `#[encrypt_fields(export)]` on the struct — emit module-level
 ///   `pub(crate) const SECRETS_TRANSFORM` (use once per module, on the root)
 ///
@@ -99,7 +101,7 @@ fn expand_encrypt_fields(input: &DeriveInput) -> Result<proc_macro2::TokenStream
                     crate::utils::encryption::transform_leaf_field(
                         __obj,
                         #json_name,
-                        __encrypting,
+                        __op,
                     )?;
                 });
             }
@@ -110,7 +112,7 @@ fn expand_encrypt_fields(input: &DeriveInput) -> Result<proc_macro2::TokenStream
                         if !__nested.is_null() {
                             <#inner_ty as crate::utils::encryption::EncryptFields>::transform_secrets(
                                 __nested,
-                                __encrypting,
+                                __op,
                             )?;
                         }
                     }
@@ -124,7 +126,7 @@ fn expand_encrypt_fields(input: &DeriveInput) -> Result<proc_macro2::TokenStream
                                 if let Some(__transform) =
                                     crate::plugins::PLUGIN_ENCRYPT_FIELDS.get(__name.as_str())
                                 {
-                                    __transform(__cfg, __encrypting)?;
+                                    __transform(__cfg, __op)?;
                                 }
                             }
                         }
@@ -150,12 +152,12 @@ fn expand_encrypt_fields(input: &DeriveInput) -> Result<proc_macro2::TokenStream
         impl crate::utils::encryption::EncryptFields for #name {
             fn transform_secrets(
                 config: &mut serde_json::Value,
-                encrypting: bool,
+                op: crate::utils::encryption::SecretOp,
             ) -> crate::core::ProxyResult<()> {
                 let Some(__obj) = config.as_object_mut() else {
                     return Ok(());
                 };
-                let __encrypting = encrypting;
+                let __op = op;
                 #(#transform_stmts)*
                 Ok(())
             }
