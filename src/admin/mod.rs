@@ -15,11 +15,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use validator::Validate;
 
 use crate::{
-    config::{
-        self,
-        etcd::{json_to_resource, EtcdClientWrapper},
-        Admin, Identifiable, Pingsix,
-    },
+    config::{self, etcd::EtcdClientWrapper, Admin, Identifiable, Pingsix, SecretOp},
     core::{constant_time_eq, ProxyError},
     plugins::{build_plugin, traffic_split},
     proxy::{
@@ -166,8 +162,13 @@ const MAX_BODY_SIZE: usize = 1_048_576;
 trait AdminResource: DeserializeOwned + Validate + Identifiable + Send + Sync + 'static {
     const RESOURCE_TYPE: &'static str;
 
-    fn validate_resource(data: &[u8]) -> ApiResult<Self> {
-        let resource = json_to_resource::<Self>(data)?;
+    fn validate_resource_value(value: serde_json::Value) -> ApiResult<Self> {
+        let resource: Self = serde_json::from_value(value).map_err(|e| {
+            ApiError::ProxyError(ProxyError::serialization_error(
+                "Failed to deserialize JSON",
+                e,
+            ))
+        })?;
 
         // Basic field validation using the validator crate
         resource
@@ -298,11 +299,34 @@ impl<T: AdminResource> Handler for ResourceHandler<T> {
 
         let key = Self::extract_key(&params)?;
 
-        // Use generic resource validation
-        T::validate_resource(&body_data)?;
-
-        let value: serde_json::Value = serde_json::from_slice(&body_data)
+        let mut value: serde_json::Value = serde_json::from_slice(&body_data)
             .map_err(|e| ApiError::ValidationError(format!("Invalid JSON: {e}")))?;
+
+        // A GET/LIST response masks secrets with the redaction sentinel ("***").
+        // If the client round-trips such a body back (edit-and-resave), restore
+        // each still-masked secret from the currently stored resource so we do
+        // not persist/validate the sentinel (which e.g. is not a valid SSL key).
+        // Secrets the client actually changed carry a real value and are kept.
+        if contains_redaction_sentinel(&value) {
+            if let Some(raw) = etcd
+                .get(&key)
+                .await
+                .map_err(|e| ApiError::EtcdGetError(e.to_string()))?
+            {
+                let existing: serde_json::Value = serde_json::from_slice(&raw).map_err(|e| {
+                    ApiError::ProxyError(ProxyError::serialization_error(
+                        "Failed to parse stored resource",
+                        e,
+                    ))
+                })?;
+                let existing = decrypt_for_read(T::RESOURCE_TYPE, existing)?;
+                restore_redacted_secrets(T::RESOURCE_TYPE, &mut value, &existing);
+            }
+        }
+
+        // Use generic resource validation
+        T::validate_resource_value(value.clone())?;
+
         let body_data = encrypt_resource_for_storage(T::RESOURCE_TYPE, value)?;
         let committed = graph_mutation::put_resource(etcd, &key, body_data).await?;
 
@@ -332,8 +356,9 @@ impl<T: AdminResource> Handler for GetHandler<T> {
                             e,
                         ))
                     })?;
+                let logical = decrypt_for_read(T::RESOURCE_TYPE, json_value)?;
                 let wrapper = ValueWrapper {
-                    value: redact(T::RESOURCE_TYPE, json_value),
+                    value: redact(T::RESOURCE_TYPE, logical),
                 };
                 Ok(ResponseBuilder::success_json(&wrapper))
             }
@@ -379,10 +404,11 @@ impl<T: AdminResource> Handler for ListHandler<T> {
                     e,
                 ))
             })?;
+            let logical = decrypt_for_read(T::RESOURCE_TYPE, value)?;
 
             let item = serde_json::json!({
                 "key": key,
-                "value": redact(T::RESOURCE_TYPE, value),
+                "value": redact(T::RESOURCE_TYPE, logical),
                 "createdIndex": kv.create_revision(),
                 "modifiedIndex": kv.mod_revision(),
             });
@@ -574,100 +600,87 @@ async fn read_request_body(http_session: &mut ServerSession) -> Result<Vec<u8>, 
     Ok(body_data)
 }
 
-/// Recursively redact sensitive fields in a JSON value.
+/// Mask secret fields (SSL/TLS private keys, plugin credentials) with `***` for
+/// the read API. Applied to the logical (decrypted) resource; see
+/// [`decrypt_for_read`].
 ///
-/// Redaction is path/type-aware to avoid clobbering non-secret fields that
-/// happen to share a name with a secret elsewhere (e.g. an Upstream's
-/// `hash_on` `key`, whose value is something like `"uri"`). Sensitivity is
-/// decided by `resource_type` plus the structural position of the field:
-///
-/// - `ssls`: top-level `key` (the private key) is redacted.
-/// - `upstreams`: the `tls.client_key` field is redacted; the top-level `key`
-///   (a `hash_on` selector) is left intact.
-/// - `routes`/`services`/`global_rules`: inside a `plugins` object, the
-///   plugin-specific credential fields are redacted:
-///   `jwt-auth.secret`, `basic-auth.password`, `key-auth.keys[]`, `csrf.key`.
-///
-/// `in_upstream_tls` is set when the current object is an upstream's `tls`
-/// object. `plugin_name` is `Some(name)` when the current object is a single
-/// plugin's config inside a `plugins` map.
-pub(crate) fn redact(resource_type: &str, value: serde_json::Value) -> serde_json::Value {
-    redact_value(value, resource_type, false, None)
+/// Redaction reuses the exact same `#[encrypt]` field walk as encrypt/decrypt
+/// (via [`SecretOp::Redact`]), so the masked set is the single source of truth:
+/// marking a field `#[encrypt]` masks it here automatically, with no parallel
+/// list to maintain. It performs no crypto and never touches the keyring, so it
+/// cannot fail.
+pub fn redact(resource_type: &str, mut value: serde_json::Value) -> serde_json::Value {
+    config::transform_resource_secrets(resource_type, &mut value, SecretOp::Redact)
+        .expect("redaction performs no fallible crypto");
+    value
 }
 
-fn redact_value(
-    value: serde_json::Value,
+/// Sentinel [`redact`] writes over secrets; on write it means "keep the stored
+/// value" rather than "set the secret to this literal string".
+const REDACTED_SENTINEL: &str = "***";
+
+/// Does any string leaf equal the redaction sentinel? Used to skip the extra
+/// etcd read/decrypt on the common PUT path where the client sends real values.
+fn contains_redaction_sentinel(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(s) => s == REDACTED_SENTINEL,
+        serde_json::Value::Array(items) => items.iter().any(contains_redaction_sentinel),
+        serde_json::Value::Object(map) => map.values().any(contains_redaction_sentinel),
+        _ => false,
+    }
+}
+
+/// Restore secrets the client left redacted (`"***"`) on a PUT from the stored
+/// resource, so a GET/LIST → edit → PUT round-trip preserves untouched secrets.
+///
+/// Restoration is scoped to true secret leaves: redacting a copy of the stored
+/// (decrypted) resource yields exactly the secret paths, and only there is an
+/// incoming sentinel swapped for the stored plaintext. A client rotating a
+/// secret sends its new value (not the sentinel), which is left untouched.
+pub fn restore_redacted_secrets(
     resource_type: &str,
-    in_upstream_tls: bool,
-    plugin_name: Option<&str>,
-) -> serde_json::Value {
-    match value {
+    incoming: &mut serde_json::Value,
+    existing_plaintext: &serde_json::Value,
+) {
+    let secret_map = redact(resource_type, existing_plaintext.clone());
+    restore_walk(incoming, existing_plaintext, &secret_map);
+}
+
+/// Walk driven by `secret_map` (the redacted stored resource): its sentinel
+/// leaves mark secret paths. Where `incoming` still holds the sentinel at such a
+/// path, replace it with the stored plaintext at the same path.
+fn restore_walk(
+    incoming: &mut serde_json::Value,
+    plaintext: &serde_json::Value,
+    secret_map: &serde_json::Value,
+) {
+    match secret_map {
+        serde_json::Value::String(s)
+            if s == REDACTED_SENTINEL && incoming.as_str() == Some(REDACTED_SENTINEL) =>
+        {
+            *incoming = plaintext.clone();
+        }
         serde_json::Value::Object(map) => {
-            let mut out = serde_json::Map::with_capacity(map.len());
-            for (name, v) in map {
-                let redacted = if in_upstream_tls && name == "client_key" {
-                    redact_string(v)
-                } else if let Some(plugin) = plugin_name {
-                    match (plugin, name.as_str()) {
-                        ("jwt-auth", "secret")
-                        | ("basic-auth", "password")
-                        | ("csrf", "key")
-                        | ("key-auth", "key") => redact_string(v),
-                        ("key-auth", "keys") => redact_keys_array(v),
-                        _ => redact_value(v, resource_type, false, None),
-                    }
-                } else if resource_type == "ssls" && name == "key" {
-                    redact_string(v)
-                } else if name == "tls" {
-                    redact_value(v, resource_type, true, None)
-                } else if name == "plugins" {
-                    redact_plugins(v, resource_type)
-                } else {
-                    redact_value(v, resource_type, false, None)
-                };
-                out.insert(name, redacted);
+            let (Some(inc), Some(pt)) = (incoming.as_object_mut(), plaintext.as_object()) else {
+                return;
+            };
+            for (key, sub) in map {
+                if let (Some(iv), Some(pv)) = (inc.get_mut(key), pt.get(key)) {
+                    restore_walk(iv, pv, sub);
+                }
             }
-            serde_json::Value::Object(out)
         }
-        serde_json::Value::Array(arr) => serde_json::Value::Array(
-            arr.into_iter()
-                .map(|el| redact_value(el, resource_type, false, None))
-                .collect(),
-        ),
-        other => other,
-    }
-}
-
-/// Redact a `plugins` object whose keys are plugin names and whose values are
-/// each plugin's config. Each plugin config is recursed with its name as
-/// context so only plugin-specific credential fields are redacted.
-fn redact_plugins(value: serde_json::Value, resource_type: &str) -> serde_json::Value {
-    match value {
-        serde_json::Value::Object(map) => {
-            let mut out = serde_json::Map::with_capacity(map.len());
-            for (plugin_name, v) in map {
-                let redacted = redact_value(v, resource_type, false, Some(plugin_name.as_str()));
-                out.insert(plugin_name, redacted);
+        serde_json::Value::Array(items) => {
+            let (Some(inc), Some(pt)) = (incoming.as_array_mut(), plaintext.as_array()) else {
+                return;
+            };
+            for (i, sub) in items.iter().enumerate() {
+                if let (Some(iv), Some(pv)) = (inc.get_mut(i), pt.get(i)) {
+                    restore_walk(iv, pv, sub);
+                }
             }
-            serde_json::Value::Object(out)
         }
-        other => other,
-    }
-}
-
-fn redact_string(v: serde_json::Value) -> serde_json::Value {
-    match v {
-        serde_json::Value::String(_) => serde_json::Value::String("***".into()),
-        other => other,
-    }
-}
-
-fn redact_keys_array(v: serde_json::Value) -> serde_json::Value {
-    match v {
-        serde_json::Value::Array(arr) => {
-            serde_json::Value::Array(arr.into_iter().map(redact_string).collect())
-        }
-        other => other,
+        _ => {}
     }
 }
 
@@ -682,14 +695,31 @@ fn encrypt_resource_for_storage(
     mut value: serde_json::Value,
 ) -> ApiResult<Vec<u8>> {
     if crate::utils::encryption::is_enabled() {
-        config::transform_resource_secrets(resource_type, &mut value, true).map_err(|e| {
-            ApiError::ValidationError(format!("Failed to encrypt resource secrets: {e}"))
-        })?;
+        config::transform_resource_secrets(resource_type, &mut value, SecretOp::Encrypt).map_err(
+            |e| ApiError::ValidationError(format!("Failed to encrypt resource secrets: {e}")),
+        )?;
     }
 
     serde_json::to_vec(&value).map_err(|e| {
         ApiError::ValidationError(format!("Failed to serialize resource for storage: {e}"))
     })
+}
+
+/// Decrypt a resource's secret fields for the read API (GET/LIST) so responses
+/// reflect the logical stored resource — mirroring the control-plane load path —
+/// before [`redact`] masks those secrets. No-op when encryption is disabled.
+///
+/// Decryption is fail-closed: an undecryptable value surfaces an error rather
+/// than leaking ciphertext into the API response.
+fn decrypt_for_read(
+    resource_type: &str,
+    mut value: serde_json::Value,
+) -> ApiResult<serde_json::Value> {
+    if crate::utils::encryption::is_enabled() {
+        config::transform_resource_secrets(resource_type, &mut value, SecretOp::Decrypt)
+            .map_err(ApiError::ProxyError)?;
+    }
+    Ok(value)
 }
 
 #[cfg(test)]
@@ -851,7 +881,9 @@ mod tests {
                 }
             }
         });
-        for resource_type in ["routes", "services", "global_rules"] {
+        // Only routes/services carry an inline upstream in their schema; global
+        // rules have no upstream, so schema-driven redaction doesn't touch one.
+        for resource_type in ["routes", "services"] {
             let out = redact(resource_type, input.clone());
             assert_eq!(out["upstream"]["tls"]["client_key"], "***");
             assert_eq!(out["upstream"]["tls"]["client_cert"], "cert-data");
@@ -897,6 +929,96 @@ mod tests {
         });
         let out = redact("routes", input.clone());
         assert_eq!(out, input);
+    }
+
+    #[test]
+    fn restore_keeps_masked_secret_and_accepts_rotation() {
+        // Stored (decrypted) SSL with a real private key.
+        let existing = serde_json::json!({
+            "id": "s1",
+            "cert": "cert-pem",
+            "key": "-----BEGIN PRIVATE KEY-----\nreal\n-----END PRIVATE KEY-----",
+        });
+
+        // Client resaves the redacted GET body verbatim: the sentinel must be
+        // swapped back to the stored key, so validation sees the real value.
+        let mut resave = serde_json::json!({
+            "id": "s1",
+            "cert": "cert-pem",
+            "key": "***",
+        });
+        restore_redacted_secrets("ssls", &mut resave, &existing);
+        assert_eq!(resave["key"], existing["key"]);
+        assert_eq!(resave["cert"], "cert-pem");
+
+        // Client rotates the key: a real (non-sentinel) value is left untouched.
+        let mut rotate = serde_json::json!({
+            "id": "s1",
+            "cert": "cert-pem",
+            "key": "-----BEGIN PRIVATE KEY-----\nnew\n-----END PRIVATE KEY-----",
+        });
+        restore_redacted_secrets("ssls", &mut rotate, &existing);
+        assert_eq!(
+            rotate["key"],
+            "-----BEGIN PRIVATE KEY-----\nnew\n-----END PRIVATE KEY-----"
+        );
+    }
+
+    #[test]
+    fn restore_walks_plugins_nested_upstream_and_arrays() {
+        let existing = serde_json::json!({
+            "uri": "/",
+            "plugins": {
+                "basic-auth": { "username": "demo", "password": "s3cret" },
+                "key-auth": { "key": "k0", "keys": ["k1", "k2"] },
+            },
+            "upstream": {
+                "nodes": { "127.0.0.1:443": 1 },
+                "tls": {
+                    "client_cert": "cert-pem",
+                    "client_key": "-----BEGIN PRIVATE KEY-----\nreal\n-----END PRIVATE KEY-----",
+                },
+            },
+        });
+
+        // What a client would resave from a redacted GET, changing only username.
+        let mut resave = serde_json::json!({
+            "uri": "/",
+            "plugins": {
+                "basic-auth": { "username": "changed", "password": "***" },
+                "key-auth": { "key": "***", "keys": ["***", "***"] },
+            },
+            "upstream": {
+                "nodes": { "127.0.0.1:443": 1 },
+                "tls": { "client_cert": "cert-pem", "client_key": "***" },
+            },
+        });
+
+        restore_redacted_secrets("routes", &mut resave, &existing);
+
+        assert_eq!(resave["plugins"]["basic-auth"]["username"], "changed");
+        assert_eq!(resave["plugins"]["basic-auth"]["password"], "s3cret");
+        assert_eq!(resave["plugins"]["key-auth"]["key"], "k0");
+        assert_eq!(
+            resave["plugins"]["key-auth"]["keys"],
+            serde_json::json!(["k1", "k2"])
+        );
+        assert_eq!(
+            resave["upstream"]["tls"]["client_key"],
+            existing["upstream"]["tls"]["client_key"]
+        );
+        // No sentinel may survive restoration on a full round-trip.
+        assert!(!contains_redaction_sentinel(&resave));
+    }
+
+    #[test]
+    fn restore_ignores_non_secret_sentinel() {
+        // A non-secret field the client literally sets to "***" must be kept as
+        // typed (it is not a secret path, so it is not restored).
+        let existing = serde_json::json!({ "uri": "/old", "id": "r1" });
+        let mut resave = serde_json::json!({ "uri": "***", "id": "r1" });
+        restore_redacted_secrets("routes", &mut resave, &existing);
+        assert_eq!(resave["uri"], "***");
     }
 
     #[test]

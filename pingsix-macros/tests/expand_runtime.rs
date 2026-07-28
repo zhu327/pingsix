@@ -15,25 +15,32 @@ mod utils {
 
         use crate::core::ProxyResult;
 
-        pub trait EncryptFields {
-            fn transform_secrets(config: &mut Value, encrypting: bool) -> ProxyResult<()>;
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        pub enum SecretOp {
+            Encrypt,
+            Decrypt,
+            Redact,
         }
 
-        pub type PluginSecretsTransform = fn(&mut Value, bool) -> ProxyResult<()>;
+        pub trait EncryptFields {
+            fn transform_secrets(config: &mut Value, op: SecretOp) -> ProxyResult<()>;
+        }
+
+        pub type PluginSecretsTransform = fn(&mut Value, SecretOp) -> ProxyResult<()>;
 
         pub fn transform_leaf_field(
             obj: &mut serde_json::Map<String, Value>,
             field: &str,
-            encrypting: bool,
+            op: SecretOp,
         ) -> ProxyResult<()> {
             match obj.get_mut(field) {
                 Some(Value::String(value)) => {
-                    *value = transform_string(value, encrypting);
+                    *value = transform_string(value, op);
                 }
                 Some(Value::Array(items)) => {
                     for item in items {
                         if let Value::String(value) = item {
-                            *value = transform_string(value, encrypting);
+                            *value = transform_string(value, op);
                         }
                     }
                 }
@@ -42,15 +49,17 @@ mod utils {
             Ok(())
         }
 
-        fn transform_string(value: &str, encrypting: bool) -> String {
-            if encrypting {
-                if value.starts_with("enc:") {
-                    value.to_string()
-                } else {
-                    format!("enc:{value}")
+        fn transform_string(value: &str, op: SecretOp) -> String {
+            match op {
+                SecretOp::Encrypt => {
+                    if value.starts_with("enc:") {
+                        value.to_string()
+                    } else {
+                        format!("enc:{value}")
+                    }
                 }
-            } else {
-                value.strip_prefix("enc:").unwrap_or(value).to_string()
+                SecretOp::Decrypt => value.strip_prefix("enc:").unwrap_or(value).to_string(),
+                SecretOp::Redact => "***".to_string(),
             }
         }
     }
@@ -58,7 +67,7 @@ mod utils {
 
 use pingsix_macros::EncryptFields;
 use serde::Deserialize;
-use utils::encryption::EncryptFields;
+use utils::encryption::{EncryptFields, SecretOp};
 
 #[derive(EncryptFields)]
 struct LeafConfig {
@@ -114,21 +123,21 @@ fn leaf_encrypt_decrypt_round_trip() {
         "username": "demo",
         "password": "s3cret",
     });
-    LeafConfig::transform_secrets(&mut cfg, true).unwrap();
+    LeafConfig::transform_secrets(&mut cfg, SecretOp::Encrypt).unwrap();
     assert_eq!(cfg["username"], "demo");
     assert_eq!(cfg["password"], "enc:s3cret");
 
-    LeafConfig::transform_secrets(&mut cfg, false).unwrap();
+    LeafConfig::transform_secrets(&mut cfg, SecretOp::Decrypt).unwrap();
     assert_eq!(cfg["password"], "s3cret");
 }
 
 #[test]
 fn string_array_encrypts_each_element() {
     let mut cfg = serde_json::json!({ "keys": ["a", "b"] });
-    ArrayConfig::transform_secrets(&mut cfg, true).unwrap();
+    ArrayConfig::transform_secrets(&mut cfg, SecretOp::Encrypt).unwrap();
     assert_eq!(cfg["keys"], serde_json::json!(["enc:a", "enc:b"]));
 
-    ArrayConfig::transform_secrets(&mut cfg, false).unwrap();
+    ArrayConfig::transform_secrets(&mut cfg, SecretOp::Decrypt).unwrap();
     assert_eq!(cfg["keys"], serde_json::json!(["a", "b"]));
 }
 
@@ -139,7 +148,7 @@ fn nested_and_optional_nested() {
         "credentials": { "password": "p" },
         "optional": null,
     });
-    NestedConfig::transform_secrets(&mut cfg, true).unwrap();
+    NestedConfig::transform_secrets(&mut cfg, SecretOp::Encrypt).unwrap();
     assert_eq!(cfg["api_key"], "enc:k");
     assert_eq!(cfg["credentials"]["password"], "enc:p");
     assert!(cfg["optional"].is_null());
@@ -149,7 +158,7 @@ fn nested_and_optional_nested() {
         "credentials": { "password": "p" },
         "optional": { "password": "q" },
     });
-    NestedConfig::transform_secrets(&mut with_opt, true).unwrap();
+    NestedConfig::transform_secrets(&mut with_opt, SecretOp::Encrypt).unwrap();
     assert_eq!(with_opt["optional"]["password"], "enc:q");
 }
 
@@ -161,8 +170,8 @@ fn export_emits_module_level_secrets_transform() {
         "optional": null,
     });
     let mut via_trait = via_const.clone();
-    (SECRETS_TRANSFORM)(&mut via_const, true).unwrap();
-    NestedConfig::transform_secrets(&mut via_trait, true).unwrap();
+    (SECRETS_TRANSFORM)(&mut via_const, SecretOp::Encrypt).unwrap();
+    NestedConfig::transform_secrets(&mut via_trait, SecretOp::Encrypt).unwrap();
     assert_eq!(via_const, via_trait);
     assert_eq!(via_const["api_key"], "enc:k");
     assert_eq!(via_const["credentials"]["password"], "enc:p");
@@ -171,7 +180,7 @@ fn export_emits_module_level_secrets_transform() {
 #[test]
 fn serde_rename_uses_json_key() {
     let mut cfg = serde_json::json!({ "pass": "secret" });
-    RenamedConfig::transform_secrets(&mut cfg, true).unwrap();
+    RenamedConfig::transform_secrets(&mut cfg, SecretOp::Encrypt).unwrap();
     assert_eq!(cfg["pass"], "enc:secret");
     assert!(cfg.get("password").is_none());
 }
@@ -179,7 +188,7 @@ fn serde_rename_uses_json_key() {
 #[test]
 fn rename_all_maps_field_to_wire_key() {
     let mut cfg = serde_json::json!({ "apiKey": "k", "pw": "s" });
-    RenameAllConfig::transform_secrets(&mut cfg, true).unwrap();
+    RenameAllConfig::transform_secrets(&mut cfg, SecretOp::Encrypt).unwrap();
     assert_eq!(cfg["apiKey"], "enc:k");
     assert_eq!(cfg["pw"], "enc:s");
     // The snake_case idents must not be treated as wire keys.
@@ -190,6 +199,18 @@ fn rename_all_maps_field_to_wire_key() {
 #[test]
 fn encrypt_is_idempotent_on_already_marked_values() {
     let mut cfg = serde_json::json!({ "password": "enc:s3cret", "username": "u" });
-    LeafConfig::transform_secrets(&mut cfg, true).unwrap();
+    LeafConfig::transform_secrets(&mut cfg, SecretOp::Encrypt).unwrap();
     assert_eq!(cfg["password"], "enc:s3cret");
+}
+
+#[test]
+fn redact_masks_marked_leaves_only() {
+    let mut cfg = serde_json::json!({ "username": "demo", "password": "s3cret" });
+    LeafConfig::transform_secrets(&mut cfg, SecretOp::Redact).unwrap();
+    assert_eq!(cfg["username"], "demo");
+    assert_eq!(cfg["password"], "***");
+
+    let mut arr = serde_json::json!({ "keys": ["a", "b"] });
+    ArrayConfig::transform_secrets(&mut arr, SecretOp::Redact).unwrap();
+    assert_eq!(arr["keys"], serde_json::json!(["***", "***"]));
 }

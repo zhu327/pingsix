@@ -147,7 +147,7 @@ impl ProxyPlugin for PluginBasicAuth {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::encryption::EncryptFields;
+    use crate::utils::encryption::{EncryptFields, SecretOp};
 
     fn build_plugin(username: &str, password: &str) -> PluginBasicAuth {
         PluginBasicAuth {
@@ -168,7 +168,7 @@ mod tests {
             "password": "s3cret",
         });
         // Encryption disabled → plaintext pass-through.
-        PluginConfig::transform_secrets(&mut cfg, false).unwrap();
+        PluginConfig::transform_secrets(&mut cfg, SecretOp::Decrypt).unwrap();
         assert_eq!(cfg["username"], "demo");
         assert_eq!(cfg["password"], "s3cret");
     }

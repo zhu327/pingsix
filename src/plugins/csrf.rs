@@ -277,7 +277,7 @@ impl ProxyPlugin for PluginCsrf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::encryption::EncryptFields;
+    use crate::utils::encryption::{EncryptFields, SecretOp};
 
     fn build_plugin(expires: u64) -> PluginCsrf {
         PluginCsrf {
@@ -296,7 +296,7 @@ mod tests {
             "name": "csrf-token",
             "expires": 7200,
         });
-        PluginConfig::transform_secrets(&mut cfg, false).unwrap();
+        PluginConfig::transform_secrets(&mut cfg, SecretOp::Decrypt).unwrap();
         assert_eq!(cfg["key"], "unit-test-key");
         assert_eq!(cfg["name"], "csrf-token");
     }
