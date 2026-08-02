@@ -1200,7 +1200,7 @@ pub(crate) fn parse_key(
 mod tests {
     use super::*;
     use crate::config::{
-        SelectionType, Upstream, UpstreamHashOn, UpstreamPassHost, UpstreamScheme,
+        Nodes, SelectionType, Upstream, UpstreamHashOn, UpstreamPassHost, UpstreamScheme,
     };
     use crate::proxy::runtime::RUNTIME_TEST_LOCK;
     use std::collections::HashMap as StdHashMap;
@@ -1214,7 +1214,7 @@ mod tests {
             retries: None,
             retry_timeout: None,
             timeout: None,
-            nodes,
+            nodes: Nodes::from_map(nodes),
             r#type: SelectionType::RoundRobin,
             checks: None,
             hash_on: UpstreamHashOn::VARS,
@@ -1537,7 +1537,7 @@ mod tests {
         .unwrap();
 
         assert!(raw.upstreams.contains_key("u1"));
-        assert!(raw.upstreams["u1"].nodes.contains_key("10.0.0.2:80"));
+        assert!(raw.upstreams["u1"].nodes.contains_addr("10.0.0.2:80"));
     }
 
     #[test]
@@ -1646,8 +1646,8 @@ mod tests {
             ],
         )
         .unwrap();
-        assert!(raw.upstreams["u1"].nodes.contains_key("10.0.0.9:80"));
-        assert!(!raw.upstreams["u1"].nodes.contains_key("10.0.0.1:80"));
+        assert!(raw.upstreams["u1"].nodes.contains_addr("10.0.0.9:80"));
+        assert!(!raw.upstreams["u1"].nodes.contains_addr("10.0.0.1:80"));
     }
 
     #[test]
@@ -1763,7 +1763,10 @@ mod tests {
         let snap = RUNTIME.load();
         let new_ptr = Arc::as_ptr(snap.upstreams.get("u1").unwrap());
         assert_ne!(old_ptr, new_ptr);
-        assert!(snap.upstreams["u1"].inner.nodes.contains_key("10.0.0.2:80"));
+        assert!(snap.upstreams["u1"]
+            .inner
+            .nodes
+            .contains_addr("10.0.0.2:80"));
         assert_eq!(snap.revision, 2);
     }
 }

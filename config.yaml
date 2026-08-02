@@ -140,6 +140,26 @@ upstreams:
       "127.0.0.1:1980": 1
     type: roundrobin
     scheme: http
+  - id: 3
+    nodes:
+      - host: "127.0.0.1"
+        port: 8091
+        weight: 1
+        priority: 1 # first group
+      - host: "127.0.0.1"
+        port: 8092
+        weight: 1
+        priority: 1 # first group
+      - host: "127.0.0.1"
+        port: 9091
+        weight: 1
+        priority: 0 # second group
+      - host: "127.0.0.1"
+        port: 9092
+        weight: 1
+        priority: -1 # last group
+    type: roundrobin
+    scheme: http
 
 services:
   - id: 1

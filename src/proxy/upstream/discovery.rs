@@ -16,8 +16,8 @@ use pingora_load_balancing::{
     discovery::{ServiceDiscovery, Static},
     Backend,
 };
-use regex::Regex;
 
+use crate::proxy::upstream::selection::{insert_backend, set_backend_priority};
 use crate::{
     config::{self, Upstream, UpstreamPassHost, UpstreamScheme, UpstreamTls},
     core::{ProxyError, ProxyResult},
@@ -79,6 +79,7 @@ pub struct DnsDiscovery {
     port: u32,
     scheme: UpstreamScheme,
     weight: u32,
+    priority: i8,
     client_cert_key: Option<Arc<CertKey>>,
 }
 
@@ -89,6 +90,7 @@ impl DnsDiscovery {
         port: u32,
         scheme: UpstreamScheme,
         weight: u32,
+        priority: i8,
         resolver: Arc<TokioResolver>,
         client_cert_key: Option<Arc<CertKey>>,
     ) -> Self {
@@ -98,6 +100,7 @@ impl DnsDiscovery {
             port,
             scheme,
             weight,
+            priority,
             client_cert_key,
         }
     }
@@ -156,6 +159,7 @@ impl ServiceDiscovery for DnsDiscovery {
                     "backend already had HttpPeer metadata"
                 );
 
+                set_backend_priority(&mut backend, self.priority);
                 Some(backend)
             })
             .collect();
@@ -288,7 +292,9 @@ impl ServiceDiscovery for HybridDiscovery {
         for result in results.into_iter() {
             match result {
                 Ok((part_backends, part_health_checks)) => {
-                    backends.extend(part_backends);
+                    for backend in part_backends {
+                        insert_backend(&mut backends, backend);
+                    }
                     health_checks.extend(part_health_checks);
                 }
                 Err(e) => {
@@ -327,21 +333,24 @@ impl TryFrom<Upstream> for HybridDiscovery {
         };
 
         // Process each node in upstream
-        for (addr, weight) in upstream.nodes.iter() {
-            let (host, port) = parse_host_and_port(addr)?;
-            let port = port.unwrap_or(match upstream.scheme {
-                UpstreamScheme::HTTPS | UpstreamScheme::GRPCS => 443,
-                _ => 80,
-            });
-
-            // Strip brackets from IPv6 for parsing, then add them back for SocketAddr
-            let host_for_parse = if host.starts_with('[') && host.ends_with(']') {
-                &host[1..host.len() - 1]
+        for node in upstream.nodes.iter() {
+            // Weight 0 means the node is configured but disabled for selection.
+            if !node.is_enabled() {
+                continue;
+            }
+            let port = if node.port == 0 {
+                match upstream.scheme {
+                    UpstreamScheme::HTTPS | UpstreamScheme::GRPCS => 443,
+                    _ => 80,
+                }
             } else {
-                host.as_str()
+                node.port
             };
 
-            if let Ok(ip_addr) = host_for_parse.parse::<IpAddr>() {
+            let weight = node.weight;
+            let host = node.bare_host();
+
+            if let Ok(ip_addr) = host.parse::<IpAddr>() {
                 // It's an IP address
                 // Handle backend creation for IP addresses - add brackets for IPv6
                 let addr_str = if ip_addr.is_ipv6() {
@@ -350,7 +359,7 @@ impl TryFrom<Upstream> for HybridDiscovery {
                     format!("{ip_addr}:{port}")
                 };
                 let mut backend =
-                    Backend::new_with_weight(&addr_str, *weight as _).map_err(|e| {
+                    Backend::new_with_weight(&addr_str, weight as usize).map_err(|e| {
                         ProxyError::Configuration(format!(
                             "Failed to create backend for {addr_str}: {e}"
                         ))
@@ -388,16 +397,18 @@ impl TryFrom<Upstream> for HybridDiscovery {
                     "backend already had HttpPeer metadata"
                 );
 
-                backends.insert(backend);
+                set_backend_priority(&mut backend, node.priority);
+                insert_backend(&mut backends, backend);
             } else {
                 // It's a domain name
                 // Handle DNS discovery for domain names
                 let resolver = get_global_resolver()?;
                 let discovery = DnsDiscovery::new(
-                    host,
-                    port,
+                    host.to_string(),
+                    u32::from(port),
                     upstream.scheme,
-                    *weight,
+                    weight,
+                    node.priority,
                     resolver,
                     client_cert_key.clone(),
                 );
@@ -413,45 +424,8 @@ impl TryFrom<Upstream> for HybridDiscovery {
     }
 }
 
-/// Regular expression for parsing host and port from an address string.
-static HOST_PORT_REGEX: once_cell::sync::Lazy<Regex> = once_cell::sync::Lazy::new(|| {
-    Regex::new(r"^(?:\[(.+?)\]|([^:]+))(?::(\d+))?$").expect("Invalid HOST_PORT_REGEX pattern")
-});
-
-/// Parses a host and port from a string.
-///
-/// Supports IPv4, IPv6, and domain names, with optional port.
-/// Returns IPv6 addresses enclosed in square brackets for consistency.
-fn parse_host_and_port(addr: &str) -> ProxyResult<(String, Option<u32>)> {
-    let caps = HOST_PORT_REGEX
-        .captures(addr)
-        .ok_or_else(|| ProxyError::Configuration("Invalid address format".to_string()))?;
-
-    let host = caps
-        .get(1)
-        .or(caps.get(2))
-        .ok_or_else(|| {
-            ProxyError::Configuration("Failed to extract host from address".to_string())
-        })?
-        .as_str();
-
-    let port = if let Some(port_str) = caps.get(3).map(|p| p.as_str()) {
-        Some(
-            port_str
-                .parse::<u32>()
-                .map_err(|_| ProxyError::Configuration("Invalid port number".to_string()))?,
-        )
-    } else {
-        None
-    };
-
-    // Return host as-is without brackets - brackets will be added later when constructing SocketAddr
-    Ok((host.to_string(), port))
-}
-
 #[cfg(test)]
 mod tests {
-    use super::parse_host_and_port;
     use super::*;
 
     /// Stub `ServiceDiscovery` that returns a fixed set of backends or an error.
@@ -536,31 +510,5 @@ mod tests {
             .await
             .expect("expected Ok when all discoveries succeed");
         assert_eq!(backends.len(), 2);
-    }
-
-    #[test]
-    fn test_parse_upstream_node() {
-        let test_cases = [
-            ("127.0.0.1", ("127.0.0.1".to_string(), None)),
-            // IPv6 addresses are now returned without brackets (brackets added later for SocketAddr)
-            ("[::1]", ("::1".to_string(), None)),
-            ("example.com", ("example.com".to_string(), None)),
-            ("example.com:80", ("example.com".to_string(), Some(80))),
-            ("192.168.1.1:8080", ("192.168.1.1".to_string(), Some(8080))),
-            (
-                "[2001:db8:85a3::8a2e:370:7334]:8080",
-                ("2001:db8:85a3::8a2e:370:7334".to_string(), Some(8080)),
-            ),
-        ];
-
-        for (input, expected) in test_cases {
-            let result = parse_host_and_port(input).unwrap();
-            assert_eq!(result, expected, "Failed for input: {input}");
-        }
-
-        // Test invalid cases
-        assert!(parse_host_and_port("").is_err());
-        assert!(parse_host_and_port("invalid:port").is_err());
-        assert!(parse_host_and_port("127.0.0.1:invalid").is_err());
     }
 }

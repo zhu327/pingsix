@@ -8,6 +8,7 @@
 pub mod discovery;
 pub mod health_check;
 pub mod load_balancer;
+pub mod selection;
 
 use std::collections::HashMap;
 

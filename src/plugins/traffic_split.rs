@@ -326,7 +326,7 @@ pub(crate) fn create_traffic_split_plugin_with_upstreams(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{SelectionType, UpstreamHashOn, UpstreamPassHost, UpstreamScheme};
+    use crate::config::{Nodes, SelectionType, UpstreamHashOn, UpstreamPassHost, UpstreamScheme};
 
     fn sample_upstream(id: &str) -> Upstream {
         let mut nodes = HashMap::new();
@@ -337,7 +337,7 @@ mod tests {
             retries: None,
             retry_timeout: None,
             timeout: None,
-            nodes,
+            nodes: Nodes::from_map(nodes),
             r#type: SelectionType::RoundRobin,
             checks: None,
             hash_on: UpstreamHashOn::VARS,

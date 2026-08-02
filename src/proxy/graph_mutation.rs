@@ -160,7 +160,7 @@ fn map_txn_error(e: ProxyError) -> GraphMutationError {
 mod tests {
     use super::*;
     use crate::config::{
-        SelectionType, Upstream, UpstreamHashOn, UpstreamPassHost, UpstreamScheme,
+        Nodes, SelectionType, Upstream, UpstreamHashOn, UpstreamPassHost, UpstreamScheme,
     };
 
     fn sample_upstream_json(id: &str, node: &str) -> Vec<u8> {
@@ -172,7 +172,7 @@ mod tests {
             retries: None,
             retry_timeout: None,
             timeout: None,
-            nodes,
+            nodes: Nodes::from_map(nodes),
             r#type: SelectionType::RoundRobin,
             checks: None,
             hash_on: UpstreamHashOn::VARS,

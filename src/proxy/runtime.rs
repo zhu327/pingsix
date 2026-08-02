@@ -100,10 +100,12 @@ pub fn fingerprint_upstream_for_health_check(
     if let Ok(scheme) = serde_json::to_vec(&upstream.scheme) {
         scheme.hash(&mut hasher);
     }
-    let mut addrs: Vec<_> = upstream.nodes.keys().collect();
-    addrs.sort();
-    for addr in addrs {
-        addr.hash(&mut hasher);
+
+    let mut nodes: Vec<_> = upstream.nodes.iter().collect();
+    nodes.sort_by_key(|n| n.sort_key());
+    for node in nodes {
+        node.bare_host().hash(&mut hasher);
+        node.port.hash(&mut hasher);
     }
     if let Ok(bytes) = serde_json::to_vec(&upstream.checks) {
         bytes.hash(&mut hasher);
@@ -333,7 +335,7 @@ pub(crate) static RUNTIME_TEST_LOCK: Mutex<()> = Mutex::new(());
 mod tests {
     use super::*;
     use crate::config::{
-        SelectionType, Upstream, UpstreamHashOn, UpstreamPassHost, UpstreamScheme,
+        Nodes, SelectionType, Upstream, UpstreamHashOn, UpstreamPassHost, UpstreamScheme,
     };
 
     fn sample_upstream(id: &str, nodes: &[(&str, u32)]) -> Upstream {
@@ -347,7 +349,7 @@ mod tests {
             retries: None,
             retry_timeout: None,
             timeout: None,
-            nodes: map,
+            nodes: Nodes::from_map(map),
             r#type: SelectionType::RoundRobin,
             checks: None,
             hash_on: UpstreamHashOn::VARS,
