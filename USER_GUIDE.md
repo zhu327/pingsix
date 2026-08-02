@@ -91,9 +91,9 @@ Routes define how incoming requests are matched and processed. Each route specif
 ### Upstreams
 
 Upstreams define backend server pools with:
-- **Nodes**: List of backend servers with weights
-- **Load balancing**: Algorithm for distributing requests
-- **Health checks**: Monitoring backend server health
+- **Nodes**: Backend servers with weight and optional priority (map or list form)
+- **Load balancing**: Algorithm for distributing requests within a priority group
+- **Health checks**: Monitoring backend server health; selection prefers the highest ready priority
 - **Name** (optional): Human-readable name
 
 ### Services
@@ -1106,6 +1106,10 @@ routes:
 
 ### Basic Upstream Configuration
 
+Nodes accept two wire forms. Both normalize to the same in-memory list after load.
+
+**Map form** (legacy — weight only; priority defaults to `0`):
+
 ```yaml
 upstreams:
   - id: "backend-pool"
@@ -1115,6 +1119,45 @@ upstreams:
       "server3.example.com:8080": 1    # Weight 1
     type: roundrobin
 ```
+
+**List form** (APISIX-compatible — `host`, `port`, `weight`, `priority`):
+
+```yaml
+upstreams:
+  - id: "backend-pool-priority"
+    type: roundrobin
+    scheme: https
+    nodes:
+      - host: primary.example.com
+        port: 443
+        weight: 1
+        priority: 10          # Higher priority is preferred
+      - host: standby.example.com
+        port: 443
+        weight: 1
+        priority: 0           # Used when priority 10 has no ready node
+      - host: cold.example.com
+        port: 443
+        weight: 1
+        priority: -1          # i8 range: −128..127; lower than 0
+```
+
+**Node fields:**
+- **`weight`**: Relative share inside a priority group. `0` keeps the node in config but excludes it from selection.
+- **`priority`**: Selection group (`i8`: -128..127, default `0`). Higher values win. Same priority = same group.
+
+**Priority selection (with health checks):**
+1. Group enabled nodes (`weight > 0`) by `priority`.
+2. Prefer the highest priority group that still has at least one ready (healthy) backend.
+3. Inside that group, use the upstream `type` algorithm (roundrobin, random, fnv, ketama) and weights.
+4. If a higher group becomes healthy again, the next request uses it.
+5. If no group has a ready backend, selection falls back to the configured algorithm across all enabled nodes (health ignored). Without health checks, all nodes are treated as ready, so traffic stays on the highest priority.
+
+**Constraints:**
+- Each enabled node must have a unique `host`+`port` (Pingora backends are keyed by address; duplicate addresses cannot carry different priorities).
+- DNS-resolved IPs inherit the parent node's priority.
+
+
 
 ### Load Balancing Algorithms
 
@@ -1998,7 +2041,7 @@ curl -X DELETE http://127.0.0.1:9181/apisix/admin/routes/1 \
 
 #### Upstreams Management
 
-**Create/Update Upstream**:
+**Create/Update Upstream**: (map form — weight only, priority defaults to `0`):
 ```bash
 curl -X PUT http://127.0.0.1:9181/apisix/admin/upstreams/1 \
   -H "X-API-KEY: your-api-key" \
@@ -2024,6 +2067,59 @@ curl -X PUT http://127.0.0.1:9181/apisix/admin/upstreams/1 \
     }
   }'
 ```
+
+**Create/Update Upstream** (list form — priority-based selection):
+```bash
+curl -X PUT http://127.0.0.1:9181/apisix/admin/upstreams/2 \
+  -H "X-API-KEY: your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "roundrobin",
+    "scheme": "https",
+    "pass_host": "rewrite",
+    "upstream_host": "api.example.com",
+    "nodes": [
+      {
+        "host": "primary.example.com",
+        "port": 443,
+        "weight": 1,
+        "priority": 10
+      },
+      {
+        "host": "standby.example.com",
+        "port": 443,
+        "weight": 1,
+        "priority": 0
+      },
+      {
+        "host": "cold.example.com",
+        "port": 443,
+        "weight": 1,
+        "priority": -1
+      }
+    ],
+    "checks": {
+      "active": {
+        "type": "https",
+        "timeout": 1,
+        "host": "api.example.com",
+        "http_path": "/health",
+        "https_verify_certificate": true,
+        "healthy": {
+          "interval": 5,
+          "http_statuses": [200, 201],
+          "successes": 2
+        },
+        "unhealthy": {
+          "http_failures": 2,
+          "tcp_failures": 1
+        }
+      }
+    }
+  }'
+```
+
+Selection uses the highest priority group that still has a ready backend (see [Basic Upstream Configuration](#basic-upstream-configuration)). Enable `checks` so lower-priority nodes are used only after higher ones fail health checks. Do not reuse the same `host`+`port` with different priorities.
 
 **List All Upstreams**:
 ```bash

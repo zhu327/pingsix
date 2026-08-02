@@ -1,4 +1,5 @@
 pub mod etcd;
+mod node;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -7,26 +8,19 @@ use std::{
 };
 
 use http::Method;
-use once_cell::sync::Lazy;
 use pingora::server::configuration::{Opt, ServerConf};
 use pingora_error::{Error, ErrorType::*, OrErr, Result};
 use pingsix_macros::EncryptFields;
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use serde_with::{serde_as, DisplayFromStr};
 use validator::{Validate, ValidationError};
 
+pub use node::{Node, Nodes};
+
 /// Re-export so external callers (integration tests, other crates) can name the
 /// argument type of [`transform_resource_secrets`].
 pub use crate::utils::encryption::SecretOp;
-
-// Pre-compiled regex for upstream node validation to avoid per-request compilation overhead
-static NODE_KEY_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(
-        r"(?i)^(?:(?:\d{1,3}\.){3}\d{1,3}|\[[0-9a-f:]+\]|[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*)(?::\d+)?$"
-    ).expect("Invalid regex pattern for node key validation")
-});
 
 /// Enables uniform ID handling across configuration entities for validation.
 pub trait Identifiable {
@@ -730,8 +724,8 @@ pub struct Upstream {
     pub retry_timeout: Option<u64>,
     #[validate(nested)]
     pub timeout: Option<Timeout>,
-    #[validate(length(min = 1), custom(function = "Upstream::validate_nodes_keys"))]
-    pub nodes: HashMap<String, u32>,
+    #[validate(nested)]
+    pub nodes: Nodes,
     #[serde(default)]
     pub r#type: SelectionType,
     #[validate(nested)]
@@ -764,55 +758,6 @@ impl Upstream {
         } else {
             Ok(())
         }
-    }
-
-    // Custom validation function for `nodes` keys
-    fn validate_nodes_keys(nodes: &HashMap<String, u32>) -> Result<(), ValidationError> {
-        for (key, weight) in nodes {
-            if !NODE_KEY_REGEX.is_match(key) {
-                let mut err = ValidationError::new("invalid_node_key");
-                err.add_param("key".into(), key);
-                return Err(err);
-            }
-
-            if *weight == 0 {
-                let mut err = ValidationError::new("invalid_node_weight");
-                err.add_param("key".into(), key);
-                err.add_param("weight".into(), weight);
-                return Err(err);
-            }
-
-            if let Some(port_str) = Self::extract_port(key) {
-                let port = port_str.parse::<u32>().map_err(|_| {
-                    let mut err = ValidationError::new("invalid_node_port");
-                    err.add_param("key".into(), key);
-                    err.add_param("port".into(), &port_str);
-                    err
-                })?;
-
-                if port == 0 || port > 65535 {
-                    let mut err = ValidationError::new("invalid_node_port");
-                    err.add_param("key".into(), key);
-                    err.add_param("port".into(), &port);
-                    return Err(err);
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    fn extract_port(key: &str) -> Option<&str> {
-        if key.starts_with('[') {
-            if let Some(bracket_end) = key.find(']') {
-                if key.len() > bracket_end + 1 && &key[bracket_end + 1..bracket_end + 2] == ":" {
-                    return Some(&key[bracket_end + 2..]);
-                }
-                return None;
-            }
-        }
-
-        key.rfind(':').map(|idx| &key[idx + 1..])
     }
 }
 
@@ -2046,5 +1991,45 @@ routes:
             domain: None,
         };
         assert!(tls.validate().is_ok());
+    }
+
+    #[test]
+    fn upstream_yaml_accepts_both_map_and_list_nodes() {
+        let map_yaml = r#"
+id: u1
+nodes:
+  "127.0.0.1:1980": 1
+"#;
+        let list_yaml = r#"
+id: u2
+nodes:
+  - host: 127.0.0.1
+    port: 1980
+    weight: 1
+"#;
+        let from_map: Upstream = serde_yml::from_str(map_yaml).unwrap();
+        let from_list: Upstream = serde_yml::from_str(list_yaml).unwrap();
+        assert!(from_map.nodes.contains_addr("127.0.0.1:1980"));
+        assert!(from_list.nodes.contains_addr("127.0.0.1:1980"));
+        assert!(from_map.validate().is_ok());
+        assert!(from_list.validate().is_ok());
+    }
+
+    #[test]
+    fn upstream_rejects_mixed_map_and_list_node_forms() {
+        // YAML cannot express map entries and sequence items in the same
+        // mapping value; the document itself is invalid.
+        let mixed_yaml = r#"
+id: u1
+nodes:
+  "127.0.0.1:1980": 1
+  - host: 10.0.0.2
+    port: 1980
+    weight: 1
+"#;
+        assert!(
+            serde_yml::from_str::<Upstream>(mixed_yaml).is_err(),
+            "mixed map/list under nodes must not parse"
+        );
     }
 }

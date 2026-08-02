@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{borrow::Cow, sync::Arc, time::Duration};
 
 use futures::FutureExt;
 use http::Uri;
@@ -18,12 +18,17 @@ use pingora_proxy::Session;
 use crate::{
     config::{self, Identifiable},
     core::{ProxyError, ProxyResult, UpstreamSelector},
+    proxy::upstream::selection,
     utils::request::request_selector_key,
 };
 
 #[cfg(test)]
 use super::discovery::prepare_static_upstream;
 use super::discovery::{HybridDiscovery, PreparedUpstream, SeededDiscovery};
+
+/// Upper bound on backends probed per selection attempt, as required by
+/// [`LoadBalancer::select_with`].
+const MAX_LB_ITERATIONS: usize = 256;
 
 /// Runs a closure over the inner LB for any SelectionLB variant, eliminating repetitive match arms.
 macro_rules! with_lb {
@@ -69,12 +74,18 @@ pub(crate) fn cache_origin_fingerprint(upstream: &config::Upstream) -> u64 {
         timeout.send.hash(&mut hasher);
         timeout.read.hash(&mut hasher);
     }
+
+    // HashMap wire order / list insertion order must not change the fingerprint
+    // for an otherwise identical node set. Sort by bare host + port.
     let mut nodes: Vec<_> = upstream.nodes.iter().collect();
-    nodes.sort_by(|a, b| a.0.cmp(b.0));
-    for (addr, weight) in nodes {
-        addr.hash(&mut hasher);
-        weight.hash(&mut hasher);
+    nodes.sort_by_key(|n| n.sort_key());
+    for node in nodes {
+        node.bare_host().hash(&mut hasher);
+        node.port.hash(&mut hasher);
+        node.weight.hash(&mut hasher);
+        node.priority.hash(&mut hasher);
     }
+
     if let Some(tls) = &upstream.tls {
         // Digest PEM material so client identity changes invalidate cache without
         // embedding secrets in the key.
@@ -138,7 +149,7 @@ impl ProxyUpstream {
     /// Test helper: select a backend without a full proxy session.
     #[cfg(test)]
     pub(crate) fn select_backend_for_test(&self) -> Option<Backend> {
-        let mut backend = with_lb!(&self.lb, |lb| lb.upstreams.select(b"", 256));
+        let mut backend = with_lb!(&self.lb, |lb| lb.select(b""));
         if let Some(backend) = backend.as_mut() {
             if let Some(peer) = backend.ext.get_mut::<HttpPeer>() {
                 self.set_timeout(peer);
@@ -161,26 +172,23 @@ impl ProxyUpstream {
         p.options.read_timeout = Some(Duration::from_secs(read));
         p.options.write_timeout = Some(Duration::from_secs(send));
     }
+
+    /// Hash key for the session-aware selection algorithms.
+    fn hash_key<'a>(&self, session: &'a mut Session) -> Cow<'a, str> {
+        let key = request_selector_key(session, &self.inner.hash_on, self.inner.key.as_str());
+        log::debug!("proxy lb key: {key}");
+        key
+    }
 }
 
 // Implementation of UpstreamSelector trait for decoupling from core module
 impl UpstreamSelector for ProxyUpstream {
-    fn select_backend<'a>(&'a self, session: &'a mut Session) -> Option<Backend> {
+    fn select_backend(&self, session: &mut Session) -> Option<Backend> {
         let mut backend = match &self.lb {
-            SelectionLB::RoundRobin(lb) => lb.upstreams.select(b"", 256),
-            SelectionLB::Random(lb) => lb.upstreams.select(b"", 256),
-            SelectionLB::Fnv(lb) => {
-                let key =
-                    request_selector_key(session, &self.inner.hash_on, self.inner.key.as_str());
-                log::debug!("proxy lb key: {key}");
-                lb.upstreams.select(key.as_bytes(), 256)
-            }
-            SelectionLB::Ketama(lb) => {
-                let key =
-                    request_selector_key(session, &self.inner.hash_on, self.inner.key.as_str());
-                log::debug!("proxy lb key: {key}");
-                lb.upstreams.select(key.as_bytes(), 256)
-            }
+            SelectionLB::RoundRobin(lb) => lb.select(b""),
+            SelectionLB::Random(lb) => lb.select(b""),
+            SelectionLB::Fnv(lb) => lb.select(self.hash_key(session).as_bytes()),
+            SelectionLB::Ketama(lb) => lb.select(self.hash_key(session).as_bytes()),
         };
 
         if let Some(backend) = backend.as_mut() {
@@ -247,6 +255,8 @@ impl SelectionLB {
 
 struct LB<BS: BackendSelection> {
     upstreams: Arc<LoadBalancer<BS>>,
+    /// Distinct node priority levels, precomputed once at build time.
+    priority_levels: selection::PriorityLevels,
 }
 
 impl<BS> LB<BS>
@@ -254,7 +264,18 @@ where
     BS: BackendSelection + Send + Sync + 'static,
     BS::Iter: BackendIter,
 {
+    /// Select a backend honouring node priority, then health.
+    fn select(&self, key: &[u8]) -> Option<Backend> {
+        selection::select_backend(
+            &self.upstreams,
+            &self.priority_levels,
+            key,
+            MAX_LB_ITERATIONS,
+        )
+    }
+
     fn from_prepared(upstream: config::Upstream, prepared: PreparedUpstream) -> ProxyResult<Self> {
+        let priority_levels = selection::PriorityLevels::from_backends(&prepared.backends);
         let refresh: HybridDiscovery = upstream.clone().try_into()?;
         let discovery = SeededDiscovery::new(prepared, refresh);
         let mut upstreams = LoadBalancer::<BS>::from_backends(Backends::new(Box::new(discovery)));
@@ -299,7 +320,10 @@ where
             ))
         })?;
 
-        Ok(Self { upstreams })
+        Ok(Self {
+            upstreams,
+            priority_levels,
+        })
     }
 }
 
@@ -404,10 +428,19 @@ impl From<config::HealthCheck> for Box<HttpHealthCheck> {
 mod tests {
     use super::*;
     use crate::config::{
-        init_default_upstream_timeout, SelectionType, Timeout, UpstreamHashOn, UpstreamPassHost,
-        UpstreamScheme,
+        init_default_upstream_timeout, Nodes, SelectionType, Timeout, UpstreamHashOn,
+        UpstreamPassHost, UpstreamScheme,
     };
     use std::collections::HashMap;
+
+    fn node(host: &str, port: u16, priority: i8) -> config::Node {
+        config::Node {
+            host: host.into(),
+            port,
+            weight: 1,
+            priority,
+        }
+    }
 
     fn sample_upstream(id: &str, timeout: Option<Timeout>) -> config::Upstream {
         let mut nodes = HashMap::new();
@@ -418,7 +451,7 @@ mod tests {
             retries: None,
             retry_timeout: None,
             timeout,
-            nodes,
+            nodes: Nodes::from_map(nodes),
             r#type: SelectionType::RoundRobin,
             checks: None,
             hash_on: UpstreamHashOn::VARS,
@@ -485,6 +518,26 @@ mod tests {
     }
 
     #[test]
+    fn cache_origin_fingerprint_is_stable_across_node_order() {
+        let mut a_nodes = HashMap::new();
+        a_nodes.insert("10.0.0.2:80".into(), 1);
+        a_nodes.insert("10.0.0.1:80".into(), 2);
+        let mut b_nodes = HashMap::new();
+        b_nodes.insert("10.0.0.1:80".into(), 2);
+        b_nodes.insert("10.0.0.2:80".into(), 1);
+
+        let a = config::Upstream {
+            nodes: config::Nodes::from_map(a_nodes),
+            ..sample_upstream("u1", None)
+        };
+        let b = config::Upstream {
+            nodes: config::Nodes::from_map(b_nodes),
+            ..sample_upstream("u1", None)
+        };
+        assert_eq!(cache_origin_fingerprint(&a), cache_origin_fingerprint(&b));
+    }
+
+    #[test]
     fn cache_origin_fingerprint_changes_with_host_rewrite() {
         let base = sample_upstream("u1", None);
         let fp1 = cache_origin_fingerprint(&base);
@@ -497,11 +550,44 @@ mod tests {
             "pass_host/upstream_host must change cache origin fingerprint"
         );
         let mut nodes_changed = base;
-        nodes_changed.nodes.insert("10.0.0.2:80".into(), 1);
+        nodes_changed
+            .nodes
+            .push("10.0.0.2:80".parse().expect("valid node address"));
         assert_ne!(
             fp1,
             cache_origin_fingerprint(&nodes_changed),
             "node set must change cache origin fingerprint"
         );
+    }
+
+    #[test]
+    fn negative_priority_is_lower_than_zero() {
+        let upstream = ProxyUpstream::build_static(config::Upstream {
+            nodes: Nodes(vec![
+                node("127.0.0.1", 18301, 0),
+                node("127.0.0.1", 18302, -1),
+            ]),
+            ..sample_upstream("neg", None)
+        })
+        .unwrap();
+
+        let backend = upstream.select_backend_for_test().unwrap();
+        assert_eq!(backend.addr.to_string(), "127.0.0.1:18301");
+        assert_eq!(selection::backend_priority(&backend), 0);
+    }
+
+    #[test]
+    fn duplicate_addr_keeps_higher_priority() {
+        // Pingora Backend identity ignores ext; same addr+weight collapses.
+        // We keep the higher priority so negative cannot "stick" over 0/10.
+        let prepared = prepare_static_upstream(&config::Upstream {
+            nodes: Nodes(vec![node("127.0.0.1", 443, -1), node("127.0.0.1", 443, 10)]),
+            ..sample_upstream("dup", None)
+        })
+        .unwrap();
+
+        assert_eq!(prepared.backends.len(), 1);
+        let only = prepared.backends.iter().next().unwrap();
+        assert_eq!(selection::backend_priority(only), 10);
     }
 }
