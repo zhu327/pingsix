@@ -11,7 +11,9 @@ use crate::config::{Upstream, UpstreamHashOn};
 use crate::core::{
     HealthCheckSpec, ProxyContext, ProxyError, ProxyPlugin, ProxyResult, UpstreamSelector,
 };
-use crate::proxy::upstream::{traffic_split_key, PreparedUpstreams, ProxyUpstream};
+use crate::proxy::upstream::{
+    PreparedUpstreams, ProxyUpstream, TrafficSplitOwner, UpstreamOccurrence,
+};
 use crate::utils::request::request_selector_key;
 
 pub const PLUGIN_NAME: &str = "traffic-split";
@@ -66,29 +68,15 @@ impl ProxyPlugin for PluginTrafficSplit {
         PRIORITY
     }
 
-    fn health_check_targets(
-        &self,
-    ) -> Vec<(
-        String,
-        Arc<dyn pingora_core::services::background::BackgroundService + Send + Sync>,
-    )> {
+    fn health_check_specs(&self) -> Vec<HealthCheckSpec> {
         self.health_check_specs
             .iter()
-            .map(|spec| (spec.key.clone(), spec.service.clone()))
+            .map(|spec| HealthCheckSpec {
+                key: spec.key.clone(),
+                fingerprint: spec.fingerprint,
+                service: spec.service.clone(),
+            })
             .collect()
-    }
-
-    fn health_check_specs(&self) -> Option<Vec<HealthCheckSpec>> {
-        Some(
-            self.health_check_specs
-                .iter()
-                .map(|spec| HealthCheckSpec {
-                    key: spec.key.clone(),
-                    fingerprint: spec.fingerprint,
-                    service: spec.service.clone(),
-                })
-                .collect(),
-        )
     }
 
     async fn request_filter(&self, session: &mut Session, ctx: &mut ProxyContext) -> Result<bool> {
@@ -167,10 +155,19 @@ impl PluginTrafficSplit {
     }
 }
 
-pub fn create_traffic_split_plugin(cfg: JsonValue) -> ProxyResult<Arc<dyn ProxyPlugin>> {
-    // Admin / registry path: structural validation only. Named upstream existence is
-    // checked later by CandidateSnapshot against the same-version resource graph.
-    create_traffic_split_plugin_with_upstreams(cfg, &HashMap::new(), &HashMap::new(), "admin")
+/// Registry entry for dependency-aware plugin builds. Delegates to
+/// [`create_traffic_split_plugin_with_upstreams`] with the build context's
+/// same-version upstreams and prepared material.
+pub(crate) fn create_traffic_split_plugin_with_context(
+    cfg: JsonValue,
+    context: &crate::plugins::PluginBuildContext<'_>,
+) -> ProxyResult<Arc<dyn ProxyPlugin>> {
+    create_traffic_split_plugin_with_upstreams(
+        cfg,
+        context.upstreams,
+        context.prepared,
+        context.owner.clone(),
+    )
 }
 
 /// Validate traffic-split JSON without resolving named upstreams (Admin pre-check).
@@ -231,11 +228,50 @@ pub fn named_upstream_ids(cfg: &JsonValue) -> ProxyResult<Vec<String>> {
     Ok(ids)
 }
 
+/// Collect the inline upstream declarations embedded in a `traffic-split`
+/// plugin config as typed occurrences plus the raw upstream configs.
+///
+/// Shared by the async and static preparation paths so the plugin's config
+/// schema stays owned here instead of being re-traversed by the compiler.
+pub(crate) fn inline_upstream_jobs(
+    owner: TrafficSplitOwner,
+    plugins: &HashMap<String, JsonValue>,
+) -> ProxyResult<Vec<(UpstreamOccurrence, Upstream)>> {
+    let Some(traffic_split) = plugins.get("traffic-split") else {
+        return Ok(Vec::new());
+    };
+    let rules = traffic_split
+        .get("rules")
+        .and_then(JsonValue::as_array)
+        .ok_or_else(|| ProxyError::Configuration("Invalid traffic-split rules".into()))?;
+    let mut jobs = Vec::new();
+    for (rule_index, rule) in rules.iter().enumerate() {
+        let upstreams = rule
+            .get("weighted_upstreams")
+            .and_then(JsonValue::as_array)
+            .ok_or_else(|| {
+                ProxyError::Configuration("Invalid traffic-split weighted_upstreams".into())
+            })?;
+        for (upstream_index, weighted) in upstreams.iter().enumerate() {
+            if let Some(value) = weighted.get("upstream") {
+                let upstream: Upstream = serde_json::from_value(value.clone()).map_err(|e| {
+                    ProxyError::Configuration(format!("Invalid traffic-split upstream: {e}"))
+                })?;
+                jobs.push((
+                    UpstreamOccurrence::TrafficSplit(owner.clone(), rule_index, upstream_index),
+                    upstream,
+                ));
+            }
+        }
+    }
+    Ok(jobs)
+}
+
 pub(crate) fn create_traffic_split_plugin_with_upstreams(
     cfg: JsonValue,
     upstreams: &HashMap<String, Arc<ProxyUpstream>>,
     prepared: &PreparedUpstreams,
-    owner: &str,
+    owner: TrafficSplitOwner,
 ) -> ProxyResult<Arc<dyn ProxyPlugin>> {
     let config: PluginConfig =
         serde_json::from_value(cfg).map_err(|e| ProxyError::Serialization(e.to_string()))?;
@@ -290,7 +326,11 @@ pub(crate) fn create_traffic_split_plugin_with_upstreams(
                 let upstream = Arc::new(ProxyUpstream::build(
                     inline.clone(),
                     prepared
-                        .get(&traffic_split_key(owner, rule_idx, upstream_idx))
+                        .get(&UpstreamOccurrence::TrafficSplit(
+                            owner.clone(),
+                            rule_idx,
+                            upstream_idx,
+                        ))
                         .cloned()
                         .ok_or_else(|| ProxyError::Configuration(format!(
                             "Traffic-split inline upstream {rule_idx}/{upstream_idx} was not prepared"
@@ -364,10 +404,14 @@ mod tests {
             "u1".into(),
             Arc::new(ProxyUpstream::build_static(sample_upstream("u1")).unwrap()),
         );
-        let plugin =
-            create_traffic_split_plugin_with_upstreams(cfg, &upstreams, &HashMap::new(), "test")
-                .unwrap();
-        let specs = plugin.health_check_specs().unwrap();
+        let plugin = create_traffic_split_plugin_with_upstreams(
+            cfg,
+            &upstreams,
+            &HashMap::new(),
+            TrafficSplitOwner::Route("test".into()),
+        )
+        .unwrap();
+        let specs = plugin.health_check_specs();
         assert!(specs.is_empty());
     }
 
@@ -391,7 +435,7 @@ mod tests {
             cfg,
             &upstreams,
             &HashMap::new(),
-            "test"
+            TrafficSplitOwner::Route("test".into())
         )
         .is_ok());
     }
@@ -415,7 +459,7 @@ mod tests {
             cfg,
             &upstreams,
             &HashMap::new(),
-            "test"
+            TrafficSplitOwner::Route("test".into())
         )
         .is_err());
     }
@@ -434,7 +478,7 @@ mod tests {
             cfg,
             &upstreams,
             &HashMap::new(),
-            "test"
+            TrafficSplitOwner::Route("test".into())
         )
         .is_err());
     }

@@ -164,28 +164,14 @@ fn plugin_health_checks(
     prefix: &str,
     plugin: &Arc<dyn crate::core::ProxyPlugin>,
 ) -> Vec<HealthCheckSpec> {
-    // Prefer typed traffic-split targets with upstream config when available.
-    if let Some(specs) = plugin.health_check_specs() {
-        return specs
-            .into_iter()
-            .map(|mut spec| {
-                spec.key = format!("{prefix}/{}", spec.key);
-                spec
-            })
-            .collect();
-    }
-
+    // Typed specs carry stable fingerprints; registration happens only when the
+    // containing runtime snapshot is published.
     plugin
-        .health_check_targets()
+        .health_check_specs()
         .into_iter()
-        .map(|(key, service)| {
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            key.hash(&mut hasher);
-            HealthCheckSpec {
-                key: format!("{prefix}/{key}"),
-                fingerprint: HealthCheckFingerprint(hasher.finish()),
-                service,
-            }
+        .map(|mut spec| {
+            spec.key = format!("{prefix}/{}", spec.key);
+            spec
         })
         .collect()
 }

@@ -233,11 +233,10 @@ impl ProxyPlugin for PluginPrometheus {
             },
         );
 
-        // Extract node from context variables (assumes HttpService::upstream_peer sets ctx["upstream"]) as String
-        let node = ctx
-            .peer
-            .as_ref()
-            .map_or(Cow::Borrowed(""), |p| Cow::Owned(p._address.to_string()));
+        // Extract node from context variables (assumes HttpService::upstream_peer sets ctx.selected) as String
+        let node = ctx.selected.as_ref().map_or(Cow::Borrowed(""), |s| {
+            Cow::Owned(s.peer._address.to_string())
+        });
 
         // Update Prometheus metrics with normalized path template
         STATUS

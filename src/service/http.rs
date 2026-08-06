@@ -28,7 +28,10 @@ use prometheus::{register_int_counter_vec, IntCounterVec};
 
 use crate::{
     config::{self, CacheDefaults},
-    core::{ProxyContext, ProxyError, ProxyPlugin, ProxyPluginExecutor, RouteContext},
+    core::{
+        CompiledPluginPipeline, ProxyContext, ProxyError, ProxyPluginExecutor, RouteContext,
+        UpstreamSelection,
+    },
     plugins::cache::{self, CacheSettings, CTX_KEY_CACHE_SETTINGS},
     proxy::runtime::RUNTIME,
 };
@@ -100,91 +103,11 @@ static CACHE_LOCK: Lazy<Box<CacheKeyLockImpl>> =
 
 /// Proxy service.
 ///
-/// Manages the proxying of requests to upstream servers.
+/// Manages the proxying of requests to upstream servers. Plugin composition,
+/// ordering, and phase traversal live in [`CompiledPluginPipeline`]; this type
+/// only adapts Pingora callbacks to it.
 #[derive(Default)]
 pub struct HttpService;
-
-/// Run global-rule plugins then route/service plugins for `early_request_filter`.
-pub async fn run_global_then_route_early_request_filter(
-    global: Arc<ProxyPluginExecutor>,
-    route: Arc<ProxyPluginExecutor>,
-    session: &mut Session,
-    ctx: &mut ProxyContext,
-) -> Result<()> {
-    global.early_request_filter(session, ctx).await?;
-    route.early_request_filter(session, ctx).await
-}
-
-/// Run global-rule plugins then route/service plugins for `request_filter`.
-///
-/// Returns `true` when a plugin short-circuits the request. Global plugins run
-/// first; a global short-circuit skips the route layer entirely.
-pub async fn run_global_then_route_request_filter(
-    global: Arc<ProxyPluginExecutor>,
-    route: Arc<ProxyPluginExecutor>,
-    session: &mut Session,
-    ctx: &mut ProxyContext,
-) -> Result<bool> {
-    if global.request_filter(session, ctx).await? {
-        return Ok(true);
-    }
-    route.request_filter(session, ctx).await
-}
-
-/// Run global-rule plugins then route/service plugins for `upstream_request_filter`.
-pub async fn run_global_then_route_upstream_request_filter(
-    global: Arc<ProxyPluginExecutor>,
-    route: Arc<ProxyPluginExecutor>,
-    session: &mut Session,
-    upstream_request: &mut RequestHeader,
-    ctx: &mut ProxyContext,
-) -> Result<()> {
-    global
-        .upstream_request_filter(session, upstream_request, ctx)
-        .await?;
-    route
-        .upstream_request_filter(session, upstream_request, ctx)
-        .await
-}
-
-/// Run global-rule plugins then route/service plugins for `response_filter`.
-pub async fn run_global_then_route_response_filter(
-    global: Arc<ProxyPluginExecutor>,
-    route: Arc<ProxyPluginExecutor>,
-    session: &mut Session,
-    upstream_response: &mut ResponseHeader,
-    ctx: &mut ProxyContext,
-) -> Result<()> {
-    global
-        .response_filter(session, upstream_response, ctx)
-        .await?;
-    route.response_filter(session, upstream_response, ctx).await
-}
-
-/// Run global-rule plugins then route/service plugins for `response_body_filter`.
-pub fn run_global_then_route_response_body_filter(
-    global: Arc<ProxyPluginExecutor>,
-    route: Arc<ProxyPluginExecutor>,
-    session: &mut Session,
-    body: &mut Option<Bytes>,
-    end_of_stream: bool,
-    ctx: &mut ProxyContext,
-) -> Result<()> {
-    global.response_body_filter(session, body, end_of_stream, ctx)?;
-    route.response_body_filter(session, body, end_of_stream, ctx)
-}
-
-/// Run global-rule plugins then route/service plugins for `logging`.
-pub async fn run_global_then_route_logging(
-    global: Arc<ProxyPluginExecutor>,
-    route: Arc<ProxyPluginExecutor>,
-    session: &mut Session,
-    e: Option<&Error>,
-    ctx: &mut ProxyContext,
-) {
-    global.logging(session, e, ctx).await;
-    route.logging(session, e, ctx).await;
-}
 
 #[async_trait]
 impl ProxyHttp for HttpService {
@@ -217,14 +140,14 @@ impl ProxyHttp for HttpService {
 
         // Load one immutable runtime snapshot for all data-plane configuration used here.
         let runtime = RUNTIME.load();
-        ctx.global_plugin = runtime.global_plugins.clone();
+        let global_plugins = runtime.global_plugins.clone();
         let (route_match, is_fallback_preflight) =
             match runtime.route_matcher.match_request(session) {
                 Some(route_match) => (Some(route_match), false),
                 None => (
                     runtime
                         .route_matcher
-                        .match_preflight(session, runtime.global_plugins.has_plugin("cors")),
+                        .match_preflight(session, global_plugins.has_plugin("cors")),
                     true,
                 ),
             };
@@ -235,21 +158,19 @@ impl ProxyHttp for HttpService {
             debug_assert!(
                 !is_fallback_preflight
                     || executor.has_plugin("cors")
-                    || runtime.global_plugins.has_plugin("cors")
+                    || global_plugins.has_plugin("cors")
             );
             ctx.route_params = Some(route_params);
-            ctx.plugin = executor;
+            ctx.pipeline = CompiledPluginPipeline::new(global_plugins, executor);
             ctx.route = Some(route);
+        } else {
+            ctx.pipeline =
+                CompiledPluginPipeline::new(global_plugins, ProxyPluginExecutor::default_shared());
         }
 
         // Execute global rule plugins, then route/service plugins.
-        run_global_then_route_early_request_filter(
-            ctx.global_plugin.clone(),
-            ctx.plugin.clone(),
-            session,
-            ctx,
-        )
-        .await
+        let pipeline = ctx.pipeline.clone();
+        pipeline.early_request_filter(session, ctx).await
     }
 
     /// Filters incoming requests
@@ -261,13 +182,10 @@ impl ProxyHttp for HttpService {
             return Ok(true);
         }
 
-        run_global_then_route_request_filter(
-            ctx.global_plugin.clone(),
-            ctx.plugin.clone(),
-            session,
-            ctx,
-        )
-        .await
+        // Execute global rule plugins, then route/service plugins. The pipeline
+        // is cloned out of `ctx` so its phase methods can borrow `ctx` mutably.
+        let pipeline = ctx.pipeline.clone();
+        pipeline.request_filter(session, ctx).await
     }
 
     /// Selects an upstream peer for the request
@@ -276,7 +194,9 @@ impl ProxyHttp for HttpService {
         session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
-        let (peer, selected_upstream) = if let Some(upstream) = ctx.upstream_override.clone() {
+        // Both selection paths compile the same artifact: peer + owning
+        // selector. Route timeouts apply to override selections too.
+        let selection = if let Some(upstream) = ctx.upstream_override.clone() {
             let mut backend = upstream.select_backend(session).ok_or_else(|| {
                 ProxyError::UpstreamSelection("Traffic-split selected no backend".to_string())
             })?;
@@ -288,17 +208,17 @@ impl ProxyHttp for HttpService {
             if let Some(route) = ctx.route.as_ref() {
                 crate::proxy::route::apply_route_timeout(route.timeout(), &mut peer);
             }
-            (peer, Some(upstream))
+            UpstreamSelection { peer, upstream }
         } else {
             let route = ctx
                 .route
                 .as_ref()
                 .ok_or_else(|| ProxyError::Internal("Route not found".into()))?;
-            (route.select_http_peer(session)?, route.resolve_upstream())
+            route.select_upstream(session)?
         };
 
-        ctx.selected_upstream = selected_upstream;
-        ctx.peer = Some(peer.clone());
+        let peer = selection.peer.clone();
+        ctx.selected = Some(selection);
         Ok(peer)
     }
 
@@ -309,32 +229,26 @@ impl ProxyHttp for HttpService {
         upstream_request: &mut RequestHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
-        run_global_then_route_upstream_request_filter(
-            ctx.global_plugin.clone(),
-            ctx.plugin.clone(),
-            session,
-            upstream_request,
-            ctx,
-        )
-        .await?;
+        let pipeline = ctx.pipeline.clone();
+        pipeline
+            .upstream_request_filter(session, upstream_request, ctx)
+            .await?;
 
         // Rewrite host header
         // Priority: upstream_override > route upstream
-        if let Some(upstream) = ctx.selected_upstream.as_ref() {
-            match upstream.get_pass_host() {
+        if let Some(selected) = ctx.selected.as_ref() {
+            match selected.upstream.get_pass_host() {
                 config::UpstreamPassHost::PASS => {
                     // Do nothing, preserve original host
                 }
                 config::UpstreamPassHost::REWRITE => {
-                    upstream.upstream_host_rewrite(upstream_request);
+                    selected.upstream.upstream_host_rewrite(upstream_request);
                 }
                 config::UpstreamPassHost::NODE => {
-                    if let Some(peer) = ctx.peer.as_ref() {
-                        if let Err(e) =
-                            upstream_request.insert_header(http::header::HOST, peer.sni.as_str())
-                        {
-                            log::error!("Failed to rewrite upstream host header: {e}");
-                        }
+                    if let Err(e) = upstream_request
+                        .insert_header(http::header::HOST, selected.peer.sni.as_str())
+                    {
+                        log::error!("Failed to rewrite upstream host header: {e}");
                     }
                 }
             }
@@ -368,14 +282,10 @@ impl ProxyHttp for HttpService {
             }
         }
 
-        run_global_then_route_response_filter(
-            ctx.global_plugin.clone(),
-            ctx.plugin.clone(),
-            session,
-            upstream_response,
-            ctx,
-        )
-        .await
+        let pipeline = ctx.pipeline.clone();
+        pipeline
+            .response_filter(session, upstream_response, ctx)
+            .await
     }
 
     fn response_body_filter(
@@ -385,14 +295,8 @@ impl ProxyHttp for HttpService {
         end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> Result<Option<Duration>> {
-        run_global_then_route_response_body_filter(
-            ctx.global_plugin.clone(),
-            ctx.plugin.clone(),
-            session,
-            body,
-            end_of_stream,
-            ctx,
-        )?;
+        let pipeline = ctx.pipeline.clone();
+        pipeline.response_body_filter(session, body, end_of_stream, ctx)?;
         Ok(None)
     }
 
@@ -593,14 +497,8 @@ impl ProxyHttp for HttpService {
     }
 
     async fn logging(&self, session: &mut Session, e: Option<&Error>, ctx: &mut Self::CTX) {
-        run_global_then_route_logging(
-            ctx.global_plugin.clone(),
-            ctx.plugin.clone(),
-            session,
-            e,
-            ctx,
-        )
-        .await;
+        let pipeline = ctx.pipeline.clone();
+        pipeline.logging(session, e, ctx).await;
     }
 
     /// This filter is called when there is an error in the process of establishing a connection to the upstream.
@@ -611,10 +509,10 @@ impl ProxyHttp for HttpService {
         ctx: &mut Self::CTX,
         mut e: Box<Error>,
     ) -> Box<Error> {
-        if let Some(upstream) = ctx.selected_upstream.as_ref() {
-            if let Some(retries) = upstream.get_retries() {
+        if let Some(selected) = ctx.selected.as_ref() {
+            if let Some(retries) = selected.upstream.get_retries() {
                 if retries > 0 && ctx.tries < retries {
-                    let within_timeout = match upstream.get_retry_timeout() {
+                    let within_timeout = match selected.upstream.get_retry_timeout() {
                         Some(timeout) => ctx.elapsed_ms() <= (timeout * 1000) as u128,
                         None => true,
                     };

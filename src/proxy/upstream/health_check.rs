@@ -110,6 +110,16 @@ impl HealthCheckRegistry {
         Self::default()
     }
 
+    /// Signal every currently registered task to stop (process-shutdown path).
+    ///
+    /// Tasks observe their own `watch::Receiver` and exit cleanly; the executor
+    /// then awaits them with a bounded grace period before aborting.
+    pub fn request_shutdown_all(&self) {
+        for entry in self.upstreams.iter() {
+            let _ = entry.shutdown_tx.send(true);
+        }
+    }
+
     /// Register a health check. Infallible: all fallible work belongs in Candidate build.
     ///
     /// On replace, the previous task is **not** stopped here. The caller receives a
@@ -267,10 +277,10 @@ impl HealthCheckExecutor {
                 _ = shutdown.changed() => {
                     if *shutdown.borrow() {
                         log::info!("Health check executor received shutdown signal");
-                        for ((id, gen), running) in running_tasks {
-                            log::debug!("Cancelling health check task for upstream '{id}' gen {gen}");
-                            running.handle.abort();
-                        }
+                        // Graceful path: signal every task, then wait a bounded
+                        // interval for it to drain instead of aborting mid-cleanup.
+                        registry.request_shutdown_all();
+                        self.stop_all_tasks(&mut running_tasks).await;
                         break;
                     }
                 }
@@ -283,10 +293,12 @@ impl HealthCheckExecutor {
                                 "Health check executor lagged, skipped {skipped} events. Performing full resync."
                             );
                             self.resync_tasks(&registry, &mut running_tasks).await;
+                            self.restart_finished_tasks(&registry, &mut running_tasks);
                             continue;
                         }
                         Err(broadcast::error::RecvError::Closed) => {
                             log::info!("Registry update channel closed, stopping executor");
+                            self.stop_all_tasks(&mut running_tasks).await;
                             break;
                         }
                     };
@@ -305,35 +317,94 @@ impl HealthCheckExecutor {
                                     "Stopping health check task for upstream '{id}' gen {}",
                                     registration.generation()
                                 );
-                                running.handle.abort();
+                                self.stop_task(running.handle).await;
                             }
                         }
                     }
 
-                    running_tasks.retain(|(id, gen), running| {
-                        if running.handle.is_finished() {
-                            log::debug!("Health check task for upstream '{id}' gen {gen} has finished");
-                            false
-                        } else {
-                            true
-                        }
-                    });
+                    self.restart_finished_tasks(&registry, &mut running_tasks);
                 }
 
                 _ = cleanup_interval.tick() => {
-                    running_tasks.retain(|(id, gen), running| {
-                        if running.handle.is_finished() {
-                            log::debug!("Health check task for upstream '{id}' gen {gen} has finished");
-                            false
-                        } else {
-                            true
-                        }
-                    });
+                    self.restart_finished_tasks(&registry, &mut running_tasks);
                 }
             }
         }
 
         log::info!("Health check executor stopped");
+    }
+
+    /// Await every running task with a shared bounded grace period, aborting
+    /// only tasks that refuse to stop. Idempotent; drains the map.
+    async fn stop_all_tasks(
+        &self,
+        running_tasks: &mut std::collections::HashMap<(String, u64), RunningHealthCheck>,
+    ) {
+        let handles: Vec<(String, u64, tokio::task::JoinHandle<()>)> = running_tasks
+            .drain()
+            .map(|((id, gen), running)| (id, gen, running.handle))
+            .collect();
+        let grace = tokio::time::sleep(Duration::from_secs(5));
+        tokio::pin!(grace);
+        for (id, gen, mut handle) in handles {
+            tokio::select! {
+                _ = &mut handle => {
+                    log::debug!("Health check task for upstream '{id}' gen {gen} stopped cleanly");
+                }
+                _ = &mut grace => {
+                    log::warn!(
+                        "Health check task for upstream '{id}' gen {gen} missed shutdown grace; aborting"
+                    );
+                    handle.abort();
+                    let _ = handle.await;
+                }
+            }
+        }
+    }
+
+    /// Await one task's clean exit with a short grace period before aborting.
+    async fn stop_task(&self, mut handle: tokio::task::JoinHandle<()>) {
+        let grace = tokio::time::sleep(Duration::from_secs(2));
+        tokio::pin!(grace);
+        tokio::select! {
+            _ = &mut handle => {}
+            _ = &mut grace => {
+                handle.abort();
+                let _ = handle.await;
+            }
+        }
+    }
+
+    /// Re-own tasks that exited unexpectedly while still registered.
+    ///
+    /// A maintenance task (DNS refresh / active probes) that returns without a
+    /// shutdown request would otherwise be lost forever on a quiet system, so
+    /// it is restarted on the next cleanup tick. Tasks whose registration is no
+    /// longer current (replaced or unregistered) are dropped instead.
+    fn restart_finished_tasks(
+        &self,
+        registry: &Arc<HealthCheckRegistry>,
+        running_tasks: &mut std::collections::HashMap<(String, u64), RunningHealthCheck>,
+    ) {
+        let finished: Vec<(String, u64)> = running_tasks
+            .iter()
+            .filter(|(_, running)| running.handle.is_finished())
+            .map(|((id, gen), _)| (id.clone(), *gen))
+            .collect();
+        for (id, gen) in finished {
+            let registration = HealthCheckRegistration { generation: gen };
+            running_tasks.remove(&(id.clone(), gen));
+            if registry.get_upstream_for_start(&id, registration).is_some() {
+                log::warn!(
+                    "Health check task for upstream '{id}' gen {gen} exited unexpectedly; restarting"
+                );
+                self.start_task(registry, running_tasks, id, registration);
+            } else {
+                log::debug!(
+                    "Health check task for upstream '{id}' gen {gen} exited; no longer registered"
+                );
+            }
+        }
     }
 
     fn start_task(
@@ -543,5 +614,96 @@ mod tests {
         for ((_, _), running) in running_tasks {
             running.handle.abort();
         }
+    }
+
+    struct ExitImmediately;
+
+    #[async_trait]
+    impl BackgroundService for ExitImmediately {
+        async fn start(&self, _shutdown: watch::Receiver<bool>) {}
+    }
+
+    #[tokio::test]
+    async fn crashed_task_is_restarted_while_still_registered() {
+        let registry = Arc::new(HealthCheckRegistry::new());
+        let (registration, _) = registry.register_upstream("u".into(), Arc::new(ExitImmediately));
+        let executor = HealthCheckExecutor::new();
+        let mut running_tasks = std::collections::HashMap::new();
+        executor.start_task(&registry, &mut running_tasks, "u".into(), registration);
+
+        let key = ("u".to_string(), registration.generation());
+        assert!(running_tasks.contains_key(&key));
+        // Wait for the task to exit on its own, leaving its finished handle in
+        // the map for the supervisor to detect.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !running_tasks
+            .get(&key)
+            .is_some_and(|running| running.handle.is_finished())
+        {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "task should finish promptly"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        executor.restart_finished_tasks(&registry, &mut running_tasks);
+        assert!(
+            running_tasks.contains_key(&key),
+            "a maintenance task that exited while still registered must be restarted"
+        );
+        let restarted = running_tasks.remove(&key).unwrap();
+        restarted.handle.abort();
+    }
+
+    #[tokio::test]
+    async fn finished_task_is_not_restarted_after_unregister() {
+        let registry = Arc::new(HealthCheckRegistry::new());
+        let (registration, _) = registry.register_upstream("u".into(), Arc::new(ExitImmediately));
+        let executor = HealthCheckExecutor::new();
+        let mut running_tasks = std::collections::HashMap::new();
+        executor.start_task(&registry, &mut running_tasks, "u".into(), registration);
+
+        let key = ("u".to_string(), registration.generation());
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !running_tasks
+            .get(&key)
+            .is_some_and(|running| running.handle.is_finished())
+        {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "task should finish promptly"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        // Unregister removes the registration; the finished task must not resurrect.
+        assert!(registry.unregister_upstream("u", registration));
+        executor.restart_finished_tasks(&registry, &mut running_tasks);
+        assert!(
+            running_tasks.is_empty(),
+            "a task that exited after unregister must not resurrect"
+        );
+    }
+
+    #[test]
+    fn request_shutdown_all_signals_every_registered_task() {
+        let registry = Arc::new(HealthCheckRegistry::new());
+        let (registration, _) =
+            registry.register_upstream("u1".into(), Arc::new(HangUntilShutdown));
+        let (_registration2, _) =
+            registry.register_upstream("u2".into(), Arc::new(HangUntilShutdown));
+
+        registry.request_shutdown_all();
+
+        // The tasks observe the shutdown through their receivers: drain the
+        // current registration and confirm its watch flipped to true.
+        let (_, _, shutdown_rx) = registry
+            .get_upstream_for_start("u1", registration)
+            .expect("u1 still registered");
+        assert!(
+            *shutdown_rx.borrow(),
+            "request_shutdown_all must signal registered task watches"
+        );
     }
 }

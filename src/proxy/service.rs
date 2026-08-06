@@ -9,7 +9,7 @@ use crate::{
     plugins::build_plugin_with_upstreams,
 };
 
-use super::upstream::{inline_key, PreparedUpstreams, ProxyUpstream};
+use super::upstream::{PreparedUpstreams, ProxyUpstream, TrafficSplitOwner, UpstreamOccurrence};
 
 /// Represents a proxy service that manages upstreams.
 pub struct ProxyService {
@@ -40,7 +40,7 @@ impl ProxyService {
                 ProxyUpstream::build(
                     upstream_config.clone(),
                     prepared
-                        .get(&inline_key(&format!("service/{}", service.id)))
+                        .get(&UpstreamOccurrence::ServiceInline(service.id.clone()))
                         .cloned()
                         .ok_or_else(|| {
                             ProxyError::Configuration(format!(
@@ -78,20 +78,15 @@ impl ProxyService {
         };
 
         // Load configured plugins
+        let owner = TrafficSplitOwner::Service(service.id.clone());
         for (name, value) in service.plugins {
-            let plugin = build_plugin_with_upstreams(
-                &name,
-                value,
-                upstreams,
-                prepared,
-                &format!("service/{}", service.id),
-            )
-            .map_err(|e| {
-                ProxyError::Plugin(format!(
-                    "Failed to build plugin '{}' for service '{}': {}",
-                    name, service.id, e
-                ))
-            })?;
+            let plugin = build_plugin_with_upstreams(&name, value, upstreams, prepared, &owner)
+                .map_err(|e| {
+                    ProxyError::Plugin(format!(
+                        "Failed to build plugin '{}' for service '{}': {}",
+                        name, service.id, e
+                    ))
+                })?;
             proxy_service.plugins.push(plugin);
         }
 

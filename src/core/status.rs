@@ -205,6 +205,8 @@ pub fn readiness() -> (bool, Option<&'static str>) {
         Some("not_initialized")
     } else if is_stale(&status) {
         Some("config_stale")
+    } else if status.awaiting_publish_after_reconnect {
+        Some("awaiting_publish_after_reconnect")
     } else {
         Some("config_invalid")
     };
@@ -215,8 +217,9 @@ pub fn status_view() -> RuntimeStatusView {
     let status = STATUS.lock().unwrap_or_else(|e| e.into_inner());
     let stale = is_stale(&status);
     let ready = compute_ready(&status);
-    let degraded =
-        status.initialized && (!status.connected || stale || status.error_kind.is_some());
+    let awaiting = status.awaiting_publish_after_reconnect;
+    let degraded = status.initialized
+        && (!status.connected || stale || status.error_kind.is_some() || awaiting);
     let degraded_reason = if !status.initialized {
         None
     } else if !status.connected {
@@ -225,6 +228,8 @@ pub fn status_view() -> RuntimeStatusView {
         Some("configuration sync is stale".into())
     } else if status.error_kind == Some(ConfigErrorKind::CandidateInvalid) {
         Some("latest configuration candidate is invalid".into())
+    } else if awaiting {
+        Some("awaiting publish after reconnect".into())
     } else {
         None
     };
@@ -347,6 +352,36 @@ mod tests {
         set_published_revision(11);
         assert!(is_ready());
         configure_status_policy(300, true);
+    }
+
+    #[test]
+    fn reconnect_awaiting_publish_is_degraded_with_reason() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset();
+        begin_etcd_sync();
+        mark_ready(ConfigSource::Etcd);
+        mark_etcd_connected(true);
+        mark_etcd_connected(false);
+        // Reconnect proves transport health but not a published graph.
+        record_sync_success(10);
+        let view = status_view();
+        assert!(!view.ready, "ready must stay closed until publish");
+        assert!(
+            view.degraded,
+            "awaiting-publish state must be reported as degraded, not silently contradictory"
+        );
+        assert_eq!(
+            view.degraded_reason.as_deref(),
+            Some("awaiting publish after reconnect")
+        );
+        assert_eq!(readiness().1, Some("awaiting_publish_after_reconnect"));
+
+        // A successful publish clears the awaiting state and restores readiness.
+        set_published_revision(10);
+        let view = status_view();
+        assert!(view.ready);
+        assert!(!view.degraded);
+        assert_eq!(view.degraded_reason, None);
     }
 
     #[test]

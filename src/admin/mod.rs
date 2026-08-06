@@ -85,9 +85,9 @@ impl From<GraphError> for ApiError {
                 ApiError::EtcdGetError("configuration store unavailable".into())
             }
             // Not reachable from Admin operations; fail closed as internal.
-            GraphError::StaleRevision { .. }
-            | GraphError::Preparation { .. }
-            | GraphError::WorkerStopped => ApiError::Internal(err.to_string()),
+            GraphError::StaleRevision { .. } | GraphError::WorkerStopped => {
+                ApiError::Internal(err.to_string())
+            }
         }
     }
 }

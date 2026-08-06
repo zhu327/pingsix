@@ -248,10 +248,6 @@ pub enum GraphError {
         operation: SecretOperation,
         source: ProxyError,
     },
-    Preparation {
-        revision: i64,
-        source: ProxyError,
-    },
     WorkerStopped,
     Store(StoreError),
 }
@@ -286,12 +282,6 @@ impl fmt::Display for GraphError {
                 operation,
                 key.logical_path()
             ),
-            Self::Preparation { revision, source } => {
-                write!(
-                    f,
-                    "candidate preparation failed at revision {revision}: {source}"
-                )
-            }
             Self::WorkerStopped => write!(f, "control-plane preparation worker stopped"),
             Self::Store(err) => write!(f, "configuration store error: {err:?}"),
         }
@@ -474,6 +464,15 @@ struct PendingGraph {
     cancellation: CancellationToken,
 }
 
+/// Lifecycle of the graph authority's preparation worker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Lifecycle {
+    Running,
+    /// [`ConfigurationGraph::shutdown`] has been called. Submissions fail with
+    /// [`GraphError::WorkerStopped`] and the worker is never resurrected.
+    Stopped,
+}
+
 struct Inner {
     store: Arc<dyn GraphStore>,
     committed: Mutex<Option<CommittedGraph>>,
@@ -487,6 +486,20 @@ struct Inner {
     worker_tx: Mutex<Option<mpsc::Sender<()>>>,
     worker_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     active_cancellation: Mutex<Option<CancellationToken>>,
+    lifecycle: Mutex<Lifecycle>,
+}
+
+/// Outcome of one preparation/compile attempt in the sole worker.
+#[derive(Debug)]
+enum PrepareOutcome {
+    /// Published, superseded, or cancelled — nothing left to retry.
+    Settled,
+    /// DNS/preparation failure: worth retrying with bounded backoff.
+    Transient(ProxyError),
+    /// Deterministic candidate failure (SSL, plugin, matcher): compiling the
+    /// same generation again cannot succeed, so it is attempted once and the
+    /// worker waits for a new revision instead of retrying forever.
+    Permanent(ProxyError),
 }
 
 impl ConfigurationGraph {
@@ -502,6 +515,7 @@ impl ConfigurationGraph {
                 worker_tx: Mutex::new(None),
                 worker_task: Mutex::new(None),
                 active_cancellation: Mutex::new(None),
+                lifecycle: Mutex::new(Lifecycle::Running),
             }),
         }
     }
@@ -568,7 +582,21 @@ impl ConfigurationGraph {
 
     /// Stop accepting work, cancel in-flight preparation, and wait a bounded
     /// interval for the sole worker to observe cancellation.
+    ///
+    /// Terminal and idempotent: after the first call the lifecycle is `Stopped`
+    /// and no later submission can resurrect the worker.
     pub async fn shutdown(&self) {
+        {
+            let mut lifecycle = self
+                .inner
+                .lifecycle
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if *lifecycle == Lifecycle::Stopped {
+                return;
+            }
+            *lifecycle = Lifecycle::Stopped;
+        }
         if let Some(active) = self
             .inner
             .active_cancellation
@@ -605,15 +633,20 @@ impl ConfigurationGraph {
     /// Static startup path: prepare DNS fully before returning and publishing.
     ///
     /// Unlike the dynamic path, preparation must finish before listeners start;
-    /// unresolvable DNS-only upstreams fail the process.
+    /// unresolvable DNS-only upstreams fail the process. The candidate passes
+    /// the same whole-graph validation as the dynamic path.
     pub fn load_static(config: &Config) -> ProxyResult<Arc<RuntimeSnapshot>> {
         let resources = ResourceConfigSet::from_yaml_config(config);
+        validate_config_set(&resources)?;
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|e| {
                 ProxyError::Configuration(format!("Failed to create DNS preparation runtime: {e}"))
             })?;
+        // The pre-publish runtime is the reuse baseline for the static path; at
+        // boot it is the empty snapshot, so every occurrence is prepared.
+        let previous = RUNTIME.load();
         let prepared = rt.block_on(async {
             #[cfg(unix)]
             {
@@ -622,7 +655,7 @@ impl ConfigurationGraph {
                     ProxyError::Configuration(format!("Failed to install SIGTERM handler: {e}"))
                 })?;
                 tokio::select! {
-                    result = prepare_candidate(&resources) => result,
+                    result = prepare_candidate(&resources, &previous) => result,
                     _ = sigterm.recv() => Err(ProxyError::Configuration(
                         "Static configuration DNS preparation cancelled by SIGTERM".into(),
                     )),
@@ -630,10 +663,10 @@ impl ConfigurationGraph {
             }
             #[cfg(not(unix))]
             {
-                prepare_candidate(&resources).await
+                prepare_candidate(&resources, &previous).await
             }
         })?;
-        let candidate = CandidateSnapshot::build_prepared(resources, &prepared)?;
+        let candidate = CandidateSnapshot::build_prepared(resources, &prepared, &previous)?;
         let snapshot = RuntimeSnapshot::compile(candidate, 0)?;
         let published = RUNTIME.publish(snapshot)?;
         status::mark_ready(status::ConfigSource::Yaml);
@@ -642,6 +675,15 @@ impl ConfigurationGraph {
 
     /// Start the single bounded preparation worker if it is not already running.
     fn ensure_worker_started(&self) -> Result<(), GraphError> {
+        if *self
+            .inner
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            != Lifecycle::Running
+        {
+            return Err(GraphError::WorkerStopped);
+        }
         if self
             .inner
             .worker_tx
@@ -667,8 +709,8 @@ impl ConfigurationGraph {
                     // sleeping out the failed generation's backoff.
                     let attempted = graph.current_target();
                     match graph.prepare_latest().await {
-                        Ok(()) => break,
-                        Err(error) => {
+                        PrepareOutcome::Settled => break,
+                        PrepareOutcome::Transient(error) => {
                             PREPARATION_ATTEMPTS.with_label_values(&["failed"]).inc();
                             status::record_preparation_error(error.to_string());
                             log::warn!(
@@ -690,6 +732,22 @@ impl ConfigurationGraph {
                                 _ = cancellation.cancelled() => break,
                             }
                             retry_delay = (retry_delay * 2).min(std::time::Duration::from_secs(30));
+                        }
+                        PrepareOutcome::Permanent(error) => {
+                            PREPARATION_ATTEMPTS.with_label_values(&["failed"]).inc();
+                            status::record_preparation_error(error.to_string());
+                            log::error!(
+                                "Control-plane candidate rejected permanently; waiting for a new revision: {error}"
+                            );
+                            // Deterministic failures cannot be fixed by retrying.
+                            // Wait for this generation to be superseded (a new
+                            // submission cancels it), then restart from the
+                            // latest target.
+                            let Some((_, cancellation)) = attempted else {
+                                break;
+                            };
+                            cancellation.cancelled().await;
+                            break;
                         }
                     }
                 }
@@ -770,8 +828,10 @@ impl ConfigurationGraph {
             == generation
     }
 
-    /// Prepare, compile, and publish the latest pending generation.
-    async fn prepare_latest(&self) -> ProxyResult<()> {
+    /// Prepare, compile, and publish the latest pending generation, classifying
+    /// failures so the worker can distinguish retryable DNS problems from
+    /// deterministic candidate defects.
+    async fn prepare_latest(&self) -> PrepareOutcome {
         let _owner = self.inner.preparation.lock().await;
         let Some(target) = self
             .inner
@@ -780,7 +840,7 @@ impl ConfigurationGraph {
             .unwrap_or_else(|e| e.into_inner())
             .clone()
         else {
-            return Ok(());
+            return PrepareOutcome::Settled;
         };
         let PendingGraph {
             generation,
@@ -789,9 +849,13 @@ impl ConfigurationGraph {
             logical,
             cancellation,
         } = target;
+        let previous = RUNTIME.load();
         let prepared = tokio::select! {
-            result = prepare_candidate(&logical) => result?,
-            _ = cancellation.cancelled() => return Ok(()),
+            result = prepare_candidate(&logical, &previous) => match result {
+                Ok(prepared) => prepared,
+                Err(error) => return PrepareOutcome::Transient(error),
+            },
+            _ = cancellation.cancelled() => return PrepareOutcome::Settled,
         };
         let _writer = self
             .inner
@@ -806,13 +870,24 @@ impl ConfigurationGraph {
                 .unwrap_or_else(|e| e.into_inner())
                 != generation
         {
-            return Ok(());
+            return PrepareOutcome::Settled;
         }
         if revision < RUNTIME.load().revision {
-            return Ok(());
+            return PrepareOutcome::Settled;
         }
-        let candidate = CandidateSnapshot::build_prepared(logical.clone(), &prepared)?;
-        let published = RUNTIME.publish(RuntimeSnapshot::compile(candidate, revision)?)?;
+        let candidate =
+            match CandidateSnapshot::build_prepared(logical.clone(), &prepared, &previous) {
+                Ok(candidate) => candidate,
+                Err(error) => return PrepareOutcome::Permanent(error),
+            };
+        let compiled = match RuntimeSnapshot::compile(candidate, revision) {
+            Ok(compiled) => compiled,
+            Err(error) => return PrepareOutcome::Permanent(error),
+        };
+        let published = match RUNTIME.publish(compiled) {
+            Ok(published) => published,
+            Err(error) => return PrepareOutcome::Permanent(error),
+        };
         *self
             .inner
             .committed
@@ -824,7 +899,7 @@ impl ConfigurationGraph {
             "Published prepared control-plane generation {generation} at revision {}",
             published.revision
         );
-        Ok(())
+        PrepareOutcome::Settled
     }
 
     /// Read one stored resource, decrypted and redacted, for the Admin API.
@@ -2483,6 +2558,124 @@ mod worker_tests {
             base,
             "failing candidate must never publish"
         );
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn shutdown_is_terminal_and_submissions_fail_with_worker_stopped() {
+        let _guard = RUNTIME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let graph = ConfigurationGraph::new(Arc::new(InMemoryGraphStore::new()));
+
+        // Submissions work before shutdown.
+        let revision = 1_000_000;
+        graph
+            .replace_all(stored_graph(
+                revision,
+                vec![(
+                    ResourceKind::Upstream,
+                    "u1",
+                    upstream_json("u1", "127.0.0.1:80"),
+                )],
+            ))
+            .unwrap();
+        assert!(wait_for_revision(revision, Duration::from_secs(5)).await);
+
+        graph.shutdown().await;
+
+        // A second shutdown is an idempotent no-op.
+        graph.shutdown().await;
+
+        // No submission may resurrect the worker after shutdown.
+        let err = graph
+            .replace_all(stored_graph(
+                revision + 1,
+                vec![(
+                    ResourceKind::Upstream,
+                    "u2",
+                    upstream_json("u2", "127.0.0.1:81"),
+                )],
+            ))
+            .unwrap_err();
+        assert!(
+            matches!(err, GraphError::WorkerStopped),
+            "expected WorkerStopped after shutdown, got: {err:?}"
+        );
+
+        let err = graph
+            .apply_watch(upstream_change(revision + 2, "u3", "127.0.0.1:82"))
+            .unwrap_err();
+        assert!(
+            matches!(err, GraphError::WorkerStopped),
+            "expected WorkerStopped after shutdown, got: {err:?}"
+        );
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            RUNTIME.load().revision,
+            revision,
+            "post-shutdown submissions must not publish"
+        );
+    }
+
+    /// A deterministic candidate failure (bad SSL material passes whole-graph
+    /// validation but fails compilation) must be attempted exactly once per
+    /// generation: the worker waits for a new revision instead of retrying the
+    /// same broken generation forever.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn permanent_candidate_failure_is_attempted_once_per_generation() {
+        let _guard = RUNTIME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let base = current_revision();
+        let graph = ConfigurationGraph::new(Arc::new(InMemoryGraphStore::new()));
+
+        let attempts_before = PREPARATION_ATTEMPTS.with_label_values(&["failed"]).get();
+        let failing = base + 100;
+        graph.replace_all(stored_bad_ssl_graph(failing)).unwrap();
+
+        // Wait for the first (and only) attempt to land.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while PREPARATION_ATTEMPTS.with_label_values(&["failed"]).get() == attempts_before {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "worker must attempt the candidate once"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            RUNTIME.load().revision,
+            base,
+            "failing candidate must never publish"
+        );
+
+        // Longer than the old first retry backoff (1s): the permanent
+        // classification must not recompile the same broken generation.
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        assert_eq!(
+            PREPARATION_ATTEMPTS.with_label_values(&["failed"]).get(),
+            attempts_before + 1,
+            "a permanent candidate failure must be attempted exactly once per generation"
+        );
+
+        // A later valid generation supersedes the failed one and publishes.
+        let valid = failing + 1;
+        graph
+            .replace_all(stored_graph(
+                valid,
+                vec![
+                    (
+                        ResourceKind::Upstream,
+                        "u1",
+                        upstream_json("u1", "127.0.0.1:80"),
+                    ),
+                    (ResourceKind::Route, "r1", route_json("r1", "u1", "/")),
+                ],
+            ))
+            .unwrap();
+        assert!(
+            wait_for_revision(valid, Duration::from_secs(2)).await,
+            "a valid generation after a permanent failure must publish promptly"
+        );
+        graph.shutdown().await;
     }
 
     #[allow(clippy::await_holding_lock)]

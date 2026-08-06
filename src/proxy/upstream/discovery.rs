@@ -76,21 +76,24 @@ fn load_client_cert_key(tls_config: &UpstreamTls) -> ProxyResult<Arc<CertKey>> {
 pub struct DnsDiscovery {
     resolver: Arc<TokioResolver>,
     domain: String,
-    port: u32,
+    port: u16,
     scheme: UpstreamScheme,
     weight: u32,
     client_cert_key: Option<Arc<CertKey>>,
+    /// TLS SNI, computed with the same pass-host rule as literal-IP backends.
+    sni: String,
 }
 
 impl DnsDiscovery {
     /// Creates a new `DnsDiscovery` instance.
     pub fn new(
         domain: String,
-        port: u32,
+        port: u16,
         scheme: UpstreamScheme,
         weight: u32,
         resolver: Arc<TokioResolver>,
         client_cert_key: Option<Arc<CertKey>>,
+        sni: String,
     ) -> Self {
         Self {
             resolver,
@@ -99,6 +102,7 @@ impl DnsDiscovery {
             scheme,
             weight,
             client_cert_key,
+            sni,
         }
     }
 }
@@ -124,7 +128,7 @@ impl ServiceDiscovery for DnsDiscovery {
             })?
             .iter()
             .filter_map(|ip| {
-                let addr = SocketAddr::new(ip, self.port as _).to_string();
+                let addr = SocketAddr::new(ip, self.port).to_string();
 
                 // Creating backend
                 let mut backend = match Backend::new_with_weight(&addr, self.weight as _) {
@@ -135,19 +139,12 @@ impl ServiceDiscovery for DnsDiscovery {
                     }
                 };
 
-                // Determine if TLS is needed
-                let tls = matches!(self.scheme, UpstreamScheme::HTTPS | UpstreamScheme::GRPCS);
-
-                // Create HttpPeer
-                let mut peer = HttpPeer::new(&addr, tls, self.domain.clone());
-                if matches!(self.scheme, UpstreamScheme::GRPC | UpstreamScheme::GRPCS) {
-                    peer.options.alpn = ALPN::H2;
-                }
-
-                // Set client certificate if configured
-                if let Some(ref cert_key) = self.client_cert_key {
-                    peer.client_cert_key = Some(cert_key.clone());
-                }
+                let peer = build_peer(
+                    &addr,
+                    self.scheme,
+                    self.sni.clone(),
+                    self.client_cert_key.as_ref(),
+                );
 
                 // Insert HttpPeer into the backend. Must not live only inside
                 // `debug_assert!` — that expression is elided in release builds.
@@ -327,6 +324,10 @@ impl TryFrom<Upstream> for HybridDiscovery {
         };
 
         // Process each node in upstream
+        // SNI / pass-host policy is shared with the DNS branch below; clone
+        // once so both the IP peer and DnsDiscovery see the same values.
+        let pass_host = upstream.pass_host.clone();
+        let upstream_host = upstream.upstream_host.clone();
         for (addr, weight) in upstream.nodes.iter() {
             let (host, port) = parse_host_and_port(addr)?;
             let port = port.unwrap_or(match upstream.scheme {
@@ -356,31 +357,8 @@ impl TryFrom<Upstream> for HybridDiscovery {
                         ))
                     })?;
 
-                let tls = matches!(
-                    upstream.scheme,
-                    UpstreamScheme::HTTPS | UpstreamScheme::GRPCS
-                );
-                let sni = if upstream.pass_host == UpstreamPassHost::REWRITE {
-                    upstream
-                        .upstream_host
-                        .clone()
-                        .unwrap_or_else(|| host.to_string())
-                } else {
-                    host.to_string()
-                };
-
-                let mut peer = HttpPeer::new(&addr_str, tls, sni);
-                if matches!(
-                    upstream.scheme,
-                    UpstreamScheme::GRPC | UpstreamScheme::GRPCS
-                ) {
-                    peer.options.alpn = ALPN::H2;
-                }
-
-                // Set client certificate if configured
-                if let Some(ref cert_key) = client_cert_key {
-                    peer.client_cert_key = Some(cert_key.clone());
-                }
+                let sni = compute_peer_sni(&host, &pass_host, upstream_host.as_deref());
+                let peer = build_peer(&addr_str, upstream.scheme, sni, client_cert_key.as_ref());
 
                 // Must not live only inside `debug_assert!` — elided in release.
                 assert!(
@@ -393,6 +371,7 @@ impl TryFrom<Upstream> for HybridDiscovery {
                 // It's a domain name
                 // Handle DNS discovery for domain names
                 let resolver = get_global_resolver()?;
+                let sni = compute_peer_sni(&host, &pass_host, upstream_host.as_deref());
                 let discovery = DnsDiscovery::new(
                     host,
                     port,
@@ -400,6 +379,7 @@ impl TryFrom<Upstream> for HybridDiscovery {
                     *weight,
                     resolver,
                     client_cert_key.clone(),
+                    sni,
                 );
                 this.discoveries.push(Box::new(discovery));
             }
@@ -421,8 +401,10 @@ static HOST_PORT_REGEX: once_cell::sync::Lazy<Regex> = once_cell::sync::Lazy::ne
 /// Parses a host and port from a string.
 ///
 /// Supports IPv4, IPv6, and domain names, with optional port.
-/// Returns IPv6 addresses enclosed in square brackets for consistency.
-fn parse_host_and_port(addr: &str) -> ProxyResult<(String, Option<u32>)> {
+/// Returns IPv6 addresses without square brackets; callers add them back when
+/// constructing `SocketAddr` strings. Ports are validated as `u16` so a value
+/// outside the socket range is rejected instead of silently wrapping.
+fn parse_host_and_port(addr: &str) -> ProxyResult<(String, Option<u16>)> {
     let caps = HOST_PORT_REGEX
         .captures(addr)
         .ok_or_else(|| ProxyError::Configuration("Invalid address format".to_string()))?;
@@ -438,7 +420,7 @@ fn parse_host_and_port(addr: &str) -> ProxyResult<(String, Option<u32>)> {
     let port = if let Some(port_str) = caps.get(3).map(|p| p.as_str()) {
         Some(
             port_str
-                .parse::<u32>()
+                .parse::<u16>()
                 .map_err(|_| ProxyError::Configuration("Invalid port number".to_string()))?,
         )
     } else {
@@ -447,6 +429,44 @@ fn parse_host_and_port(addr: &str) -> ProxyResult<(String, Option<u32>)> {
 
     // Return host as-is without brackets - brackets will be added later when constructing SocketAddr
     Ok((host.to_string(), port))
+}
+
+/// Compute the TLS SNI for a peer from the node host and pass-host policy.
+///
+/// Shared by DNS and literal-IP backend construction so both paths apply the
+/// same rule: `pass_host: rewrite` targets `upstream_host` (falling back to the
+/// node host), everything else uses the node host itself.
+fn compute_peer_sni(
+    host: &str,
+    pass_host: &UpstreamPassHost,
+    upstream_host: Option<&str>,
+) -> String {
+    if *pass_host == UpstreamPassHost::REWRITE {
+        upstream_host.unwrap_or(host).to_string()
+    } else {
+        host.to_string()
+    }
+}
+
+/// Build an `HttpPeer` for one backend address with a unified TLS policy.
+///
+/// Both DNS-resolved and literal-IP backends flow through here so scheme,
+/// ALPN, mTLS, and SNI stay consistent across discovery modes.
+fn build_peer(
+    addr: &str,
+    scheme: UpstreamScheme,
+    sni: String,
+    client_cert_key: Option<&Arc<CertKey>>,
+) -> HttpPeer {
+    let tls = matches!(scheme, UpstreamScheme::HTTPS | UpstreamScheme::GRPCS);
+    let mut peer = HttpPeer::new(addr, tls, sni);
+    if matches!(scheme, UpstreamScheme::GRPC | UpstreamScheme::GRPCS) {
+        peer.options.alpn = ALPN::H2;
+    }
+    if let Some(cert_key) = client_cert_key {
+        peer.client_cert_key = Some(cert_key.clone());
+    }
+    peer
 }
 
 #[cfg(test)]
@@ -547,10 +567,14 @@ mod tests {
             ("example.com", ("example.com".to_string(), None)),
             ("example.com:80", ("example.com".to_string(), Some(80))),
             ("192.168.1.1:8080", ("192.168.1.1".to_string(), Some(8080))),
+            ("[::1]:80", ("::1".to_string(), Some(80))),
             (
                 "[2001:db8:85a3::8a2e:370:7334]:8080",
                 ("2001:db8:85a3::8a2e:370:7334".to_string(), Some(8080)),
             ),
+            // Maximum valid socket port parses; one past it must be rejected
+            // instead of wrapping around to zero.
+            ("127.0.0.1:65535", ("127.0.0.1".to_string(), Some(65535))),
         ];
 
         for (input, expected) in test_cases {
@@ -562,5 +586,38 @@ mod tests {
         assert!(parse_host_and_port("").is_err());
         assert!(parse_host_and_port("invalid:port").is_err());
         assert!(parse_host_and_port("127.0.0.1:invalid").is_err());
+        assert!(
+            parse_host_and_port("127.0.0.1:65536").is_err(),
+            "port above u16::MAX must be rejected, not wrapped"
+        );
+        assert!(
+            parse_host_and_port("[::1]:65536").is_err(),
+            "IPv6 port above u16::MAX must be rejected, not wrapped"
+        );
+    }
+
+    #[test]
+    fn compute_peer_sni_follows_pass_host_policy() {
+        assert_eq!(
+            compute_peer_sni("api.example.com", &UpstreamPassHost::PASS, None),
+            "api.example.com"
+        );
+        assert_eq!(
+            compute_peer_sni("10.0.0.1", &UpstreamPassHost::NODE, None),
+            "10.0.0.1"
+        );
+        assert_eq!(
+            compute_peer_sni(
+                "10.0.0.1",
+                &UpstreamPassHost::REWRITE,
+                Some("tenant.internal")
+            ),
+            "tenant.internal"
+        );
+        // rewrite falls back to the node host when no upstream host is configured.
+        assert_eq!(
+            compute_peer_sni("api.example.com", &UpstreamPassHost::REWRITE, None),
+            "api.example.com"
+        );
     }
 }

@@ -10,7 +10,7 @@ use crate::{
     config::{self, Identifiable},
     core::{
         sort_plugins_by_priority_desc, ErrorContext, ProxyError, ProxyPlugin, ProxyPluginExecutor,
-        ProxyResult, RouteContext, UpstreamSelector,
+        ProxyResult, RouteContext, UpstreamSelection, UpstreamSelector,
     },
     plugins::build_plugin_with_upstreams,
     utils::request::get_request_host,
@@ -18,7 +18,7 @@ use crate::{
 
 use super::{
     service::ProxyService,
-    upstream::{inline_key, PreparedUpstreams, ProxyUpstream},
+    upstream::{PreparedUpstreams, ProxyUpstream, TrafficSplitOwner, UpstreamOccurrence},
 };
 
 fn build_plugin_name_index(plugins: &[Arc<dyn ProxyPlugin>]) -> Vec<String> {
@@ -182,7 +182,7 @@ impl ProxyRoute {
                 ProxyUpstream::build(
                     upstream_config,
                     prepared
-                        .get(&inline_key(&format!("route/{}", route.id)))
+                        .get(&UpstreamOccurrence::RouteInline(route.id.clone()))
                         .cloned()
                         .ok_or_else(|| {
                             ProxyError::Configuration(format!(
@@ -222,15 +222,10 @@ impl ProxyRoute {
         };
 
         let mut plugins = Vec::with_capacity(route.plugins.len());
+        let owner = TrafficSplitOwner::Route(route.id.clone());
         for (name, value) in route.plugins.clone() {
-            let plugin = build_plugin_with_upstreams(
-                &name,
-                value,
-                upstreams,
-                prepared,
-                &format!("route/{}", route.id),
-            )
-            .map_err(|e| ProxyError::Plugin(format!("Failed to build plugin '{name}': {e}")))?;
+            let plugin = build_plugin_with_upstreams(&name, value, upstreams, prepared, &owner)
+                .map_err(|e| ProxyError::Plugin(format!("Failed to build plugin '{name}': {e}")))?;
             plugins.push(plugin);
         }
         sort_plugins_by_priority_desc(plugins.as_mut_slice());
@@ -241,10 +236,13 @@ impl ProxyRoute {
         } else {
             plugins.clone()
         };
+        // `merge_route_and_service_plugins` already guarantees a non-increasing
+        // priority sequence with route-side tie preference; `from_sorted` keeps
+        // that order instead of re-sorting (which would break the tie rule).
         let plugin_executor = if merged_plugins.is_empty() {
             ProxyPluginExecutor::default_shared()
         } else {
-            Arc::new(ProxyPluginExecutor::new(merged_plugins))
+            Arc::new(ProxyPluginExecutor::from_sorted(merged_plugins))
         };
 
         let cache_namespace_fingerprint =
@@ -299,7 +297,7 @@ impl RouteContext for ProxyRoute {
         self.inner.uri.as_deref()
     }
 
-    fn select_http_peer(&self, session: &mut Session) -> ProxyResult<Box<HttpPeer>> {
+    fn select_upstream(&self, session: &mut Session) -> ProxyResult<UpstreamSelection> {
         let upstream = self.resolve_upstream().ok_or_else(|| {
             ProxyError::UpstreamSelection(
                 "Failed to retrieve upstream configuration for route".to_string(),
@@ -320,7 +318,10 @@ impl RouteContext for ProxyRoute {
         })?;
 
         self.set_timeout(peer);
-        Ok(Box::new(peer.clone()))
+        Ok(UpstreamSelection {
+            peer: Box::new(peer.clone()),
+            upstream,
+        })
     }
 
     fn build_plugin_executor(&self) -> Arc<ProxyPluginExecutor> {

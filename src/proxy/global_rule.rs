@@ -6,7 +6,7 @@ use crate::{
         sort_plugins_by_priority_desc, ProxyError, ProxyPlugin, ProxyPluginExecutor, ProxyResult,
     },
     plugins::build_plugin_with_upstreams,
-    proxy::upstream::{PreparedUpstreams, ProxyUpstream},
+    proxy::upstream::{PreparedUpstreams, ProxyUpstream, TrafficSplitOwner},
 };
 
 /// Represents a proxy service that manages upstreams.
@@ -44,7 +44,7 @@ impl ProxyGlobalRule {
                 value,
                 upstreams,
                 prepared,
-                &format!("global-rule/{}", rule.id),
+                &TrafficSplitOwner::GlobalRule(rule.id.clone()),
             )
             .map_err(|e| {
                 ProxyError::Plugin(format!(
@@ -84,7 +84,7 @@ pub(crate) fn build_global_plugin_executor(
             .then_with(|| rule_a.cmp(rule_b))
     });
 
-    Arc::new(ProxyPluginExecutor::new(
+    Arc::new(ProxyPluginExecutor::from_sorted(
         plugins_with_rule
             .into_iter()
             .map(|(_, plugin)| plugin)

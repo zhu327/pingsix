@@ -49,6 +49,17 @@ pub trait UpstreamSelector: Send + Sync {
     fn cache_isolation_key(&self) -> String;
 }
 
+/// One request's compiled upstream selection: the selected peer plus the
+/// selector that owns retry, host-rewrite, and cache-isolation policy.
+///
+/// Downstream callbacks (host rewrite, retry accounting, cache key) delegate
+/// to this single artifact instead of re-deriving policy from raw selectors,
+/// and the route path and the traffic-split override path both produce one.
+pub struct UpstreamSelection {
+    pub peer: Box<HttpPeer>,
+    pub upstream: Arc<dyn UpstreamSelector>,
+}
+
 /// Trait for route behavior that can be used in proxy context
 pub trait RouteContext: Send + Sync {
     /// Get the route identifier
@@ -70,8 +81,9 @@ pub trait RouteContext: Send + Sync {
     /// Return the configured URI template used to match this route.
     fn uri_template(&self) -> Option<&str>;
 
-    /// Select an HTTP peer for the route
-    fn select_http_peer(&self, session: &mut Session) -> ProxyResult<Box<HttpPeer>>;
+    /// Select an upstream peer for the route, compiling the selection artifact
+    /// (peer plus owning selector) used by all downstream callbacks.
+    fn select_upstream(&self, session: &mut Session) -> ProxyResult<UpstreamSelection>;
 
     /// Return the effective host patterns used to match this route.
     ///
@@ -128,18 +140,19 @@ pub struct ProxyContext {
     /// Parameters extracted from the route pattern.
     /// Stored as Vec for better performance with small number of params (typical case).
     pub route_params: Option<Vec<(String, String)>>,
-    /// The upstream override selected by the traffic-split plugin.
+    /// The upstream override selected by the traffic-split plugin. Consumed by
+    /// cache namespacing and [`HttpService::upstream_peer`]; the compiled result
+    /// of that selection lives in [`Self::selected`].
     pub upstream_override: Option<Arc<dyn UpstreamSelector>>,
-    /// The actual upstream used for this request. All retry and host-rewrite decisions must use it.
-    pub selected_upstream: Option<Arc<dyn UpstreamSelector>>,
-    // Selected HTTP peer for the upstream request.
-    pub peer: Option<Box<HttpPeer>>,
+    /// The compiled upstream selection for this request (peer + owning
+    /// selector). Set by `upstream_peer`; all retry and host-rewrite decisions
+    /// must use it.
+    pub selected: Option<UpstreamSelection>,
     /// Number of retry attempts so far.
     pub tries: usize,
-    /// Executor for route-specific plugins.
-    pub plugin: Arc<ProxyPluginExecutor>,
-    /// Executor for global plugins.
-    pub global_plugin: Arc<ProxyPluginExecutor>,
+    /// Compiled global-rule + route/service plugin layers for this request.
+    /// Owns phase traversal and short-circuit rules; set in `early_request_filter`.
+    pub pipeline: CompiledPluginPipeline,
     /// Request start timestamp for performance metrics and timeouts.
     pub request_start: Instant,
     /// Unique request identifier, set by request-id plugin if enabled.
@@ -162,11 +175,9 @@ impl Default for ProxyContext {
             route: None,
             route_params: None,
             upstream_override: None,
-            selected_upstream: None,
-            peer: None,
+            selected: None,
             tries: 0,
-            plugin: ProxyPluginExecutor::default_shared(),
-            global_plugin: ProxyPluginExecutor::default_shared(),
+            pipeline: CompiledPluginPipeline::default(),
             request_start: Instant::now(),
             request_id: None,
             original_request_had_credentials: false,
@@ -243,20 +254,11 @@ pub trait ProxyPlugin: Send + Sync {
     /// Return the priority of this plugin
     fn priority(&self) -> i32;
 
-    /// Return health-check targets owned by this plugin. Registration happens only when the
-    /// containing runtime snapshot is published.
-    fn health_check_targets(
-        &self,
-    ) -> Vec<(
-        String,
-        Arc<dyn pingora_core::services::background::BackgroundService + Send + Sync>,
-    )> {
+    /// Typed health-check specs with stable fingerprints for incremental
+    /// reconcile. Only plugins that own background maintenance register here;
+    /// the default is no specs.
+    fn health_check_specs(&self) -> Vec<HealthCheckSpec> {
         Vec::new()
-    }
-
-    /// Optional typed health-check specs with stable fingerprints for incremental reconcile.
-    fn health_check_specs(&self) -> Option<Vec<HealthCheckSpec>> {
-        None
     }
 
     /// Handle the incoming request in the access phase.
@@ -438,11 +440,17 @@ static DEFAULT_PLUGIN_EXECUTOR: Lazy<Arc<ProxyPluginExecutor>> =
 /// Plugins are sorted by priority (higher numbers execute first) to ensure
 /// critical plugins like auth and rate limiting run before others.
 /// Uses Arc for efficient sharing across multiple concurrent requests.
+///
+/// Storage is private: construction is either [`Self::new`] (which sorts
+/// deterministically) or [`Self::from_sorted`] (which asserts the caller's
+/// ordering precondition), so an unordered executor can never be built by
+/// accident.
 #[derive(Default)]
 pub struct ProxyPluginExecutor {
-    pub plugins: Vec<Arc<dyn ProxyPlugin>>,
+    /// Plugins in deterministic execution order (priority descending).
+    plugins: Vec<Arc<dyn ProxyPlugin>>,
     /// Whether at least one configured plugin processes response body chunks.
-    pub has_response_body_filter: bool,
+    has_response_body_filter: bool,
 }
 
 /// Invokes a plugin method on each plugin in sequence (async, propagates Result).
@@ -473,7 +481,25 @@ macro_rules! for_each_plugin_async_unit {
 }
 
 impl ProxyPluginExecutor {
+    /// Sort plugins deterministically (priority desc, then name asc) and build.
     pub fn new(plugins: Vec<Arc<dyn ProxyPlugin>>) -> Self {
+        let mut plugins = plugins;
+        sort_plugins_by_priority_desc(&mut plugins);
+        Self::from_sorted(plugins)
+    }
+
+    /// Build from an already-ordered plugin list.
+    ///
+    /// The precondition is a non-increasing priority sequence; tie order is
+    /// whatever the caller produced (e.g. the route-over-service merge prefers
+    /// the route side on equal priority). In debug builds this is asserted.
+    pub fn from_sorted(plugins: Vec<Arc<dyn ProxyPlugin>>) -> Self {
+        debug_assert!(
+            plugins
+                .windows(2)
+                .all(|window| window[0].priority() >= window[1].priority()),
+            "ProxyPluginExecutor::from_sorted requires priority-descending input"
+        );
         let has_response_body_filter = plugins
             .iter()
             .any(|plugin| plugin.has_response_body_filter());
@@ -485,6 +511,16 @@ impl ProxyPluginExecutor {
 
     pub fn has_plugin(&self, name: &str) -> bool {
         self.plugins.iter().any(|plugin| plugin.name() == name)
+    }
+
+    /// Read-only access to the ordered plugin list.
+    pub fn plugins(&self) -> &[Arc<dyn ProxyPlugin>] {
+        &self.plugins
+    }
+
+    /// Whether any plugin in this executor processes response body chunks.
+    pub fn has_response_body_filter(&self) -> bool {
+        self.has_response_body_filter
     }
 
     /// Returns shared empty executor instance to minimize memory allocation.
@@ -572,6 +608,127 @@ impl ProxyPlugin for ProxyPluginExecutor {
     }
 }
 
+// =============================================================================
+// COMPILED PLUGIN PIPELINE
+// =============================================================================
+
+/// Shared empty pipeline used when no route matched or no plugins are configured.
+static DEFAULT_PLUGIN_PIPELINE: Lazy<Arc<CompiledPluginPipeline>> =
+    Lazy::new(|| Arc::new(CompiledPluginPipeline::default()));
+
+/// Compiled per-request plugin composition: global rules then route/service.
+///
+/// Owns the layer-precedence policy that previously lived in `HttpService`'s
+/// `run_global_then_route_*` helpers: global plugins always run first, a global
+/// `request_filter` short-circuit skips the route layer, and every phase
+/// traverses global → route. Both layers arrive already ordered from their
+/// builders, so no per-request sorting or merge happens here.
+#[derive(Clone)]
+pub struct CompiledPluginPipeline {
+    global: Arc<ProxyPluginExecutor>,
+    route: Arc<ProxyPluginExecutor>,
+}
+
+impl Default for CompiledPluginPipeline {
+    fn default() -> Self {
+        Self {
+            global: ProxyPluginExecutor::default_shared(),
+            route: ProxyPluginExecutor::default_shared(),
+        }
+    }
+}
+
+impl CompiledPluginPipeline {
+    pub fn new(global: Arc<ProxyPluginExecutor>, route: Arc<ProxyPluginExecutor>) -> Self {
+        Self { global, route }
+    }
+
+    /// Shared empty pipeline with no plugins in either layer.
+    pub fn empty() -> Arc<Self> {
+        DEFAULT_PLUGIN_PIPELINE.clone()
+    }
+
+    /// Whether either layer contains a plugin named `name` (e.g. CORS preflight).
+    pub fn has_plugin(&self, name: &str) -> bool {
+        self.global.has_plugin(name) || self.route.has_plugin(name)
+    }
+
+    /// Run global-rule plugins then route/service plugins for `early_request_filter`.
+    pub async fn early_request_filter(
+        &self,
+        session: &mut Session,
+        ctx: &mut ProxyContext,
+    ) -> Result<()> {
+        self.global.early_request_filter(session, ctx).await?;
+        self.route.early_request_filter(session, ctx).await
+    }
+
+    /// Run global-rule plugins then route/service plugins for `request_filter`.
+    ///
+    /// Returns `true` when a plugin short-circuits the request. Global plugins
+    /// run first; a global short-circuit skips the route layer entirely.
+    pub async fn request_filter(
+        &self,
+        session: &mut Session,
+        ctx: &mut ProxyContext,
+    ) -> Result<bool> {
+        if self.global.request_filter(session, ctx).await? {
+            return Ok(true);
+        }
+        self.route.request_filter(session, ctx).await
+    }
+
+    /// Run global-rule plugins then route/service plugins for `upstream_request_filter`.
+    pub async fn upstream_request_filter(
+        &self,
+        session: &mut Session,
+        upstream_request: &mut RequestHeader,
+        ctx: &mut ProxyContext,
+    ) -> Result<()> {
+        self.global
+            .upstream_request_filter(session, upstream_request, ctx)
+            .await?;
+        self.route
+            .upstream_request_filter(session, upstream_request, ctx)
+            .await
+    }
+
+    /// Run global-rule plugins then route/service plugins for `response_filter`.
+    pub async fn response_filter(
+        &self,
+        session: &mut Session,
+        upstream_response: &mut ResponseHeader,
+        ctx: &mut ProxyContext,
+    ) -> Result<()> {
+        self.global
+            .response_filter(session, upstream_response, ctx)
+            .await?;
+        self.route
+            .response_filter(session, upstream_response, ctx)
+            .await
+    }
+
+    /// Run global-rule plugins then route/service plugins for `response_body_filter`.
+    pub fn response_body_filter(
+        &self,
+        session: &mut Session,
+        body: &mut Option<Bytes>,
+        end_of_stream: bool,
+        ctx: &mut ProxyContext,
+    ) -> Result<()> {
+        self.global
+            .response_body_filter(session, body, end_of_stream, ctx)?;
+        self.route
+            .response_body_filter(session, body, end_of_stream, ctx)
+    }
+
+    /// Run global-rule plugins then route/service plugins for `logging`.
+    pub async fn logging(&self, session: &mut Session, e: Option<&Error>, ctx: &mut ProxyContext) {
+        self.global.logging(session, e, ctx).await;
+        self.route.logging(session, e, ctx).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -596,7 +753,53 @@ mod tests {
     #[test]
     fn test_executor_detects_response_body_filter() {
         let executor = ProxyPluginExecutor::new(vec![Arc::new(BodyFilterPlugin)]);
-        assert!(executor.has_response_body_filter);
+        assert!(executor.has_response_body_filter());
+    }
+
+    #[test]
+    fn new_sorts_plugins_by_priority_desc() {
+        let low: Arc<dyn ProxyPlugin> = Arc::new(DummyPlugin {
+            name: "low",
+            priority: 10,
+        });
+        let high: Arc<dyn ProxyPlugin> = Arc::new(DummyPlugin {
+            name: "high",
+            priority: 100,
+        });
+        let executor = ProxyPluginExecutor::new(vec![low.clone(), high.clone()]);
+        let names: Vec<&str> = executor.plugins().iter().map(|p| p.name()).collect();
+        assert_eq!(names, vec!["high", "low"]);
+    }
+
+    #[test]
+    fn new_breaks_ties_by_name() {
+        let zebra: Arc<dyn ProxyPlugin> = Arc::new(DummyPlugin {
+            name: "zebra",
+            priority: 50,
+        });
+        let alpha: Arc<dyn ProxyPlugin> = Arc::new(DummyPlugin {
+            name: "alpha",
+            priority: 50,
+        });
+        let executor = ProxyPluginExecutor::new(vec![zebra, alpha]);
+        let names: Vec<&str> = executor.plugins().iter().map(|p| p.name()).collect();
+        assert_eq!(names, vec!["alpha", "zebra"]);
+    }
+
+    struct DummyPlugin {
+        name: &'static str,
+        priority: i32,
+    }
+
+    #[async_trait]
+    impl ProxyPlugin for DummyPlugin {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn priority(&self) -> i32 {
+            self.priority
+        }
     }
 
     #[test]

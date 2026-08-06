@@ -11,21 +11,32 @@ pub mod load_balancer;
 
 use std::collections::HashMap;
 
-pub(crate) use discovery::prepare_static_upstream;
-
-pub(crate) type PreparedUpstreams = HashMap<String, discovery::PreparedUpstream>;
-
-pub(crate) fn named_key(id: &str) -> String {
-    format!("named/{id}")
+/// One upstream occurrence in the configuration graph.
+///
+/// Replaces the former `named/…`, `inline/…`, `traffic-split/…` string keys so
+/// occurrence identity is typed and shared by preparation, compilation, and
+/// health-check reconciliation without string-format coupling.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum UpstreamOccurrence {
+    /// A top-level named upstream.
+    Named(String),
+    /// An inline upstream declared directly on a route.
+    RouteInline(String),
+    /// An inline upstream declared directly on a service.
+    ServiceInline(String),
+    /// An inline upstream embedded in a `traffic-split` plugin.
+    TrafficSplit(TrafficSplitOwner, usize, usize),
 }
 
-pub(crate) fn inline_key(owner: &str) -> String {
-    format!("inline/{owner}")
+/// The configuration scope that owns a traffic-split inline upstream.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum TrafficSplitOwner {
+    Route(String),
+    Service(String),
+    GlobalRule(String),
 }
 
-pub(crate) fn traffic_split_key(owner: &str, rule: usize, upstream: usize) -> String {
-    format!("traffic-split/{owner}/{rule}/{upstream}")
-}
+pub(crate) type PreparedUpstreams = HashMap<UpstreamOccurrence, discovery::PreparedUpstream>;
 
 // Re-export commonly used items
 pub use health_check::SHARED_HEALTH_CHECK_SERVICE;

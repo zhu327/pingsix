@@ -26,7 +26,7 @@ use serde_json::Value as JsonValue;
 
 use crate::{
     core::{PluginCreateFn, ProxyError, ProxyPlugin, ProxyResult},
-    proxy::upstream::{PreparedUpstreams, ProxyUpstream},
+    proxy::upstream::{PreparedUpstreams, ProxyUpstream, TrafficSplitOwner},
 };
 
 /// Global registry mapping plugin names to their factory functions.
@@ -62,10 +62,6 @@ static PLUGIN_BUILDER_REGISTRY: Lazy<HashMap<&'static str, PluginCreateFn>> = La
         ), // 1008
         (brotli::PLUGIN_NAME, brotli::create_brotli_plugin), // 996
         (gzip::PLUGIN_NAME, gzip::create_gzip_plugin), // 995
-        (
-            traffic_split::PLUGIN_NAME,
-            traffic_split::create_traffic_split_plugin,
-        ), // 966
         (redirect::PLUGIN_NAME, redirect::create_redirect_plugin), // 900
         (
             response_rewrite::PLUGIN_NAME,
@@ -88,6 +84,34 @@ static PLUGIN_BUILDER_REGISTRY: Lazy<HashMap<&'static str, PluginCreateFn>> = La
     ];
     arr.into_iter().collect()
 });
+
+/// Build-time dependency context for plugins that resolve other resources.
+///
+/// Carries the owning scope plus the same-version named upstreams and prepared
+/// material so dependency-aware plugins (currently traffic-split) no longer
+/// need to be special-cased by name in the factory path.
+pub(crate) struct PluginBuildContext<'a> {
+    pub upstreams: &'a HashMap<String, Arc<ProxyUpstream>>,
+    pub prepared: &'a PreparedUpstreams,
+    pub owner: &'a TrafficSplitOwner,
+}
+
+/// Factories that resolve upstream references at build time.
+///
+/// A plugin registers here instead of the plain registry when it needs
+/// [`PluginBuildContext`]; registration is declarative, so adding a future
+/// dependency-aware plugin needs no name check anywhere.
+type UpstreamPluginFactory =
+    fn(JsonValue, &PluginBuildContext<'_>) -> ProxyResult<Arc<dyn ProxyPlugin>>;
+
+static PLUGIN_UPSTREAM_BUILDER_REGISTRY: Lazy<HashMap<&'static str, UpstreamPluginFactory>> =
+    Lazy::new(|| {
+        let entries: Vec<(&'static str, UpstreamPluginFactory)> = vec![(
+            traffic_split::PLUGIN_NAME,
+            traffic_split::create_traffic_split_plugin_with_context,
+        )];
+        entries.into_iter().collect()
+    });
 
 /// Plugin name → secret-field transform derived from `#[encrypt]` markers.
 ///
@@ -122,12 +146,17 @@ pub(crate) fn build_plugin_with_upstreams(
     cfg: JsonValue,
     upstreams: &HashMap<String, Arc<ProxyUpstream>>,
     prepared: &PreparedUpstreams,
-    owner: &str,
+    owner: &TrafficSplitOwner,
 ) -> ProxyResult<Arc<dyn ProxyPlugin>> {
-    if name == traffic_split::PLUGIN_NAME {
-        return traffic_split::create_traffic_split_plugin_with_upstreams(
-            cfg, upstreams, prepared, owner,
-        );
+    // Dependency-aware plugins register here; the lookup replaces the former
+    // `name == traffic-split` special case with a declarative registry entry.
+    if let Some(factory) = PLUGIN_UPSTREAM_BUILDER_REGISTRY.get(name) {
+        let context = PluginBuildContext {
+            upstreams,
+            prepared,
+            owner,
+        };
+        return factory(cfg, &context);
     }
     build_plugin(name, cfg)
 }

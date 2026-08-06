@@ -219,7 +219,6 @@ impl EtcdConfigSync {
                 _ = shutdown.changed() => {
                     if *shutdown.borrow() {
                         log::debug!("Shutdown signal received, stopping etcd config sync for prefix '{}'", self.config.prefix);
-                        self.graph.shutdown().await;
                         return;
                     }
                 },
@@ -240,7 +239,6 @@ impl EtcdConfigSync {
                             }
                         }
                         if sleep_or_shutdown(LIST_RETRY_DELAY, &shutdown).await {
-                            self.graph.shutdown().await;
                             return;
                         }
                         continue;
@@ -253,7 +251,6 @@ impl EtcdConfigSync {
                 _ = shutdown.changed() => {
                     if *shutdown.borrow() {
                         log::debug!("Shutdown signal received, stopping etcd config sync for prefix '{}'", self.config.prefix);
-                        self.graph.shutdown().await;
                         return;
                     }
                 },
@@ -271,7 +268,6 @@ impl EtcdConfigSync {
                             }
                         }
                         if sleep_or_shutdown(WATCH_RETRY_DELAY, &shutdown).await {
-                            self.graph.shutdown().await;
                             return;
                         }
                         // Loop continues to list() — full resync after watch failure.

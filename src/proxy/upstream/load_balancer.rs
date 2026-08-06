@@ -261,7 +261,12 @@ where
 
         if let Some(check) = upstream.checks {
             let health_check: Box<dyn HealthCheckTrait + Send + Sync + 'static> =
-                check.clone().into();
+                check.clone().try_into().map_err(|e| {
+                    ProxyError::Configuration(format!(
+                        "Upstream '{}' has an invalid health check configuration: {e}",
+                        upstream.id
+                    ))
+                })?;
             upstreams.set_health_check(health_check);
 
             let health_check_frequency = check
@@ -303,12 +308,14 @@ where
     }
 }
 
-impl From<config::HealthCheck> for Box<dyn HealthCheckTrait + Send + Sync + 'static> {
-    fn from(value: config::HealthCheck) -> Self {
+impl TryFrom<config::HealthCheck> for Box<dyn HealthCheckTrait + Send + Sync + 'static> {
+    type Error = ProxyError;
+
+    fn try_from(value: config::HealthCheck) -> Result<Self, Self::Error> {
         match value.active.r#type {
-            config::ActiveCheckType::TCP => Into::<Box<TcpHealthCheck>>::into(value),
+            config::ActiveCheckType::TCP => Ok(Into::<Box<TcpHealthCheck>>::into(value)),
             config::ActiveCheckType::HTTP | config::ActiveCheckType::HTTPS => {
-                Into::<Box<HttpHealthCheck>>::into(value)
+                Ok(Box::new(HttpHealthCheck::try_from(value)?))
             }
         }
     }
@@ -332,8 +339,10 @@ impl From<config::HealthCheck> for Box<TcpHealthCheck> {
     }
 }
 
-impl From<config::HealthCheck> for Box<HttpHealthCheck> {
-    fn from(value: config::HealthCheck) -> Self {
+impl TryFrom<config::HealthCheck> for HttpHealthCheck {
+    type Error = ProxyError;
+
+    fn try_from(value: config::HealthCheck) -> Result<Self, Self::Error> {
         let host = value.active.host.unwrap_or_default();
         let tls = value.active.r#type == config::ActiveCheckType::HTTPS;
         let mut health_check = HttpHealthCheck::new(host.as_str(), tls);
@@ -345,27 +354,40 @@ impl From<config::HealthCheck> for Box<HttpHealthCheck> {
         // Set certificate verification if TLS is enabled
         health_check.peer_template.options.verify_cert = value.active.https_verify_certificate;
 
-        // Build URI for HTTP health check path, log failure if any
-        if let Ok(uri) = Uri::builder()
+        // Build URI for HTTP health check path. A malformed path must fail
+        // candidate publication rather than silently disabling the probe.
+        let uri = Uri::builder()
             .path_and_query(&value.active.http_path)
             .build()
-        {
-            health_check.req.set_uri(uri);
-        } else {
-            log::warn!(
-                "Invalid URI path provided for health check: {}",
-                value.active.http_path
-            );
-        }
+            .map_err(|e| {
+                ProxyError::Configuration(format!(
+                    "Invalid health check path '{}': {e}",
+                    value.active.http_path
+                ))
+            })?;
+        health_check.req.set_uri(uri);
 
-        // Insert headers, ensure they are properly formatted
+        // Insert headers; malformed entries must fail closed instead of being
+        // silently dropped, otherwise probes run with a different request than
+        // the operator configured.
         for header in value.active.req_headers.iter() {
-            let mut parts = header.splitn(2, ":");
-            if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
-                let key = key.trim().to_string();
-                let value = value.trim().to_string();
-                let _ = health_check.req.insert_header(key, &value);
+            let mut parts = header.splitn(2, ':');
+            let (key, val) = match (parts.next(), parts.next()) {
+                (Some(key), Some(val)) => (key.trim().to_string(), val.trim().to_string()),
+                _ => {
+                    return Err(ProxyError::Configuration(format!(
+                        "Invalid health check header {header:?}: expected 'Name: value'"
+                    )))
+                }
+            };
+            if key.is_empty() {
+                return Err(ProxyError::Configuration(format!(
+                    "Invalid health check header {header:?}: empty header name"
+                )));
             }
+            health_check.req.insert_header(key, &val).map_err(|e| {
+                ProxyError::Configuration(format!("Invalid health check header {header:?}: {e}"))
+            })?;
         }
 
         // Handle port override
@@ -396,7 +418,7 @@ impl From<config::HealthCheck> for Box<HttpHealthCheck> {
         }
 
         // Return the Boxed health check
-        Box::new(health_check)
+        Ok(health_check)
     }
 }
 
@@ -503,5 +525,60 @@ mod tests {
             cache_origin_fingerprint(&nodes_changed),
             "node set must change cache origin fingerprint"
         );
+    }
+
+    /// A malformed health-check path or header must fail candidate build
+    /// instead of silently disabling/altering the probe.
+    #[test]
+    fn invalid_health_check_config_fails_candidate_build() {
+        use crate::config::{ActiveCheck, ActiveCheckType, HealthCheck as HealthCheckConfig};
+
+        fn upstream_with_http_path(path: &str) -> config::Upstream {
+            let mut upstream = sample_upstream("hc", None);
+            upstream.checks = Some(HealthCheckConfig {
+                active: ActiveCheck {
+                    r#type: ActiveCheckType::HTTP,
+                    timeout: 1,
+                    http_path: path.to_string(),
+                    host: None,
+                    port: None,
+                    https_verify_certificate: true,
+                    req_headers: vec![],
+                    healthy: None,
+                    unhealthy: None,
+                },
+            });
+            upstream
+        }
+
+        let invalid_path = upstream_with_http_path("not a uri path");
+        let err = ProxyUpstream::build_static(invalid_path)
+            .err()
+            .expect("malformed health check path must fail build")
+            .to_string();
+        assert!(
+            err.contains("health check") || err.contains("Invalid health check path"),
+            "malformed health check path must fail build, got: {err}"
+        );
+
+        let mut malformed_header = upstream_with_http_path("/");
+        if let Some(check) = malformed_header.checks.as_mut() {
+            check.active.req_headers = vec!["HeaderWithoutColon".into()];
+        }
+        let err = ProxyUpstream::build_static(malformed_header)
+            .err()
+            .expect("malformed health check header must fail build")
+            .to_string();
+        assert!(
+            err.contains("Invalid health check header"),
+            "malformed health check header must fail build, got: {err}"
+        );
+
+        // A well-formed configuration still builds.
+        let mut ok = upstream_with_http_path("/healthz");
+        if let Some(check) = ok.checks.as_mut() {
+            check.active.req_headers = vec!["X-Probe: healthz".into()];
+        }
+        ProxyUpstream::build_static(ok).expect("valid health check must build");
     }
 }
