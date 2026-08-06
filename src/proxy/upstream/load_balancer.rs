@@ -581,4 +581,115 @@ mod tests {
         }
         ProxyUpstream::build_static(ok).expect("valid health check must build");
     }
+
+    // ---------------------------------------------------------------------
+    // Real active health-check failure/recovery
+    // ---------------------------------------------------------------------
+
+    fn upstream_with_active_check(addr: &str) -> config::Upstream {
+        use crate::config::{ActiveCheck, ActiveCheckType, Health, HealthCheck as HC, Unhealthy};
+        let mut upstream = sample_upstream("hc-live", None);
+        // Probe the test backend, not the sample upstream's hard-coded node.
+        upstream.nodes = HashMap::from([(addr.to_string(), 1)]);
+        upstream.checks = Some(HC {
+            active: ActiveCheck {
+                r#type: ActiveCheckType::HTTP,
+                timeout: 1,
+                http_path: "/".into(),
+                host: None,
+                port: None,
+                https_verify_certificate: true,
+                req_headers: vec![],
+                // Fast transitions: one probe decides each way.
+                healthy: Some(Health {
+                    interval: 1,
+                    http_statuses: vec![200],
+                    successes: 1,
+                }),
+                unhealthy: Some(Unhealthy {
+                    http_failures: 1,
+                    tcp_failures: 1,
+                }),
+            },
+        });
+        upstream
+    }
+
+    /// Serve minimal HTTP/1.1 200 responses for every accepted connection.
+    async fn serve_http(listener: tokio::net::TcpListener) {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = [0u8; 1024];
+                let _ = socket.read(&mut buf).await;
+                let _ = socket
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                    .await;
+            });
+        }
+    }
+
+    /// Bind a listener that can immediately reuse the same port after a close.
+    fn bind_reusable(addr: std::net::SocketAddr) -> std::io::Result<tokio::net::TcpListener> {
+        let socket = tokio::net::TcpSocket::new_v4()?;
+        socket.set_reuseaddr(true)?;
+        socket.bind(addr)?;
+        socket.listen(1024)
+    }
+
+    async fn wait_for_selection(upstream: &ProxyUpstream, expect_some: bool, timeout: Duration) {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let selected = upstream.select_backend_for_test().is_some();
+            if selected == expect_some {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "selection did not become {} within {timeout:?}",
+                if expect_some {
+                    "available"
+                } else {
+                    "unavailable"
+                }
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    /// Real Pingora health probes against a live local backend: selection must
+    /// follow healthy → unhealthy (backend stopped) → healthy (backend back).
+    #[tokio::test]
+    async fn active_health_check_failure_and_recovery() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let listener = bind_reusable("127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut backend = tokio::spawn(serve_http(listener));
+
+        let upstream = ProxyUpstream::build_static(upstream_with_active_check(&addr.to_string()))
+            .expect("upstream with active check must build");
+        let service = upstream.health_check_service();
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let health_task = tokio::spawn(async move {
+            service.start(shutdown_rx).await;
+        });
+
+        // Backend up → probe succeeds → selectable.
+        wait_for_selection(&upstream, true, Duration::from_secs(10)).await;
+
+        // Backend down → consecutive probe failure → no longer selectable.
+        backend.abort();
+        wait_for_selection(&upstream, false, Duration::from_secs(15)).await;
+
+        // Backend restored on the same port → probe recovers → selectable again.
+        let listener2 = bind_reusable(addr).expect("same port must be reusable");
+        backend = tokio::spawn(serve_http(listener2));
+        wait_for_selection(&upstream, true, Duration::from_secs(15)).await;
+
+        health_task.abort();
+        backend.abort();
+    }
 }

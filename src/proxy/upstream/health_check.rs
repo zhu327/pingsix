@@ -447,18 +447,20 @@ impl HealthCheckExecutor {
             .map(|(id, reg)| (id, reg.generation()))
             .collect();
 
-        running_tasks.retain(|key, running| {
-            let keep = current.contains(key);
-            if !keep {
-                log::debug!(
-                    "Resync: stopping stale task for upstream '{}' gen {}",
-                    key.0,
-                    key.1
-                );
-                running.handle.abort();
+        // Collect stale keys first (`retain`'s closure is synchronous and
+        // cannot await), then stop each displaced task with the same bounded
+        // grace as every other removal path.
+        let stale_keys: Vec<(String, u64)> = running_tasks
+            .iter()
+            .filter(|(key, _)| !current.contains(*key))
+            .map(|((id, gen), _)| (id.clone(), *gen))
+            .collect();
+        for (id, gen) in stale_keys {
+            log::debug!("Resync: stopping stale task for upstream '{id}' gen {gen}");
+            if let Some(running) = running_tasks.remove(&(id.clone(), gen)) {
+                self.stop_task(running.handle).await;
             }
-            keep
-        });
+        }
 
         for (upstream_id, registration) in registry.get_all_upstreams() {
             let key = (upstream_id.clone(), registration.generation());
@@ -704,6 +706,30 @@ mod tests {
         assert!(
             *shutdown_rx.borrow(),
             "request_shutdown_all must signal registered task watches"
+        );
+    }
+
+    /// A broadcast-lag resync must remove stale tasks using the same bounded
+    /// grace as every other removal path (never a bare abort).
+    #[tokio::test]
+    async fn resync_removes_stale_tasks_with_bounded_stop() {
+        let registry = Arc::new(HealthCheckRegistry::new());
+        let executor = HealthCheckExecutor::new();
+        let mut running_tasks = std::collections::HashMap::new();
+
+        // A task whose registration no longer exists in the registry.
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let service = Arc::new(HangUntilShutdown);
+        let handle = tokio::spawn(async move {
+            service.start(shutdown_rx).await;
+        });
+        running_tasks.insert(("gone".to_string(), 7), RunningHealthCheck { handle });
+
+        executor.resync_tasks(&registry, &mut running_tasks).await;
+
+        assert!(
+            running_tasks.is_empty(),
+            "resync must remove tasks whose registration is gone"
         );
     }
 }

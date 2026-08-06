@@ -162,8 +162,6 @@ pub struct ProxyContext {
     pub original_request_had_credentials: bool,
     /// Set when any auth plugin observes credentials (including custom headers/query).
     pub request_has_credentials: bool,
-    /// Optional authenticated identity established by an auth plugin.
-    pub authenticated_identity: Option<String>,
     /// Custom variables available to plugins (type-erased, thread-safe).
     /// Lazily allocated because many requests never store plugin variables.
     pub vars: Option<HashMap<String, Box<dyn Any + Send + Sync>>>,
@@ -182,7 +180,6 @@ impl Default for ProxyContext {
             request_id: None,
             original_request_had_credentials: false,
             request_has_credentials: false,
-            authenticated_identity: None,
             vars: None,
         }
     }

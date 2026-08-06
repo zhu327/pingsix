@@ -691,6 +691,15 @@ impl Route {
             return Err(ValidationError::new("uri_or_uris_required"));
         }
 
+        // APISIX semantics treat these as alternative forms; silently preferring
+        // the singular hides configuration mistakes, so reject both-at-once.
+        if self.uri.is_some() && !self.uris.is_empty() {
+            return Err(ValidationError::new("uri_and_uris_mutually_exclusive"));
+        }
+        if self.host.is_some() && !self.hosts.is_empty() {
+            return Err(ValidationError::new("host_and_hosts_mutually_exclusive"));
+        }
+
         if self.upstream_id.is_none() && self.service_id.is_none() && self.upstream.is_none() {
             return Err(ValidationError::new("upstream_or_service_required"));
         }
@@ -1212,6 +1221,53 @@ routes:
                 // Test passes if we get an error
             }
         }
+    }
+
+    #[test]
+    fn route_rejects_uri_and_uris_together() {
+        init_log();
+        let conf_str = r#"
+---
+pingsix:
+  listeners:
+    - address: "[::1]:8080"
+
+routes:
+  - id: "1"
+    uri: /
+    uris: ["/other"]
+    upstream:
+      nodes:
+        "127.0.0.1:1980": 1
+        "#;
+        assert!(
+            Config::from_yaml(conf_str).is_err(),
+            "uri and uris are mutually exclusive forms"
+        );
+    }
+
+    #[test]
+    fn route_rejects_host_and_hosts_together() {
+        init_log();
+        let conf_str = r#"
+---
+pingsix:
+  listeners:
+    - address: "[::1]:8080"
+
+routes:
+  - id: "1"
+    uri: /
+    host: api.example.com
+    hosts: ["other.example.com"]
+    upstream:
+      nodes:
+        "127.0.0.1:1980": 1
+        "#;
+        assert!(
+            Config::from_yaml(conf_str).is_err(),
+            "host and hosts are mutually exclusive forms"
+        );
     }
 
     #[test]

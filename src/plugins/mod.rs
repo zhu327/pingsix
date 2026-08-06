@@ -1,6 +1,7 @@
 pub mod basic_auth;
 pub mod brotli;
 pub mod cache;
+pub mod compression;
 pub mod cors;
 pub mod csrf;
 pub mod echo;
