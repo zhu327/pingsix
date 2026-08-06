@@ -1,4 +1,5 @@
 use std::ops::DerefMut;
+use std::sync::Arc;
 
 use pingora::services::listening::Service;
 use pingora_core::{
@@ -14,8 +15,7 @@ use pingsix::config::{self, etcd::EtcdConfigSync, Config};
 use pingsix::core;
 use pingsix::logging::Logger;
 use pingsix::proxy::{
-    control_plane::load_static_configurations, event::ProxyEventHandler, ssl::DynamicCert,
-    upstream::SHARED_HEALTH_CHECK_SERVICE,
+    graph_mutation::ConfigurationGraph, ssl::DynamicCert, upstream::SHARED_HEALTH_CHECK_SERVICE,
 };
 use pingsix::service::{http::HttpService, status::StatusHttpApp};
 
@@ -48,23 +48,25 @@ fn main() {
     init_pingsix_defaults(&config.pingsix);
 
     // Choose config source: etcd for dynamic updates in distributed env, or static file for simple setups
-    let etcd_sync = if let Some(etcd_cfg) = &config.pingsix.etcd {
+    let (etcd_sync, config_graph) = if let Some(etcd_cfg) = &config.pingsix.etcd {
         log::debug!(
             "Initializing etcd config sync with prefix: {}",
             etcd_cfg.prefix
         );
-        let event_handler = ProxyEventHandler::new(etcd_cfg.prefix.clone());
-        Some(EtcdConfigSync::new(
-            etcd_cfg.clone(),
-            Box::new(event_handler),
-        ))
+        let graph = Arc::new(ConfigurationGraph::new(Arc::new(
+            pingsix::config::etcd::EtcdGraphStore::new(etcd_cfg.clone()),
+        )));
+        (
+            Some(EtcdConfigSync::new(etcd_cfg.clone(), graph.clone())),
+            Some(graph),
+        )
     } else {
         log::debug!("Loading static configurations from config file");
-        if let Err(e) = load_static_configurations(&config) {
+        if let Err(e) = ConfigurationGraph::load_static(&config) {
             log::error!("Failed to load static configurations: {e}");
             std::process::exit(1);
         }
-        None
+        (None, None)
     };
 
     let mut pingsix_server = Server::new_with_opt_and_conf(Some(cli_options), config.pingora);
@@ -98,7 +100,7 @@ fn main() {
     log::debug!("Initializing shared health check service");
     pingsix_server.add_service(SHARED_HEALTH_CHECK_SERVICE.clone());
 
-    add_optional_services(&mut pingsix_server, &config.pingsix);
+    add_optional_services(&mut pingsix_server, &config.pingsix, config_graph);
 
     log::info!("Starting pingsix server");
     pingsix_server.bootstrap();
@@ -160,7 +162,11 @@ fn add_listeners(
 ///
 /// Invalid Sentry configuration only disables Sentry; Admin/Status/Prometheus still start.
 /// Admin interface is only available when etcd is enabled.
-fn add_optional_services(server: &mut Server, cfg: &config::Pingsix) {
+fn add_optional_services(
+    server: &mut Server,
+    cfg: &config::Pingsix,
+    config_graph: Option<Arc<ConfigurationGraph>>,
+) {
     if let Some(sentry_cfg) = &cfg.sentry {
         if is_example_sentry_dsn(&sentry_cfg.dsn) {
             log::warn!("Ignoring example Sentry DSN, Sentry disabled");
@@ -184,19 +190,17 @@ fn add_optional_services(server: &mut Server, cfg: &config::Pingsix) {
         }
     }
 
-    if cfg.etcd.is_some() && cfg.admin.is_some() {
-        if let Some(admin_cfg) = &cfg.admin {
-            if let Err(e) = validate_admin_bind(admin_cfg) {
-                log::error!("{e}");
-                std::process::exit(1);
-            }
-            log::debug!("Configuring admin HTTP interface");
-            if let Some(admin_service_http) = AdminHttpApp::admin_http_service(cfg) {
-                server.add_service(admin_service_http);
-                log::info!("Admin HTTP interface enabled");
-            } else {
-                log::error!("Admin HTTP interface not configured (missing admin or etcd config)");
-            }
+    if let (Some(graph), Some(admin_cfg)) = (config_graph, &cfg.admin) {
+        if let Err(e) = validate_admin_bind(admin_cfg) {
+            log::error!("{e}");
+            std::process::exit(1);
+        }
+        log::debug!("Configuring admin HTTP interface");
+        if let Some(admin_service_http) = AdminHttpApp::admin_http_service(cfg, graph) {
+            server.add_service(admin_service_http);
+            log::info!("Admin HTTP interface enabled");
+        } else {
+            log::error!("Admin HTTP interface not configured (missing admin or etcd config)");
         }
     }
 
@@ -230,7 +234,7 @@ fn add_optional_services(server: &mut Server, cfg: &config::Pingsix) {
 /// Apply `pingsix.defaults` before any static/etcd resource graph is built.
 ///
 /// Cache plugins and upstream peers resolve their fallbacks at construction time;
-/// initializing after `load_static_configurations` would leave the baked-in
+/// initializing after static/etcd graph publication would leave the baked-in
 /// 1 MiB / absent-timeout fallbacks in place for the entire process lifetime.
 fn init_pingsix_defaults(cfg: &config::Pingsix) {
     if let Some(cache) = cfg.defaults.as_ref().and_then(|d| d.cache.as_ref()) {
