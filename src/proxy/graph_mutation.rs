@@ -527,6 +527,13 @@ impl ConfigurationGraph {
     /// relist instead of silently accepting a broken graph; the worker only
     /// prepares DNS and compiles.
     pub fn replace_all(&self, snapshot: StoredGraph) -> Result<(), GraphError> {
+        // Serialized with `apply_watch` submissions: generation, cancellation,
+        // target, and work-signal updates in `submit` must never interleave.
+        let _writer = self
+            .inner
+            .write_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let logical = decode_graph(&snapshot, SecretMode::DecryptForRuntime)
             .map_err(|e| GraphError::InvalidCandidate { source: e })?;
         validate_config_set(&logical).map_err(|e| GraphError::InvalidCandidate { source: e })?;
@@ -976,6 +983,22 @@ impl ConfigurationGraph {
             .await
             .map_err(GraphError::Store)?;
 
+        // The storage/path key is the single authority for resource identity:
+        // normalize the body `id` before validation, persistence, and every
+        // later read, so Admin GET/LIST and the runtime can never disagree
+        // about which resource this is.
+        let body_id = value.get("id").and_then(|v| v.as_str());
+        if body_id != Some(key.id.as_str()) {
+            if let Some(body_id) = body_id.filter(|s| !s.is_empty()) {
+                log::warn!(
+                    "Admin PUT {}: body id '{body_id}' ignored; path id '{}' is authoritative",
+                    key.logical_path(),
+                    key.id
+                );
+            }
+            value["id"] = serde_json::Value::String(key.id.clone());
+        }
+
         if contains_redaction_sentinel(&value) {
             if let Some(stored) = snapshot.resources.get(&key) {
                 let mut existing = parse_stored_resource(&key, &stored.value)?;
@@ -1040,19 +1063,24 @@ fn parse_stored_resource(key: &ResourceKey, value: &[u8]) -> Result<serde_json::
 }
 
 /// Validate a logical resource JSON document against its typed schema, plugin
-/// configurations, and (for SSL) certificate/key material.
+/// configurations, deterministic upstream mTLS material, and (for SSL)
+/// certificate/key material.
 fn validate_resource_json(kind: ResourceKind, value: &serde_json::Value) -> ProxyResult<()> {
     match kind {
         ResourceKind::Upstream => {
             let resource: Upstream =
                 serde_json::from_value(value.clone()).map_err(serialization_error)?;
             resource.validate()?;
+            validate_upstream_tls_material(&resource)?;
         }
         ResourceKind::Service => {
             let resource: Service =
                 serde_json::from_value(value.clone()).map_err(serialization_error)?;
             resource.validate()?;
             validate_plugins(&resource.plugins)?;
+            if let Some(upstream) = &resource.upstream {
+                validate_upstream_tls_material(upstream)?;
+            }
         }
         ResourceKind::GlobalRule => {
             let resource: GlobalRule =
@@ -1065,6 +1093,9 @@ fn validate_resource_json(kind: ResourceKind, value: &serde_json::Value) -> Prox
                 serde_json::from_value(value.clone()).map_err(serialization_error)?;
             resource.validate()?;
             validate_plugins(&resource.plugins)?;
+            if let Some(upstream) = &resource.upstream {
+                validate_upstream_tls_material(upstream)?;
+            }
         }
         ResourceKind::Ssl => {
             let resource: SSL =
@@ -1072,6 +1103,16 @@ fn validate_resource_json(kind: ResourceKind, value: &serde_json::Value) -> Prox
             resource.validate()?;
             ProxySSL::try_from(resource)?;
         }
+    }
+    Ok(())
+}
+
+/// Deterministic check of upstream mTLS material so invalid client
+/// certificate/key pairs are rejected by the Admin write path before they are
+/// committed, instead of being stored and only failing publication later.
+fn validate_upstream_tls_material(upstream: &Upstream) -> ProxyResult<()> {
+    if let Some(tls) = &upstream.tls {
+        crate::proxy::upstream::discovery::validate_client_tls_material(tls)?;
     }
     Ok(())
 }
@@ -1732,6 +1773,156 @@ mod authority_tests {
         let stored: serde_json::Value =
             serde_json::from_slice(&snapshot.resources[&route].value).unwrap();
         assert_eq!(stored["plugins"]["key-auth"]["keys"][0], "new-key");
+    }
+
+    #[tokio::test]
+    async fn put_normalizes_body_id_to_path_id() {
+        let store = Arc::new(InMemoryGraphStore::new());
+        let graph = ConfigurationGraph::new(store.clone());
+
+        let up = ResourceKey::new(ResourceKind::Upstream, "u1").unwrap();
+        graph
+            .put(up.clone(), upstream_json("u1", "127.0.0.1:80"))
+            .await
+            .unwrap();
+
+        // Body id deliberately differs from (and omits) the path id.
+        let route = ResourceKey::new(ResourceKind::Route, "path-id").unwrap();
+        graph
+            .put(
+                route.clone(),
+                serde_json::json!({
+                    "id": "body-id",
+                    "uri": "/",
+                    "upstream_id": "u1",
+                }),
+            )
+            .await
+            .unwrap();
+
+        // GET and the stored bytes must both carry the authoritative path id.
+        let view = graph.get(&route).await.unwrap().unwrap();
+        assert_eq!(view.value["id"], "path-id");
+        let snapshot = store.snapshot().await.unwrap();
+        let stored: serde_json::Value =
+            serde_json::from_slice(&snapshot.resources[&route].value).unwrap();
+        assert_eq!(stored["id"], "path-id");
+
+        // The body-only identity must not exist.
+        assert!(graph
+            .get(&ResourceKey::new(ResourceKind::Route, "body-id").unwrap())
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn put_normalizes_missing_body_id_to_path_id() {
+        let store = InMemoryGraphStore::new();
+        let graph = ConfigurationGraph::new(Arc::new(store));
+
+        let up = ResourceKey::new(ResourceKind::Upstream, "u1").unwrap();
+        graph
+            .put(up.clone(), upstream_json("u1", "127.0.0.1:80"))
+            .await
+            .unwrap();
+
+        // No `id` in the body at all: the path id must be injected before the
+        // typed validation (which requires a non-empty id).
+        let route = ResourceKey::new(ResourceKind::Route, "r1").unwrap();
+        graph
+            .put(
+                route.clone(),
+                serde_json::json!({ "uri": "/", "upstream_id": "u1" }),
+            )
+            .await
+            .unwrap();
+        let view = graph.get(&route).await.unwrap().unwrap();
+        assert_eq!(view.value["id"], "r1");
+    }
+
+    #[tokio::test]
+    async fn put_rejects_invalid_upstream_tls_material() {
+        let store = InMemoryGraphStore::new();
+        let graph = ConfigurationGraph::new(Arc::new(store));
+
+        let up = ResourceKey::new(ResourceKind::Upstream, "tls-bad").unwrap();
+        let err = graph
+            .put(
+                up.clone(),
+                serde_json::json!({
+                    "id": "tls-bad",
+                    "nodes": { "127.0.0.1:80": 1 },
+                    "type": "roundrobin",
+                    "hash_on": "vars",
+                    "key": "uri",
+                    "scheme": "http",
+                    "pass_host": "pass",
+                    "tls": {
+                        "client_cert": "CERTDATA",
+                        "client_key": "PRIVATE-KEY-MATERIAL"
+                    }
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, GraphError::InvalidResource { .. }), "{err:?}");
+        assert!(graph.get(&up).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn put_accepts_valid_upstream_tls_material() {
+        let store = InMemoryGraphStore::new();
+        let graph = ConfigurationGraph::new(Arc::new(store));
+
+        let up = ResourceKey::new(ResourceKind::Upstream, "tls-ok").unwrap();
+        graph
+            .put(
+                up.clone(),
+                serde_json::json!({
+                    "id": "tls-ok",
+                    "nodes": { "127.0.0.1:80": 1 },
+                    "type": "roundrobin",
+                    "hash_on": "vars",
+                    "key": "uri",
+                    "scheme": "https",
+                    "pass_host": "pass",
+                    "tls": {
+                        "client_cert": include_str!("testdata/example.crt"),
+                        "client_key": include_str!("testdata/example.key"),
+                    }
+                }),
+            )
+            .await
+            .expect("matching cert/key pair must be accepted");
+    }
+
+    #[tokio::test]
+    async fn put_rejects_route_with_both_upstream_sources() {
+        let store = InMemoryGraphStore::new();
+        let graph = ConfigurationGraph::new(Arc::new(store));
+
+        let route = ResourceKey::new(ResourceKind::Route, "r1").unwrap();
+        let err = graph
+            .put(
+                route.clone(),
+                serde_json::json!({
+                    "id": "r1",
+                    "uri": "/",
+                    "upstream": {
+                        "nodes": { "127.0.0.1:80": 1 },
+                        "type": "roundrobin",
+                        "hash_on": "vars",
+                        "key": "uri",
+                        "scheme": "http",
+                        "pass_host": "pass"
+                    },
+                    "upstream_id": "u1",
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, GraphError::InvalidResource { .. }), "{err:?}");
     }
 
     #[tokio::test]
@@ -2711,6 +2902,11 @@ mod worker_tests {
     #[test]
     fn load_static_publishes_empty_config() {
         let _guard = RUNTIME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // `load_static` marks readiness on the process-global status; hold the
+        // shared status lock so this never races with status unit tests.
+        let _status_guard = crate::core::status::STATUS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let snapshot = ConfigurationGraph::load_static(&config::Config::default()).unwrap();
         assert!(snapshot.routes.is_empty());
         crate::core::status::reset();

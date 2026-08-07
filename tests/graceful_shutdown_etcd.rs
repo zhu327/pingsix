@@ -8,7 +8,7 @@ use common::*;
 
 #[test]
 fn graceful_shutdown_etcd_after_publish() {
-    if !docker_available() {
+    if !require_docker("graceful_shutdown_etcd") {
         return;
     }
     let etcd = EtcdFixture::start();
@@ -66,7 +66,7 @@ fn graceful_shutdown_etcd_after_publish() {
 
 #[test]
 fn graceful_shutdown_during_dns_failure_prep() {
-    if !docker_available() {
+    if !require_docker("graceful_shutdown_etcd") {
         return;
     }
     let etcd = EtcdFixture::start();

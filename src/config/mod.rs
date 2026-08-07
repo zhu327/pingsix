@@ -704,6 +704,16 @@ impl Route {
             return Err(ValidationError::new("upstream_or_service_required"));
         }
 
+        // APISIX semantics treat inline `upstream` and `upstream_id` as
+        // alternative forms of the same upstream slot; silently preferring one
+        // hides configuration mistakes and leaves a shadowed reference that
+        // still participates in whole-graph validation, so reject both-at-once.
+        if self.upstream.is_some() && self.upstream_id.is_some() {
+            return Err(ValidationError::new(
+                "upstream_and_upstream_id_mutually_exclusive",
+            ));
+        }
+
         Ok(())
     }
 
@@ -985,10 +995,16 @@ pub struct Service {
 impl Service {
     fn validate_upstream(&self) -> Result<(), ValidationError> {
         if self.upstream_id.is_none() && self.upstream.is_none() {
-            Err(ValidationError::new("upstream_required"))
-        } else {
-            Ok(())
+            return Err(ValidationError::new("upstream_required"));
         }
+        // Same alternative-form rule as [`Route::validate`]: both inline
+        // `upstream` and `upstream_id` together are ambiguous and rejected.
+        if self.upstream.is_some() && self.upstream_id.is_some() {
+            return Err(ValidationError::new(
+                "upstream_and_upstream_id_mutually_exclusive",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -1267,6 +1283,85 @@ routes:
         assert!(
             Config::from_yaml(conf_str).is_err(),
             "host and hosts are mutually exclusive forms"
+        );
+    }
+
+    #[test]
+    fn route_rejects_upstream_and_upstream_id_together() {
+        init_log();
+        let conf_str = r#"
+---
+pingsix:
+  listeners:
+    - address: "[::1]:8080"
+
+routes:
+  - id: "1"
+    uri: /
+    upstream:
+      nodes:
+        "127.0.0.1:1980": 1
+    upstream_id: "named-upstream"
+        "#;
+        assert!(
+            Config::from_yaml(conf_str).is_err(),
+            "inline upstream and upstream_id are mutually exclusive forms"
+        );
+    }
+
+    #[test]
+    fn route_allows_upstream_id_with_service_id() {
+        init_log();
+        // Route-level upstream_id overriding a service's upstream is a valid
+        // APISIX pattern and must remain accepted.
+        let conf_str = r#"
+---
+pingsix:
+  listeners:
+    - address: "[::1]:8080"
+
+services:
+  - id: "s1"
+    upstream:
+      nodes:
+        "127.0.0.1:1981": 1
+
+routes:
+  - id: "1"
+    uri: /
+    upstream_id: "u1"
+    service_id: "s1"
+
+upstreams:
+  - id: "u1"
+    nodes:
+      "127.0.0.1:1982": 1
+        "#;
+        assert!(
+            Config::from_yaml(conf_str).is_ok(),
+            "upstream_id + service_id must remain valid"
+        );
+    }
+
+    #[test]
+    fn service_rejects_upstream_and_upstream_id_together() {
+        init_log();
+        let conf_str = r#"
+---
+pingsix:
+  listeners:
+    - address: "[::1]:8080"
+
+services:
+  - id: "s1"
+    upstream:
+      nodes:
+        "127.0.0.1:1981": 1
+    upstream_id: "u1"
+        "#;
+        assert!(
+            Config::from_yaml(conf_str).is_err(),
+            "service inline upstream and upstream_id are mutually exclusive"
         );
     }
 

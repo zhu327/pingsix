@@ -71,7 +71,7 @@ fn boot_with_graph() -> (
 
 #[test]
 fn admin1_put_get_roundtrip() {
-    if !docker_available() {
+    if !require_docker("admin_graph_cas") {
         return;
     }
     let (_etcd, _up, listen_port, _status, admin_port, config_path, mut child) = boot_with_graph();
@@ -107,6 +107,32 @@ fn admin1_put_get_roundtrip() {
         Duration::from_secs(10)
     ));
 
+    // Path id is authoritative: a mismatched body id is normalized, and GET
+    // returns the path id so API and runtime views can never disagree.
+    let put = admin_put(
+        admin_port,
+        "routes",
+        "1",
+        &serde_json::json!({
+            "id": "totally-different",
+            "uri": "/v3",
+            "upstream_id": "1"
+        }),
+    );
+    assert_eq!(put.status, 200, "{} ", put.body);
+    let got = admin_get(admin_port, "routes", "1");
+    assert_eq!(got.status, 200, "{}", got.body);
+    assert!(
+        got.body.contains("\"id\":\"1\"") || got.body.contains("\"id\": \"1\""),
+        "GET must return the path id, got {}",
+        got.body
+    );
+    assert!(
+        !got.body.contains("totally-different"),
+        "body id must not leak into the stored resource: {}",
+        got.body
+    );
+
     sigterm(&child);
     let _ = wait_exit(&mut child, Duration::from_secs(20));
     cleanup_runtime_files(listen_port, &config_path);
@@ -114,7 +140,7 @@ fn admin1_put_get_roundtrip() {
 
 #[test]
 fn admin2_concurrent_put_one_conflicts() {
-    if !docker_available() {
+    if !require_docker("admin_graph_cas") {
         return;
     }
     let (_etcd, _up, listen_port, _status, admin_port, config_path, mut child) = boot_with_graph();
@@ -147,7 +173,7 @@ fn admin2_concurrent_put_one_conflicts() {
                     "upstream_id": "1"
                 }),
             );
-            results.lock().unwrap().push(resp.status);
+            results.lock().unwrap().push((route_id, resp.status));
         })
     };
 
@@ -157,19 +183,44 @@ fn admin2_concurrent_put_one_conflicts() {
     t1.join().unwrap();
     t2.join().unwrap();
 
-    let statuses = results.lock().unwrap().clone();
-    assert_eq!(statuses.len(), 2);
-    let ok = statuses.iter().filter(|&&s| s == 200).count();
-    let conflict = statuses.iter().filter(|&&s| s == 409).count();
-    // At least one should succeed; under true contention one may 409.
-    // If both succeed (rare timing), graph must still be consistent via list.
+    let results = results.lock().unwrap().clone();
+    assert_eq!(results.len(), 2);
+    let mut ok = 0;
+    let mut conflict = 0;
+    for (id, status) in &results {
+        match status {
+            200 => ok += 1,
+            409 => conflict += 1,
+            other => panic!("unexpected status {other} for {id}"),
+        }
+        // The winner is persisted; the conflicted loser must not exist at all.
+        let got = admin_get(admin_port, "routes", id);
+        if *status == 200 {
+            assert_eq!(
+                got.status, 200,
+                "route {id} with status 200 must be persisted: {}",
+                got.body
+            );
+            let wanted = if id == "r-a" { "/a" } else { "/b" };
+            assert!(
+                got.body.contains(&format!("\"uri\":\"{wanted}\""))
+                    || got.body.contains(&format!("\"uri\": \"{wanted}\"")),
+                "route {id} must carry its uri: {}",
+                got.body
+            );
+        } else {
+            assert_eq!(
+                got.status, 404,
+                "conflicted route {id} must not exist: {}",
+                got.body
+            );
+        }
+    }
     assert!(
         ok >= 1,
-        "expected at least one success, statuses={statuses:?}"
+        "expected at least one success, results={results:?}"
     );
-    if ok == 1 {
-        assert_eq!(conflict, 1, "statuses={statuses:?}");
-    }
+    assert_eq!(ok + conflict, 2, "results={results:?}");
 
     let list = http_exchange(
         &format!("127.0.0.1:{admin_port}"),
@@ -188,7 +239,7 @@ fn admin2_concurrent_put_one_conflicts() {
 
 #[test]
 fn admin3_delete_referenced_upstream_conflicts() {
-    if !docker_available() {
+    if !require_docker("admin_graph_cas") {
         return;
     }
     let (_etcd, _up, listen_port, _status, admin_port, config_path, mut child) = boot_with_graph();
@@ -207,7 +258,7 @@ fn admin3_delete_referenced_upstream_conflicts() {
 
 #[test]
 fn admin4_get_redacts_secrets() {
-    if !docker_available() {
+    if !require_docker("admin_graph_cas") {
         return;
     }
     let (_etcd, _up, listen_port, _status, admin_port, config_path, mut child) = boot_with_graph();
@@ -253,11 +304,40 @@ fn admin4_get_redacts_secrets() {
         "username should not be redacted"
     );
 
-    // Inline upstream tls.client_key on a dedicated upstream resource.
+    // Inline upstream tls.client_key on a dedicated upstream resource. Valid
+    // material is accepted and the key is redacted on read; invalid material
+    // is rejected synchronously instead of being stored as a poison candidate.
     let tls_up = admin_put(
         admin_port,
         "upstreams",
         "tls1",
+        &serde_json::json!({
+            "nodes": { "127.0.0.1:9": 1 },
+            "type": "roundrobin",
+            "tls": {
+                "client_cert": include_str!("../src/proxy/testdata/example.crt"),
+                "client_key": include_str!("../src/proxy/testdata/example.key"),
+            }
+        }),
+    );
+    assert_eq!(tls_up.status, 200, "{}", tls_up.body);
+    let tls_get = admin_get(admin_port, "upstreams", "tls1");
+    assert_eq!(tls_get.status, 200, "{}", tls_get.body);
+    assert!(
+        !tls_get.body.contains("PRIVATE KEY"),
+        "tls key leaked: {}",
+        tls_get.body
+    );
+    assert!(
+        tls_get.body.contains("***"),
+        "expected redaction marker: {}",
+        tls_get.body
+    );
+
+    let tls_bad = admin_put(
+        admin_port,
+        "upstreams",
+        "tls-bad",
         &serde_json::json!({
             "nodes": { "127.0.0.1:9": 1 },
             "type": "roundrobin",
@@ -267,15 +347,17 @@ fn admin4_get_redacts_secrets() {
             }
         }),
     );
-    assert_eq!(tls_up.status, 200, "{}", tls_up.body);
-    let tls_get = admin_get(admin_port, "upstreams", "tls1");
-    assert_eq!(tls_get.status, 200, "{}", tls_get.body);
-    assert!(
-        !tls_get.body.contains("PRIVATE-KEY-MATERIAL"),
-        "tls key leaked: {}",
-        tls_get.body
+    assert_eq!(
+        tls_bad.status, 400,
+        "invalid mTLS material must be rejected at write time: {}",
+        tls_bad.body
     );
-    assert!(tls_get.body.contains("CERTDATA") || tls_get.body.contains("***"));
+    let tls_bad_get = admin_get(admin_port, "upstreams", "tls-bad");
+    assert_eq!(
+        tls_bad_get.status, 404,
+        "rejected upstream must not be stored: {}",
+        tls_bad_get.body
+    );
 
     sigterm(&child);
     let _ = wait_exit(&mut child, Duration::from_secs(20));
@@ -284,7 +366,7 @@ fn admin4_get_redacts_secrets() {
 
 #[test]
 fn admin5_missing_api_key_forbidden() {
-    if !docker_available() {
+    if !require_docker("admin_graph_cas") {
         return;
     }
     let (_etcd, _up, listen_port, _status, admin_port, config_path, mut child) = boot_with_graph();

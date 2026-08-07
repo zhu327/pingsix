@@ -84,7 +84,7 @@ fn warm_and_assert_cached(listen_port: u16, upstream: &MockUpstream, needle: &st
 
 #[test]
 fn cache_nodes_switch_invalidates_namespace() {
-    if !docker_available() {
+    if !require_docker("cache_isolation") {
         return;
     }
     let etcd = EtcdFixture::start();
@@ -117,7 +117,7 @@ fn cache_nodes_switch_invalidates_namespace() {
 
 #[test]
 fn cache_upstream_host_switch_invalidates_namespace() {
-    if !docker_available() {
+    if !require_docker("cache_isolation") {
         return;
     }
     let etcd = EtcdFixture::start();
@@ -159,7 +159,7 @@ fn cache_upstream_host_switch_invalidates_namespace() {
 
 #[test]
 fn cache_response_plugin_switch_invalidates_namespace() {
-    if !docker_available() {
+    if !require_docker("cache_isolation") {
         return;
     }
     let etcd = EtcdFixture::start();

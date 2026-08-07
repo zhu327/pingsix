@@ -60,6 +60,26 @@ jobs:
     - name: Run tests
       run: cargo +1.88.0 test --locked --all-targets --all-features --verbose
 
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+    - name: Install Rust 1.88.0 toolchain
+      uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+      with:
+        toolchain: "1.88.0"
+
+    - name: Install cargo-audit
+      run: cargo install cargo-audit --version 0.22.2 --locked
+
+    # Mirrors the ignore list in .cargo/audit.toml; kept explicit so the step
+    # stays visible in the workflow. Zero vulnerabilities must remain the bar.
+    - name: Run cargo audit
+      run: cargo audit --ignore RUSTSEC-2024-0437 --ignore RUSTSEC-2025-0068
+
   container-smoke:
     needs: build
     runs-on: ubuntu-latest

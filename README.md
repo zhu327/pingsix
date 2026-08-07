@@ -13,7 +13,7 @@ PingSIX is a modern API gateway designed for cloud-native environments, offering
 - 🚀 **High Performance**: Built with Rust and Tokio for exceptional throughput and low latency
 - 🔄 **Dynamic Configuration**: Real-time configuration updates via etcd integration
 - 🛣️ **Advanced Routing**: Flexible request matching based on host, path, methods, and priorities
-- 🔌 **Rich Plugin Ecosystem**: 20+ built-in plugins with easy extensibility
+- 🔌 **Rich Plugin Ecosystem**: 20 built-in plugins with easy extensibility
 - 📊 **Observability**: Built-in Prometheus metrics and Sentry integration
 - 🔒 **Security**: JWT/API key authentication, IP restrictions, CORS support
 - ⚡ **Load Balancing**: Multiple algorithms with active health checking
@@ -32,7 +32,7 @@ PingSIX is a modern API gateway designed for cloud-native environments, offering
 
 ### Prerequisites
 
-- Rust stable (MSRV 1.88); local toolchain via `rust-toolchain.toml` (`channel = "stable"`)
+- Rust stable (MSRV 1.88); local toolchain via `rust-toolchain.toml` (`channel = "1.88.0"`)
 - (Optional) etcd for dynamic configuration
 
 ### Installation
@@ -85,7 +85,7 @@ curl http://localhost:8080/get
 
 ## 🔌 Plugin Ecosystem
 
-PingSIX includes 20+ built-in plugins organized by category:
+PingSIX includes 20 built-in plugins organized by category:
 
 ### 🔐 Authentication & Security
 - **`jwt-auth`** - JWT token validation with multiple algorithms
@@ -123,7 +123,7 @@ PingSIX includes 20+ built-in plugins organized by category:
 PingSIX is built on a modular architecture with the following key components:
 
 - **Core Engine**: Built on Cloudflare's Pingora framework for high-performance HTTP handling
-- **Plugin System**: Extensible plugin architecture with 15+ built-in plugins
+- **Plugin System**: Extensible plugin architecture with 20 built-in plugins
 - **Configuration Management**: Support for both static YAML and dynamic etcd-based configuration
 - **Admin API**: RESTful API for runtime configuration management
 - **Observability**: Built-in metrics, logging, and error tracking

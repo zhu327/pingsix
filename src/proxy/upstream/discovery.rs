@@ -31,7 +31,10 @@ fn get_global_resolver() -> ProxyResult<Arc<TokioResolver>> {
             let builder = TokioResolver::builder_tokio().map_err(|e| {
                 ProxyError::Configuration(format!("Failed to create DNS resolver builder: {e}"))
             })?;
-            Ok(Arc::new(builder.build()))
+            let resolver = builder.build().map_err(|e| {
+                ProxyError::Configuration(format!("Failed to build DNS resolver: {e}"))
+            })?;
+            Ok(Arc::new(resolver))
         })
         .cloned()
 }
@@ -64,10 +67,36 @@ fn load_client_cert_key(tls_config: &UpstreamTls) -> ProxyResult<Arc<CertKey>> {
             "Failed to parse client private key PEM"
         })?;
 
+    // The leaf certificate and the private key must belong to the same key
+    // pair. Detecting this here (instead of at the first TLS handshake) makes
+    // a mismatched mTLS identity a deterministic configuration error.
+    let leaf_public = certificates
+        .first()
+        .ok_or_else(|| {
+            ProxyError::Configuration("No certificates found in client_cert".to_string())
+        })?
+        .public_key()
+        .map_err(|e| {
+            ProxyError::Configuration(format!("Failed to read client certificate public key: {e}"))
+        })?;
+    if !leaf_public.public_eq(&private_key) {
+        return Err(ProxyError::Configuration(
+            "Upstream client certificate and private key do not match".to_string(),
+        ));
+    }
+
     // Create CertKey using the new method
     let cert_key = CertKey::new(certificates, private_key);
 
     Ok(Arc::new(cert_key))
+}
+
+/// Deterministically validate upstream mTLS material without building a
+/// discovery. Shared by the Admin write path (reject before commit) and the
+/// discovery builders (reject the candidate), so invalid client certificate
+/// or key material can never be stored yet permanently fail to publish.
+pub(crate) fn validate_client_tls_material(tls_config: &UpstreamTls) -> ProxyResult<()> {
+    load_client_cert_key(tls_config).map(|_| ())
 }
 
 /// DNS-based service discovery.
@@ -114,50 +143,49 @@ impl ServiceDiscovery for DnsDiscovery {
         let domain = self.domain.as_str();
         log::debug!("Resolving DNS for domain: {domain}");
 
-        let backends: BTreeSet<Backend> = self
-            .resolver
-            .lookup_ip(domain)
-            .await
-            .map_err(|e| {
-                log::warn!("DNS discovery failed for domain: {domain}: {e}");
-                Error::because(
+        let ips = self.resolver.lookup_ip(domain).await.map_err(|e| {
+            log::warn!("DNS discovery failed for domain: {domain}: {e}");
+            Error::because(
+                InternalError,
+                format!("DNS discovery failed for domain: {domain}: {e}"),
+                e,
+            )
+        })?;
+
+        let mut backends = BTreeSet::new();
+        for ip in ips.iter() {
+            let addr = SocketAddr::new(ip, self.port).to_string();
+
+            // Creating backend
+            let mut backend = match Backend::new_with_weight(&addr, self.weight as _) {
+                Ok(b) => b,
+                Err(e) => {
+                    log::error!("Failed to create backend for {addr}: {e}");
+                    continue;
+                }
+            };
+
+            let peer = build_peer(
+                &addr,
+                self.scheme,
+                self.sni.clone(),
+                self.client_cert_key.as_ref(),
+            );
+
+            // A metadata collision is an invariant violation, not a per-IP
+            // condition: fail the discovery instead of panicking so the
+            // candidate is rejected with an error the control plane can
+            // classify.
+            if backend.ext.insert::<HttpPeer>(peer).is_some() {
+                return Err(Error::explain(
                     InternalError,
-                    format!("DNS discovery failed for domain: {domain}: {e}"),
-                    e,
-                )
-            })?
-            .iter()
-            .filter_map(|ip| {
-                let addr = SocketAddr::new(ip, self.port).to_string();
+                    format!("Backend {addr} already had HttpPeer metadata"),
+                ));
+            }
 
-                // Creating backend
-                let mut backend = match Backend::new_with_weight(&addr, self.weight as _) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        log::error!("Failed to create backend for {addr}: {e}");
-                        return None;
-                    }
-                };
+            backends.insert(backend);
+        }
 
-                let peer = build_peer(
-                    &addr,
-                    self.scheme,
-                    self.sni.clone(),
-                    self.client_cert_key.as_ref(),
-                );
-
-                // Insert HttpPeer into the backend. Must not live only inside
-                // `debug_assert!` — that expression is elided in release builds.
-                assert!(
-                    backend.ext.insert::<HttpPeer>(peer).is_none(),
-                    "backend already had HttpPeer metadata"
-                );
-
-                Some(backend)
-            })
-            .collect();
-
-        // Return backends and an empty HashMap for now
         Ok((backends, HashMap::new()))
     }
 }
@@ -360,11 +388,14 @@ impl TryFrom<Upstream> for HybridDiscovery {
                 let sni = compute_peer_sni(&host, &pass_host, upstream_host.as_deref());
                 let peer = build_peer(&addr_str, upstream.scheme, sni, client_cert_key.as_ref());
 
-                // Must not live only inside `debug_assert!` — elided in release.
-                assert!(
-                    backend.ext.insert::<HttpPeer>(peer).is_none(),
-                    "backend already had HttpPeer metadata"
-                );
+                // A metadata collision is an invariant violation: reject the
+                // candidate instead of panicking so the control plane can
+                // classify it as a permanent configuration error.
+                if backend.ext.insert::<HttpPeer>(peer).is_some() {
+                    return Err(ProxyError::Configuration(format!(
+                        "Backend {addr_str} already had HttpPeer metadata"
+                    )));
+                }
 
                 backends.insert(backend);
             } else {
@@ -618,6 +649,76 @@ mod tests {
         assert_eq!(
             compute_peer_sni("api.example.com", &UpstreamPassHost::REWRITE, None),
             "api.example.com"
+        );
+    }
+
+    fn sample_tls(cert: &str, key: &str) -> UpstreamTls {
+        UpstreamTls {
+            client_cert: cert.to_string(),
+            client_key: key.to_string(),
+        }
+    }
+
+    #[test]
+    fn client_tls_material_valid_pair_is_accepted() {
+        let tls = sample_tls(
+            include_str!("../testdata/example.crt"),
+            include_str!("../testdata/example.key"),
+        );
+        validate_client_tls_material(&tls).expect("matching cert/key pair must validate");
+    }
+
+    #[test]
+    fn client_tls_material_garbage_is_rejected() {
+        let tls = sample_tls("CERTDATA", "PRIVATE-KEY-MATERIAL");
+        assert!(
+            validate_client_tls_material(&tls).is_err(),
+            "unparseable PEM must be rejected"
+        );
+    }
+
+    #[test]
+    fn client_tls_material_mismatched_pair_is_rejected() {
+        // A real certificate paired with an unrelated key must fail the
+        // public-key correspondence check instead of surfacing only at the
+        // first TLS handshake.
+        let tls = sample_tls(
+            include_str!("../testdata/example.crt"),
+            include_str!("../testdata/other.key"),
+        );
+        assert!(
+            validate_client_tls_material(&tls).is_err(),
+            "cert/key pair from different keys must be rejected"
+        );
+    }
+
+    #[test]
+    fn upstream_with_garbage_tls_fails_preparation_not_panics() {
+        // The full TryFrom path must surface a configuration error (not a
+        // panic) when the mTLS material is invalid.
+        use crate::config::{
+            SelectionType, Upstream, UpstreamHashOn, UpstreamPassHost, UpstreamScheme,
+        };
+        let upstream = Upstream {
+            id: "u1".into(),
+            name: None,
+            retries: None,
+            retry_timeout: None,
+            timeout: None,
+            nodes: [("127.0.0.1:80".to_string(), 1)].into_iter().collect(),
+            r#type: SelectionType::RoundRobin,
+            checks: None,
+            hash_on: UpstreamHashOn::VARS,
+            key: "uri".into(),
+            scheme: UpstreamScheme::HTTP,
+            pass_host: UpstreamPassHost::PASS,
+            upstream_host: None,
+            tls: Some(sample_tls("CERTDATA", "PRIVATE-KEY-MATERIAL")),
+        };
+        let result: ProxyResult<HybridDiscovery> = upstream.try_into();
+        assert!(
+            result.is_err(),
+            "garbage TLS material must reject the upstream"
         );
     }
 }

@@ -39,8 +39,10 @@ pingsix:
   #     - "89731823413"
 
   # admin:
-  #   address: "0.0.0.0:9181"
+  #   address: "127.0.0.1:9181"
   #   api_key: pingsix
+  #   # A remote (0.0.0.0) bind additionally requires allow_insecure_remote: true
+  #   # because the admin API is bearer-protected over plaintext HTTP.
 
   # Status/health check endpoint (independent of admin API).
   # Local default is loopback. For Kubernetes httpGet probes bind 0.0.0.0

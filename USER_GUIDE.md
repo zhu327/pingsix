@@ -29,7 +29,7 @@ PingSIX is a high-performance API gateway built with Rust, designed for modern c
 - **High Performance**: Built with Rust and Tokio for exceptional throughput and low latency
 - **Dynamic Configuration**: Real-time configuration updates via etcd integration
 - **Flexible Routing**: Advanced request matching based on host, path, methods, and priorities
-- **Rich Plugin Ecosystem**: 16+ built-in plugins for authentication, rate limiting, compression, and more
+- **Rich Plugin Ecosystem**: 20 built-in plugins for authentication, rate limiting, compression, and more
 - **Health Checking**: Active health checks for upstream services
 - **Observability**: Built-in Prometheus metrics and Sentry integration
 - **Admin API**: RESTful API for dynamic configuration management
@@ -1283,7 +1283,7 @@ global_rules:
 
 ## Plugins
 
-PingSIX includes 16+ built-in plugins for various functionalities:
+PingSIX includes 20 built-in plugins for various functionalities:
 
 ### Plugin Execution Order
 

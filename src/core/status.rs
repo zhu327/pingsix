@@ -283,22 +283,27 @@ pub fn reset() {
     log::debug!("Readiness status reset");
 }
 
+/// Serializes tests that mutate the process-global readiness state from other
+/// modules (e.g. control-plane tests that call [`reset`]). The status unit
+/// tests use this same lock, so every writer of the global status state is
+/// serialized regardless of which test module it lives in.
+#[cfg(test)]
+pub(crate) static STATUS_TEST_LOCK: Mutex<()> = Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
-
     #[test]
     fn test_initial_state_not_ready() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = STATUS_TEST_LOCK.lock().unwrap();
         reset();
         assert!(!is_ready());
     }
 
     #[test]
     fn test_mark_ready_yaml() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = STATUS_TEST_LOCK.lock().unwrap();
         reset();
         assert!(!is_ready());
         mark_ready(ConfigSource::Yaml);
@@ -307,7 +312,7 @@ mod tests {
 
     #[test]
     fn test_mark_ready_etcd() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = STATUS_TEST_LOCK.lock().unwrap();
         reset();
         assert!(!is_ready());
         mark_ready(ConfigSource::Etcd);
@@ -316,7 +321,7 @@ mod tests {
 
     #[test]
     fn test_multiple_marks_stay_ready() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = STATUS_TEST_LOCK.lock().unwrap();
         reset();
         mark_ready(ConfigSource::Yaml);
         assert!(is_ready());
@@ -326,7 +331,7 @@ mod tests {
 
     #[test]
     fn stale_fails_readiness_by_default() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = STATUS_TEST_LOCK.lock().unwrap();
         reset();
         configure_status_policy(0, true);
         mark_ready(ConfigSource::Etcd);
@@ -339,7 +344,7 @@ mod tests {
 
     #[test]
     fn watch_progress_does_not_restore_readiness_without_publish() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = STATUS_TEST_LOCK.lock().unwrap();
         reset();
         configure_status_policy(0, true);
         begin_etcd_sync();
@@ -356,7 +361,7 @@ mod tests {
 
     #[test]
     fn reconnect_awaiting_publish_is_degraded_with_reason() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = STATUS_TEST_LOCK.lock().unwrap();
         reset();
         begin_etcd_sync();
         mark_ready(ConfigSource::Etcd);
@@ -386,7 +391,7 @@ mod tests {
 
     #[test]
     fn idle_but_connected_etcd_watch_is_not_stale() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = STATUS_TEST_LOCK.lock().unwrap();
         reset();
         configure_status_policy(0, true);
         mark_ready(ConfigSource::Etcd);
@@ -399,7 +404,7 @@ mod tests {
 
     #[test]
     fn short_disconnection_keeps_last_known_good_ready() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = STATUS_TEST_LOCK.lock().unwrap();
         reset();
         configure_status_policy(60, true);
         mark_ready(ConfigSource::Etcd);
@@ -411,7 +416,7 @@ mod tests {
 
     #[test]
     fn disconnected_etcd_becomes_stale_after_threshold() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = STATUS_TEST_LOCK.lock().unwrap();
         reset();
         configure_status_policy(0, true);
         mark_ready(ConfigSource::Etcd);
@@ -425,7 +430,7 @@ mod tests {
 
     #[test]
     fn preparation_error_has_stable_diagnostic_category() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = STATUS_TEST_LOCK.lock().unwrap();
         reset();
         begin_etcd_sync();
         mark_ready(ConfigSource::Etcd);
@@ -441,7 +446,7 @@ mod tests {
 
     #[test]
     fn yaml_source_never_becomes_stale() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = STATUS_TEST_LOCK.lock().unwrap();
         reset();
         configure_status_policy(0, true);
         mark_ready(ConfigSource::Yaml);

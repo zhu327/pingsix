@@ -26,6 +26,29 @@ pub fn docker_available() -> bool {
         .unwrap_or(false)
 }
 
+static DOCKER_SKIP_NOTICE_PRINTED: AtomicBool = AtomicBool::new(false);
+
+/// Guard for Docker-backed tests.
+///
+/// Returns `true` when Docker is available. Otherwise prints one prominent
+/// skip notice per test binary and returns `false`, so a green `cargo test`
+/// shows an explicit notice instead of silently dropping the etcd/control-plane
+/// coverage. (CI runners provision Docker; a local run without Docker still
+/// exits green, but visibly.)
+pub fn require_docker(test_name: &str) -> bool {
+    if docker_available() {
+        return true;
+    }
+    if !DOCKER_SKIP_NOTICE_PRINTED.swap(true, Ordering::Relaxed) {
+        eprintln!(
+            "\nNOTE: Docker is unavailable — skipping Docker-backed integration tests\n\
+             ({test_name} and others in this binary). Run with Docker available to\n\
+             actually exercise etcd/control-plane coverage.\n"
+        );
+    }
+    false
+}
+
 pub fn random_port() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.local_addr().unwrap().port()
