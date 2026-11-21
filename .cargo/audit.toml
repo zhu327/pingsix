@@ -7,9 +7,6 @@
 
 [advisories]
 ignore = [
-    # prometheus 0.13 (pinned by pingora-core 0.8.1) still pulls protobuf 2.x.
-    # Metrics encoding path only; not on the request data plane.
-    "RUSTSEC-2024-0437",
     # serde_yml 0.0.13 (active fork of unmaintained serde_yaml) is flagged as
     # "unsound and unmaintained" with no patched release. Config YAML parsing
     # runs only at startup on operator-supplied files. Revisit if the crate
