@@ -159,22 +159,27 @@ pub(crate) fn should_enable_purge(settings: Option<&Arc<CacheSettings>>) -> bool
     settings.is_some_and(|settings| settings.enable_purge)
 }
 
+fn request_has_no_cache_directive(headers: &http::HeaderMap) -> bool {
+    headers
+        .get_all(http::header::CACHE_CONTROL)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .map(|directive| directive.split('=').next().unwrap_or("").trim())
+        .any(|directive| {
+            directive.eq_ignore_ascii_case("no-cache") || directive.eq_ignore_ascii_case("no-store")
+        })
+}
+
 pub(crate) fn should_enable_request_cache(
     headers: &http::HeaderMap,
     settings: Option<&Arc<CacheSettings>>,
     ctx: &ProxyContext,
 ) -> bool {
-    if headers.contains_key("x-bypass-cache") {
-        log::debug!("Cache bypass requested via x-bypass-cache header");
-        return false;
-    }
     // APISIX `cache_control` governs request-side directives: the bypass
     // applies unless the flag explicitly disables Cache-Control honoring
     // (`cache_control: false`); absent keeps the pingsix legacy behavior.
-    if headers
-        .get("cache-control")
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v.contains("no-cache") || v.contains("no-store"))
+    if request_has_no_cache_directive(headers)
         && settings.is_none_or(|s| s.cache_control != Some(false))
     {
         log::debug!("Cache bypass requested via cache-control: no-cache/no-store");
@@ -283,10 +288,15 @@ pub(crate) fn cache_vary(
     headers.dedup();
     let mut key = VarianceBuilder::new();
     for name in &headers {
-        key.add_value(
-            name,
-            req.headers.get(name).map(|v| v.as_bytes()).unwrap_or(&[]),
-        );
+        let mut values = req.headers.get_all(name).iter();
+        if let Some(first) = values.next() {
+            key.add_value(name, first.as_bytes());
+            for value in values {
+                key.add_value(name, value.as_bytes());
+            }
+        } else {
+            key.add_value(name, &[]);
+        }
     }
     key.finalize()
 }
@@ -591,6 +601,36 @@ mod tests {
             Some(&minimal_settings(None)),
             &ctx
         ));
+
+        // Arbitrary client-supplied X-Bypass-Cache header must NOT bypass cache.
+        let mut spoofed_bypass = http::HeaderMap::new();
+        spoofed_bypass.insert("x-bypass-cache", "1".parse().unwrap());
+        assert!(
+            should_enable_request_cache(
+                &spoofed_bypass,
+                Some(&minimal_settings(Some(false))),
+                &ctx
+            ),
+            "unconfigured x-bypass-cache header must not bypass cache"
+        );
+
+        // Case-insensitive and multi-header Cache-Control directives are honored.
+        let mut multi_cc = http::HeaderMap::new();
+        multi_cc.append(http::header::CACHE_CONTROL, "public".parse().unwrap());
+        multi_cc.append(
+            http::header::CACHE_CONTROL,
+            "max-age=0, NO-STORE".parse().unwrap(),
+        );
+        assert!(!should_enable_request_cache(
+            &multi_cc,
+            Some(&minimal_settings(Some(true))),
+            &ctx
+        ));
+        assert!(should_enable_request_cache(
+            &multi_cc,
+            Some(&minimal_settings(Some(false))),
+            &ctx
+        ));
     }
 
     fn minimal_settings(cache_control: Option<bool>) -> Arc<CacheSettings> {
@@ -738,5 +778,37 @@ mod tests {
         // Vars pingsix cannot render do NOT count as identity: they render
         // empty, so isolation must stay on.
         assert!(!cache_key_has_identity(&["$consumer_name".to_string()]));
+    }
+
+    #[test]
+    fn cache_vary_includes_all_values_for_repeated_headers() {
+        let mut resp = ResponseHeader::build(200, None).unwrap();
+        resp.insert_header("vary", "X-Custom").unwrap();
+        resp.insert_header("cache-control", "public, max-age=60")
+            .unwrap();
+        let control = CacheControl::from_resp_headers(&resp);
+        let RespCacheable::Cacheable(meta) =
+            resp_cacheable(control.as_ref(), resp, false, &CACHE_DEFAULT)
+        else {
+            panic!("response should be cacheable");
+        };
+
+        let mut req1 = test_request();
+        req1.append_header("x-custom", "a").unwrap();
+        req1.append_header("x-custom", "b").unwrap();
+
+        let mut req2 = test_request();
+        req2.append_header("x-custom", "a").unwrap();
+        req2.append_header("x-custom", "c").unwrap();
+
+        let mut ctx = ProxyContext::default();
+        ctx.set(CTX_KEY_CACHE_SETTINGS, minimal_settings(None));
+        let v1 = cache_vary(&meta, &ctx, &req1);
+        let v2 = cache_vary(&meta, &ctx, &req2);
+        assert!(v1.is_some());
+        assert_ne!(
+            v1, v2,
+            "second value of a repeated Vary header must affect the variance hash"
+        );
     }
 }

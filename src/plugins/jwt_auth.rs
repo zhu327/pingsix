@@ -194,6 +194,9 @@ impl PluginConfig {
                 } else {
                     secret.as_bytes().to_vec()
                 };
+                if key.is_empty() {
+                    return Err("Secret must not be empty for HMAC algorithms".to_string());
+                }
                 Ok(DecodingKey::from_secret(&key))
             }
             Algorithm::RS256
@@ -382,20 +385,6 @@ impl ProxyPlugin for PluginJWTAuth {
 
         Ok(FilterVerdict::Continue)
     }
-
-    async fn response_filter(
-        &self,
-        _session: &mut Session,
-        upstream_response: &mut pingora_http::ResponseHeader,
-        ctx: &mut ProxyContext,
-    ) -> Result<()> {
-        // Handle cookie clearing if needed
-        if let Some(cookie_name) = ctx.get_str("jwt_auth_clear_cookie") {
-            let clear_cookie_header = format!("{cookie_name}=; Max-Age=0; Path=/; HttpOnly");
-            upstream_response.append_header("Set-Cookie", clear_cookie_header)?;
-        }
-        Ok(())
-    }
 }
 
 impl PluginJWTAuth {
@@ -403,7 +392,7 @@ impl PluginJWTAuth {
     fn extract_token(
         &self,
         session: &mut Session,
-        ctx: &mut ProxyContext,
+        _ctx: &mut ProxyContext,
     ) -> Result<Option<String>> {
         if let Some(token) = self.extract_from_header(session)? {
             return Ok(Some(token));
@@ -411,7 +400,7 @@ impl PluginJWTAuth {
         if let Some(token) = self.extract_from_query(session)? {
             return Ok(Some(token));
         }
-        self.extract_from_cookie(session, ctx)
+        self.extract_from_cookie(session)
     }
 
     /// Extract token from header and optionally remove it
@@ -457,12 +446,9 @@ impl PluginJWTAuth {
         request::get_query_value(req_header, &self.config.query).map(|q| q.to_string())
     }
 
-    /// Extract token from cookie and optionally remove it
-    fn extract_from_cookie(
-        &self,
-        session: &mut Session,
-        ctx: &mut ProxyContext,
-    ) -> Result<Option<String>> {
+    /// Extract token from cookie and optionally remove it from the forwarded
+    /// request `Cookie` header without clearing the client's browser cookie.
+    fn extract_from_cookie(&self, session: &mut Session) -> Result<Option<String>> {
         let token = request::get_cookie_value(session.req_header(), &self.config.cookie)
             .map(str::to_string);
         if token.is_some() && self.config.hide_credentials {
@@ -472,9 +458,6 @@ impl PluginJWTAuth {
                         "Failed to hide JWT cookie credential: {e}"
                     ))
                 })?;
-            // Best-effort response-side deletion uses Path=/ because request Cookie
-            // fields do not expose the original cookie attributes.
-            ctx.set("jwt_auth_clear_cookie", self.config.cookie.clone());
         }
         Ok(token)
     }
@@ -1090,6 +1073,68 @@ MCowBQYDK2VwAyEAV5mabaUY4PG3Q9hEDDzWBvPdl0bMu+Q16CzssxT1VBA=\n-----END PUBLIC KE
         assert_eq!(
             plugin.extract_token_from_query(&req).as_deref(),
             Some("sometoken")
+        );
+    }
+
+    #[test]
+    fn empty_hmac_secret_is_rejected() {
+        for cfg in [
+            serde_json::json!({ "secret": "" }),
+            serde_json::json!({ "secret": "", "base64_secret": true }),
+        ] {
+            let err = validate_jwt_auth_config(&cfg).unwrap_err();
+            assert!(err.to_string().contains("must not be empty"), "{err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn hide_credentials_cookie_strips_upstream_cookie_without_clearing_client_cookie() {
+        #[derive(Serialize)]
+        struct TestClaims {
+            sub: &'static str,
+            exp: usize,
+        }
+        let token = encode(
+            &Header::new(Algorithm::HS256),
+            &TestClaims {
+                sub: "alice",
+                exp: 4_000_000_000,
+            },
+            &EncodingKey::from_secret(TEST_SECRET.as_bytes()),
+        )
+        .unwrap();
+
+        let mut cfg = base_config();
+        cfg.hide_credentials = true;
+        let plugin = PluginJWTAuth {
+            validation: build_validation(&cfg),
+            decoding_key: cfg.get_decoding_key().unwrap(),
+            config: cfg,
+        };
+
+        let wire = format!(
+            "GET /protected HTTP/1.1\r\nHost: example.com\r\nCookie: jwt={token}; theme=dark\r\n\r\n"
+        );
+        let mut session = crate::utils::testing::session_from_request(&wire).await;
+        let mut ctx = ProxyContext::default();
+
+        let verdict = plugin
+            .request_filter(&mut session, &mut ctx)
+            .await
+            .expect("valid cookie token must authenticate");
+        assert!(matches!(verdict, FilterVerdict::Continue));
+        assert!(
+            request::get_cookie_value(session.req_header(), "jwt").is_none(),
+            "jwt cookie must be hidden from upstream request"
+        );
+        assert_eq!(
+            request::get_cookie_value(session.req_header(), "theme"),
+            Some("dark"),
+            "unrelated cookies must be preserved"
+        );
+        assert!(
+            ctx.get_str("jwt_auth_clear_cookie").is_none(),
+            "hide_credentials must not schedule client cookie deletion"
         );
     }
 }

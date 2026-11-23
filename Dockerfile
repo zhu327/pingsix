@@ -51,7 +51,10 @@ RUN mkdir -p /var/log/pingsix /var/run/pingsix && \
         -e '/^  user: nobody$/d' \
         -e '/^  group: webusers$/d' \
         /app/config.yaml && \
-    chown -R pingsix:pingsix /app /var/log/pingsix /var/run/pingsix
+    chown -R root:pingsix /app && \
+    chmod 0750 /app && \
+    chmod 0640 /app/config.yaml && \
+    chown -R pingsix:pingsix /var/log/pingsix /var/run/pingsix
 
 USER pingsix
 

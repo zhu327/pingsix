@@ -1,9 +1,11 @@
 use std::{
     borrow::Cow,
+    collections::{BTreeSet, HashSet},
     sync::Arc,
     time::{Duration, Instant},
 };
 
+use async_trait::async_trait;
 use dashmap::DashMap;
 use futures::FutureExt;
 use hickory_resolver::TokioResolver;
@@ -58,7 +60,7 @@ pub struct ProxyUpstream {
     cache_origin_fingerprint: u64,
     /// Passive health-check counters keyed by collision-free backend identity
     /// (APISIX `checks.passive`).
-    passive: Option<PassiveHealthState>,
+    passive: Option<Arc<PassiveHealthState>>,
     /// Effective `pingsix.defaults.upstream_timeout` captured at build time, so
     /// peer timeouts honor the owning gateway instance's defaults.
     default_timeout: Option<config::Timeout>,
@@ -83,15 +85,28 @@ struct PassiveHealthState {
 /// pin the node permanently and block recovery.
 const PROBE_LEASE: Duration = Duration::from_secs(30);
 
+/// Cooldown before admitting a half-open probe to a passively tripped node
+/// while healthy siblings are still available. Prevents a tripped node in a
+/// multi-node upstream from remaining permanently deadlocked when siblings stay
+/// healthy, without flooding a failing backend on every rotation.
+const PROBE_COOLDOWN: Duration = Duration::from_secs(10);
+
 #[derive(Default)]
 struct PassiveCounters {
     http_failures: u32,
     tcp_failures: u32,
     timeouts: u32,
     successes: u32,
+    /// Consecutive active health-check successes observed while passively
+    /// tripped; once this reaches the active checker's healthy threshold, the
+    /// passive trip is cleared.
+    active_successes: usize,
     /// Node currently disabled by passive checking. It remains enabled in
     /// Pingora so this layer can send controlled half-open probes.
     tripped: bool,
+    /// Earliest instant a half-open probe may be admitted while healthy
+    /// siblings are still serving traffic.
+    next_probe_at: Option<Instant>,
     /// Deadline of the in-flight half-open probe; `None` when no probe is
     /// reserved. Expired leases are treated as free.
     probe_lease: Option<Instant>,
@@ -99,6 +114,10 @@ struct PassiveCounters {
 
 impl PassiveHealthState {
     fn observe(&self, backend: &Backend, outcome: PassiveOutcome) {
+        self.observe_at(backend, outcome, Instant::now());
+    }
+
+    fn observe_at(&self, backend: &Backend, outcome: PassiveOutcome, now: Instant) {
         let mut node = self
             .counters
             .entry(selection::backend_id(backend))
@@ -113,8 +132,12 @@ impl PassiveHealthState {
                 node.http_failures = 0;
                 node.timeouts = 0;
                 node.successes = 0;
+                node.active_successes = 0;
                 if unhealthy.tcp_failures > 0 && node.tcp_failures >= unhealthy.tcp_failures {
                     node.tripped = true;
+                }
+                if node.tripped {
+                    node.next_probe_at = Some(now + PROBE_COOLDOWN);
                 }
             }
             PassiveOutcome::Timeout => {
@@ -122,8 +145,12 @@ impl PassiveHealthState {
                 node.http_failures = 0;
                 node.tcp_failures = 0;
                 node.successes = 0;
+                node.active_successes = 0;
                 if unhealthy.timeouts > 0 && node.timeouts >= unhealthy.timeouts {
                     node.tripped = true;
+                }
+                if node.tripped {
+                    node.next_probe_at = Some(now + PROBE_COOLDOWN);
                 }
             }
             PassiveOutcome::Http(status) => {
@@ -132,9 +159,13 @@ impl PassiveHealthState {
                     node.tcp_failures = 0;
                     node.timeouts = 0;
                     node.successes = 0;
+                    node.active_successes = 0;
                     if unhealthy.http_failures > 0 && node.http_failures >= unhealthy.http_failures
                     {
                         node.tripped = true;
+                    }
+                    if node.tripped {
+                        node.next_probe_at = Some(now + PROBE_COOLDOWN);
                     }
                 } else if healthy_statuses.contains(&(status as u32)) {
                     node.http_failures = 0;
@@ -147,6 +178,13 @@ impl PassiveHealthState {
                         {
                             node.tripped = false;
                             node.successes = 0;
+                            node.active_successes = 0;
+                            node.next_probe_at = None;
+                        } else {
+                            // A recovery probe succeeded; allow the next probe
+                            // immediately so multi-success recovery finishes
+                            // without waiting another full cooldown.
+                            node.next_probe_at = Some(now);
                         }
                     }
                 }
@@ -158,13 +196,100 @@ impl PassiveHealthState {
         node.probe_lease = None;
     }
 
+    fn observe_active_success(&self, backend: &Backend, threshold: usize) {
+        let Some(mut node) = self.counters.get_mut(&selection::backend_id(backend)) else {
+            return;
+        };
+        if !node.tripped {
+            return;
+        }
+        node.active_successes = node.active_successes.saturating_add(1);
+        if node.active_successes >= threshold.max(1) {
+            node.tripped = false;
+            node.http_failures = 0;
+            node.tcp_failures = 0;
+            node.timeouts = 0;
+            node.successes = 0;
+            node.active_successes = 0;
+            node.next_probe_at = None;
+            node.probe_lease = None;
+        }
+    }
+
+    fn reset_active_successes(&self, backend: &Backend) {
+        if let Some(mut node) = self.counters.get_mut(&selection::backend_id(backend)) {
+            node.active_successes = 0;
+        }
+    }
+
+    fn clear_tripped(&self, backend: &Backend) {
+        if let Some(mut node) = self.counters.get_mut(&selection::backend_id(backend)) {
+            node.tripped = false;
+            node.http_failures = 0;
+            node.tcp_failures = 0;
+            node.timeouts = 0;
+            node.successes = 0;
+            node.active_successes = 0;
+            node.next_probe_at = None;
+            node.probe_lease = None;
+        }
+    }
+
+    fn prune_stale(&self, live: &BTreeSet<Backend>) {
+        if self.counters.len() <= live.len() {
+            return;
+        }
+        let live_ids: HashSet<selection::BackendId> =
+            live.iter().map(selection::backend_id).collect();
+        self.counters.retain(|id, _| live_ids.contains(id));
+    }
+
     fn has_tripped(&self) -> bool {
         self.counters.iter().any(|entry| entry.value().tripped)
     }
 
+    /// Regular-pass eligibility: returns `true` for any non-tripped backend, or
+    /// admits a single-flight half-open probe for a tripped backend once its
+    /// cooldown has elapsed.
+    fn is_selectable_or_cooldown_probe(&self, backend: &Backend, now: Instant) -> bool {
+        let id = selection::backend_id(backend);
+        // Fast read path for healthy/unseen backends: avoids acquiring a write
+        // lock on the shard when the node is not tripped or still in cooldown.
+        {
+            let Some(node) = self.counters.get(&id) else {
+                return true;
+            };
+            if !node.tripped {
+                return true;
+            }
+            let cooldown_elapsed = node.next_probe_at.is_none_or(|t| t <= now);
+            let lease_free = node.probe_lease.is_none_or(|d| d <= now);
+            if !cooldown_elapsed || !lease_free {
+                return false;
+            }
+        }
+        // Slow path: re-check under mutable shard lock and reserve single-flight
+        // half-open probe atomically.
+        let Some(mut node) = self.counters.get_mut(&id) else {
+            return true;
+        };
+        if !node.tripped {
+            return true;
+        }
+        let cooldown_elapsed = node.next_probe_at.is_none_or(|t| t <= now);
+        let lease_free = node.probe_lease.is_none_or(|d| d <= now);
+        if cooldown_elapsed && lease_free {
+            node.probe_lease = Some(now + PROBE_LEASE);
+            node.next_probe_at = Some(now + PROBE_COOLDOWN);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Admit at most one half-open request to a tripped node until its probe
-    /// lease expires. Called only after no regular ready node was selectable,
-    /// so healthy nodes always continue to receive normal traffic.
+    /// lease expires. Used as the fallback when no regular ready node was
+    /// selectable (e.g. all nodes are tripped and still within cooldown).
     fn take_probe(&self, backend: &Backend, now: Instant) -> bool {
         let Some(mut node) = self.counters.get_mut(&selection::backend_id(backend)) else {
             return false;
@@ -176,6 +301,45 @@ impl PassiveHealthState {
         } else {
             false
         }
+    }
+}
+
+/// Wraps an active [`HealthCheckTrait`] so active recovery also resets passive
+/// trip state on the same backend.
+struct PassiveResetHealthCheck {
+    inner: Box<dyn HealthCheckTrait + Send + Sync + 'static>,
+    passive: Arc<PassiveHealthState>,
+}
+
+#[async_trait]
+impl HealthCheckTrait for PassiveResetHealthCheck {
+    async fn check(&self, target: &Backend) -> pingora_error::Result<()> {
+        match self.inner.check(target).await {
+            Ok(()) => {
+                self.passive
+                    .observe_active_success(target, self.inner.health_threshold(true));
+                Ok(())
+            }
+            Err(err) => {
+                self.passive.reset_active_successes(target);
+                Err(err)
+            }
+        }
+    }
+
+    async fn health_status_change(&self, target: &Backend, healthy: bool) {
+        self.inner.health_status_change(target, healthy).await;
+        if healthy {
+            self.passive.clear_tripped(target);
+        }
+    }
+
+    fn backend_summary(&self, target: &Backend) -> String {
+        self.inner.backend_summary(target)
+    }
+
+    fn health_threshold(&self, success: bool) -> usize {
+        self.inner.health_threshold(success)
     }
 }
 
@@ -216,10 +380,6 @@ impl ProxyUpstream {
 
         let cache_origin_fingerprint =
             upstream.fingerprint(config::UpstreamFingerprintProfile::CacheOrigin);
-        let lb = SelectionLB::from_prepared(upstream.clone(), prepared, defaults, resolver)
-            .map_err(|e| {
-                ProxyError::Configuration(format!("Failed to create load balancer: {e}"))
-            })?;
 
         // Passive state intentionally does not call `Backends::set_enable`:
         // Pingora has no half-open transition for manually disabled backends.
@@ -228,10 +388,21 @@ impl ProxyUpstream {
             .checks
             .as_ref()
             .and_then(|c| c.passive.clone())
-            .map(|config| PassiveHealthState {
-                config,
-                counters: DashMap::new(),
+            .map(|config| {
+                Arc::new(PassiveHealthState {
+                    config,
+                    counters: DashMap::new(),
+                })
             });
+
+        let lb = SelectionLB::from_prepared(
+            upstream.clone(),
+            prepared,
+            defaults,
+            resolver,
+            passive.clone(),
+        )
+        .map_err(|e| ProxyError::Configuration(format!("Failed to create load balancer: {e}")))?;
 
         Ok(ProxyUpstream {
             inner: upstream,
@@ -249,34 +420,35 @@ impl ProxyUpstream {
     }
 
     fn select_with_passive(&self, key: &[u8]) -> Option<Backend> {
-        // State is keyed structurally by socket address and weight. Consult it
-        // in-place: unlike the former per-request `Vec` snapshot this neither
-        // allocates nor linearly scans tripped candidates.
-        let regular = |backend: &Backend| {
-            self.passive.as_ref().is_none_or(|passive| {
-                !passive
-                    .counters
-                    .get(&selection::backend_id(backend))
-                    .is_some_and(|node| node.tripped)
-            })
+        self.select_with_passive_at(key, Instant::now())
+    }
+
+    fn select_with_passive_at(&self, key: &[u8], now: Instant) -> Option<Backend> {
+        // 1. Regular pass: pick any non-tripped ready backend, or admit a
+        //    single-flight half-open probe for a tripped backend whose
+        //    cooldown has elapsed so tripped nodes can recover even while
+        //    healthy siblings stay online.
+        let regular_or_probe = |backend: &Backend| {
+            self.passive
+                .as_ref()
+                .is_none_or(|passive| passive.is_selectable_or_cooldown_probe(backend, now))
         };
         if let Some(backend) = with_lb!(&self.lb, |lb| {
             lb.upstreams
                 .select_with(key, MAX_LB_ITERATIONS, |backend, ready| {
-                    ready && regular(backend)
+                    ready && regular_or_probe(backend)
                 })
         }) {
             return Some(backend);
         }
 
-        // 2. No regular candidate remains. If passive checking has tripped any
-        //    node, admit one half-open probe among tripped-but-actively-ready
-        //    nodes. Healthy nodes always keep receiving normal traffic.
-        let now = Instant::now();
+        // 2. No regular candidate remains (e.g. all nodes are tripped and still
+        //    within cooldown). Admit one half-open probe among
+        //    tripped-but-actively-ready nodes.
         if self
             .passive
             .as_ref()
-            .is_some_and(PassiveHealthState::has_tripped)
+            .is_some_and(|passive| passive.has_tripped())
         {
             if let Some(backend) = with_lb!(&self.lb, |lb| {
                 lb.upstreams
@@ -393,6 +565,8 @@ impl UpstreamSelector for ProxyUpstream {
     fn observe_passive(&self, backend: &Backend, outcome: PassiveOutcome) {
         if let Some(passive) = &self.passive {
             passive.observe(backend, outcome);
+            let live = with_lb!(&self.lb, |lb| lb.upstreams.backends().get_backend());
+            passive.prune_stale(&live);
         }
     }
 }
@@ -410,19 +584,20 @@ impl SelectionLB {
         prepared: PreparedUpstream,
         defaults: &EffectiveDefaults,
         resolver: &Arc<TokioResolver>,
+        passive: Option<Arc<PassiveHealthState>>,
     ) -> ProxyResult<Self> {
         match value.r#type {
             config::SelectionType::RoundRobin => Ok(SelectionLB::RoundRobin(
-                LB::<RoundRobin>::from_prepared(value, prepared, defaults, resolver)?,
+                LB::<RoundRobin>::from_prepared(value, prepared, defaults, resolver, passive)?,
             )),
             config::SelectionType::Random => Ok(SelectionLB::Random(LB::<Random>::from_prepared(
-                value, prepared, defaults, resolver,
+                value, prepared, defaults, resolver, passive,
             )?)),
             config::SelectionType::Fnv => Ok(SelectionLB::Fnv(LB::<FVNHash>::from_prepared(
-                value, prepared, defaults, resolver,
+                value, prepared, defaults, resolver, passive,
             )?)),
             config::SelectionType::Ketama => Ok(SelectionLB::Ketama(
-                LB::<KetamaHashing>::from_prepared(value, prepared, defaults, resolver)?,
+                LB::<KetamaHashing>::from_prepared(value, prepared, defaults, resolver, passive)?,
             )),
         }
     }
@@ -452,6 +627,7 @@ where
         prepared: PreparedUpstream,
         defaults: &EffectiveDefaults,
         resolver: &Arc<TokioResolver>,
+        passive: Option<Arc<PassiveHealthState>>,
     ) -> ProxyResult<Self> {
         let refresh: HybridDiscovery = HybridDiscovery::build(upstream.clone(), resolver.clone())?;
         let discovery = SeededDiscovery::new(
@@ -479,6 +655,15 @@ where
                             upstream.id
                         ))
                     })?;
+                let health_check: Box<dyn HealthCheckTrait + Send + Sync + 'static> =
+                    if let Some(passive) = passive {
+                        Box::new(PassiveResetHealthCheck {
+                            inner: health_check,
+                            passive,
+                        })
+                    } else {
+                        health_check
+                    };
                 upstreams.set_health_check(health_check);
 
                 upstreams.health_check_frequency = Some(health_check_frequency);
@@ -1303,5 +1488,121 @@ mod passive_tests {
             state.observe(&b, PassiveOutcome::Http(404));
         }
         assert!(!state.has_tripped());
+    }
+
+    #[test]
+    fn tripped_node_in_multi_node_upstream_recovers_after_cooldown_while_sibling_healthy() {
+        let mut nodes = std::collections::HashMap::new();
+        nodes.insert("127.0.0.1:18081".to_string(), 1);
+        nodes.insert("127.0.0.1:18082".to_string(), 1);
+        let upstream = ProxyUpstream::build_static(config::Upstream {
+            id: "multi-passive".into(),
+            retries: None,
+            retry_timeout: None,
+            timeout: None,
+            nodes: config::Nodes::from_map(nodes),
+            r#type: config::SelectionType::RoundRobin,
+            checks: Some(config::HealthCheck {
+                active: None,
+                passive: Some(PassiveCheck {
+                    healthy: PassiveHealthy {
+                        http_statuses: vec![200],
+                        successes: 1,
+                    },
+                    unhealthy: PassiveUnhealthy {
+                        http_statuses: vec![500],
+                        http_failures: 1,
+                        tcp_failures: 1,
+                        timeouts: 1,
+                    },
+                }),
+            }),
+            hash_on: config::UpstreamHashOn::VARS,
+            key: "uri".into(),
+            scheme: config::UpstreamScheme::HTTP,
+            pass_host: config::UpstreamPassHost::PASS,
+            upstream_host: None,
+            tls: None,
+            keepalive_pool: None,
+        })
+        .expect("multi-node passive upstream must build");
+
+        let passive = upstream.passive.as_ref().unwrap();
+        let all_backends: Vec<Backend> = with_lb!(&upstream.lb, |lb| {
+            lb.upstreams
+                .backends()
+                .get_backend()
+                .iter()
+                .cloned()
+                .collect()
+        });
+        assert_eq!(all_backends.len(), 2);
+        let tripped = &all_backends[0];
+        let healthy = &all_backends[1];
+
+        let t0 = Instant::now();
+        passive.observe_at(tripped, PassiveOutcome::Http(500), t0);
+        assert!(passive.has_tripped());
+
+        // During cooldown, only the healthy sibling is selected.
+        for _ in 0..8 {
+            let picked = upstream.select_with_passive_at(b"", t0 + Duration::from_secs(1));
+            assert_eq!(picked.as_ref().map(|b| &b.addr), Some(&healthy.addr));
+        }
+
+        // After cooldown elapses, the tripped node is admitted for a single-flight
+        // half-open probe even though its sibling remains healthy.
+        let probe_time = t0 + PROBE_COOLDOWN;
+        let mut probed_tripped = 0;
+        for _ in 0..6 {
+            let picked = upstream.select_with_passive_at(b"", probe_time).unwrap();
+            if picked.addr == tripped.addr {
+                probed_tripped += 1;
+            }
+        }
+        assert_eq!(
+            probed_tripped, 1,
+            "tripped node must receive exactly one half-open probe after cooldown"
+        );
+
+        // Probe succeeds -> node recovers and returns to regular rotation.
+        passive.observe_at(tripped, PassiveOutcome::Http(200), probe_time);
+        assert!(!passive.has_tripped());
+    }
+
+    #[test]
+    fn active_health_check_success_resets_passive_trip_and_prune_removes_stale() {
+        let state = test_state(1, 2, 7, 1);
+        let b1 = Backend::new("127.0.0.1:18081").unwrap();
+        let b2 = Backend::new("127.0.0.1:18082").unwrap();
+        state.observe(&b1, PassiveOutcome::Http(500));
+        state.observe(&b2, PassiveOutcome::Http(500));
+        assert!(state.has_tripped());
+
+        // Active check requires threshold=2 consecutive successes to clear trip.
+        state.observe_active_success(&b1, 2);
+        assert!(
+            state
+                .counters
+                .get(&selection::backend_id(&b1))
+                .unwrap()
+                .tripped
+        );
+        state.observe_active_success(&b1, 2);
+        assert!(
+            !state
+                .counters
+                .get(&selection::backend_id(&b1))
+                .unwrap()
+                .tripped
+        );
+
+        // Pruning drops backends no longer in the live set (DNS rotation).
+        let mut live = BTreeSet::new();
+        live.insert(b1.clone());
+        state.prune_stale(&live);
+        assert_eq!(state.counters.len(), 1);
+        assert!(state.counters.contains_key(&selection::backend_id(&b1)));
+        assert!(!state.counters.contains_key(&selection::backend_id(&b2)));
     }
 }

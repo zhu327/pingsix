@@ -405,13 +405,17 @@ impl Compiled {
 
         let buffered_len = self.buffer_len(ctx);
         if buffered_len as u64 + chunk.len() as u64 >= self.max_resp_body_size {
-            // APISIX truncates at max_resp_body_size: emit the first
-            // `max_resp_body_size` bytes, mark the buffer done, and pass all
-            // later chunks through unchanged.
+            // Filter the prefix up to `max_resp_body_size`, preserve any
+            // trailing bytes from this crossing chunk verbatim, and pass all
+            // later chunks through unchanged so no response bytes are lost.
+            let max_bytes = usize::try_from(self.max_resp_body_size).unwrap_or(usize::MAX);
+            let take = max_bytes.saturating_sub(buffered_len).min(chunk.len());
             let mut buffered = self.take_buffer(ctx);
-            buffered.extend_from_slice(&chunk);
-            buffered.truncate(self.max_resp_body_size as usize);
-            let filtered = self.apply_filters_bytes(&buffered);
+            buffered.extend_from_slice(&chunk[..take]);
+            let mut filtered = self.apply_filters_bytes(&buffered);
+            if take < chunk.len() {
+                filtered.extend_from_slice(&chunk[take..]);
+            }
             *body = Some(Bytes::from(filtered));
 
             if !ctx
@@ -421,7 +425,7 @@ impl Compiled {
             {
                 log::debug!(
                     "response-rewrite: response body reached max_resp_body_size {}; \
-                     buffered prefix truncated and later chunks passed through unchanged",
+                     filtered prefix emitted and remaining bytes passed through unchanged",
                     self.max_resp_body_size
                 );
             }
@@ -1102,6 +1106,31 @@ mod tests {
         let mut body = Some(Bytes::from_static(b"tail"));
         compiled.process_body_chunk(&mut body, false, &mut ctx);
         assert_eq!(body, Some(Bytes::from_static(b"tail")));
+
+        let mut body = Some(Bytes::from_static(b"end"));
+        compiled.process_body_chunk(&mut body, true, &mut ctx);
+        assert_eq!(body, Some(Bytes::from_static(b"end")));
+    }
+
+    #[test]
+    fn oversized_crossing_chunk_preserves_trailing_bytes() {
+        let (_, compiled) = build(serde_json::json!({
+            "max_resp_body_size": 4,
+            "filters": [{"regex": "foo", "replace": "bar"}]
+        }));
+        let mut ctx = ProxyContext::default();
+        ctx.set(compiled.keys.matched.clone(), true);
+
+        let mut body = Some(Bytes::from_static(b"fo"));
+        compiled.process_body_chunk(&mut body, false, &mut ctx);
+        assert_eq!(body, Some(Bytes::new()));
+
+        // Crossing chunk carries bytes beyond max_resp_body_size: filter the
+        // first 4 bytes ("foox" -> "barx") and preserve the overflow tail
+        // ("12345") verbatim without dropping data.
+        let mut body = Some(Bytes::from_static(b"ox12345"));
+        compiled.process_body_chunk(&mut body, false, &mut ctx);
+        assert_eq!(body, Some(Bytes::from_static(b"barx12345")));
 
         let mut body = Some(Bytes::from_static(b"end"));
         compiled.process_body_chunk(&mut body, true, &mut ctx);

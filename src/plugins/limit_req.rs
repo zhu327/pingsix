@@ -151,6 +151,8 @@ struct PluginConfig {
     policy: Policy,
 }
 
+const MAX_DELAY_SECS: f64 = 86_400.0;
+
 fn validate_rate(value: f64) -> Result<(), ValidationError> {
     if !value.is_finite() || value <= 0.0 {
         return Err(ValidationError::new("rate must be > 0"));
@@ -172,6 +174,15 @@ impl TryFrom<JsonValue> for PluginConfig {
         let config: PluginConfig =
             parse_and_validate_plugin_config(value, "Invalid limit-req plugin config")?;
         config.policy.ensure_local("limit-req")?;
+        let max_delay = config.burst / config.rate;
+        if !max_delay.is_finite()
+            || max_delay > MAX_DELAY_SECS
+            || Duration::try_from_secs_f64(max_delay).is_err()
+        {
+            return Err(ProxyError::validation_error(format!(
+                "limit-req maximum burst delay (burst / rate) must be finite and <= {MAX_DELAY_SECS}s"
+            )));
+        }
         Ok(config)
     }
 }
@@ -248,7 +259,9 @@ impl ProxyPlugin for PluginLimitReq {
 
         let delay = delay.expect("not rejected implies a delay");
         if delay > 0.0 && !self.config.nodelay {
-            tokio::time::sleep(Duration::from_secs_f64(delay)).await;
+            let sleep_duration = Duration::try_from_secs_f64(delay.clamp(0.0, MAX_DELAY_SECS))
+                .unwrap_or_else(|_| Duration::from_secs(MAX_DELAY_SECS as u64));
+            tokio::time::sleep(sleep_duration).await;
         }
         Ok(FilterVerdict::Continue)
     }
@@ -459,6 +472,13 @@ mod tests {
             "rate": 1, "burst": 0, "key": "remote_addr", "rejected_code": 199
         }))
         .is_err());
+        assert!(
+            PluginConfig::try_from(serde_json::json!({
+                "rate": 1e-300, "burst": 1e300, "key": "remote_addr"
+            }))
+            .is_err(),
+            "overflowing burst / rate delay must be rejected"
+        );
     }
 
     #[test]

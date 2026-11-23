@@ -244,9 +244,17 @@ struct PluginConfig {
     policy: Policy,
 }
 
+const MAX_CONN_DELAY_SECS: f64 = 86_400.0;
+
 fn validate_conn_delay(value: f64) -> Result<(), ValidationError> {
-    if !value.is_finite() || value <= 0.0 {
-        return Err(ValidationError::new("default_conn_delay must be > 0"));
+    if !value.is_finite()
+        || value <= 0.0
+        || value > MAX_CONN_DELAY_SECS
+        || Duration::try_from_secs_f64(value).is_err()
+    {
+        return Err(ValidationError::new(
+            "default_conn_delay must be > 0 and <= 86400",
+        ));
     }
     Ok(())
 }
@@ -426,8 +434,10 @@ impl ProxyPlugin for PluginLimitConn {
                     // exclude it from the latency feedback (APISIX computes
                     // `request_time - delay`).
                     let mut guard = ConnGuard::new(state);
-                    guard.slept_delay = Duration::from_secs_f64(secs);
-                    tokio::time::sleep(Duration::from_secs_f64(secs)).await;
+                    let delay = Duration::try_from_secs_f64(secs.clamp(0.0, MAX_CONN_DELAY_SECS))
+                        .unwrap_or_else(|_| Duration::from_secs(MAX_CONN_DELAY_SECS as u64));
+                    guard.slept_delay = delay;
+                    tokio::time::sleep(delay).await;
                     guards.push(guard);
                 }
                 Decision::Reject => {
@@ -918,6 +928,16 @@ mod tests {
             "default_conn_delay": -1.0
         }))
         .is_err());
+        assert!(
+            PluginConfig::try_from(serde_json::json!({
+                "conn": 2,
+                "burst": 0,
+                "key": "remote_addr",
+                "default_conn_delay": 1e300
+            }))
+            .is_err(),
+            "overflowing default_conn_delay must be rejected"
+        );
     }
 
     #[test]

@@ -91,7 +91,8 @@ impl TryFrom<JsonValue> for RawConfig {
 ///
 /// Supports CIDR notation for network ranges (e.g., `192.168.1.0/24`, `2001:db8::/32`).
 /// Handles proxy chains by examining X-Forwarded-For and X-Real-IP headers when configured.
-/// Whitelist takes precedence over blacklist for overlapping ranges.
+/// Blacklist takes precedence over whitelist for overlapping ranges: a request must match
+/// the whitelist (when non-empty) and must not match the blacklist.
 pub fn create_ip_restriction_plugin(
     cfg: JsonValue,
     _defaults: &crate::config::EffectiveDefaults,
@@ -320,15 +321,23 @@ impl PluginIPRestriction {
     ///   caller can apply `forwarded_header_error_policy`
     /// - XFF absent → optionally use X-Real-IP from a directly connected trusted proxy
     fn extract_forwarded_ip(&self, session: &Session) -> Result<Option<IpAddr>, ()> {
-        if let Some(forwarded_header) =
-            get_req_header_value(session.req_header(), "x-forwarded-for")
-        {
-            let hops = forwarded_header
-                .split(',')
-                .map(str::trim)
-                .map(str::parse::<IpAddr>)
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|_| ())?;
+        // Read all X-Forwarded-For header instances in order so a proxy that
+        // appends a second header instead of merging into a client-supplied one
+        // cannot be bypassed by spoofing the first header.
+        let mut xff_headers = session
+            .req_header()
+            .headers
+            .get_all("x-forwarded-for")
+            .iter();
+        if let Some(first) = xff_headers.next() {
+            let mut hops = Vec::new();
+            for header_value in std::iter::once(first).chain(xff_headers) {
+                let header_str = header_value.to_str().map_err(|_| ())?;
+                for part in header_str.split(',') {
+                    let ip = part.trim().parse::<IpAddr>().map_err(|_| ())?;
+                    hops.push(ip);
+                }
+            }
 
             return Ok(Self::client_from_proxy_chain(&hops, |ip| {
                 self.is_trusted_proxy(ip)
@@ -508,5 +517,30 @@ mod tests {
             &crate::config::EffectiveDefaults::default(),
         )
         .is_err());
+    }
+
+    #[tokio::test]
+    async fn multiple_xff_headers_cannot_be_bypassed_by_spoofed_first_header() {
+        let config = compile_config(serde_json::json!({
+            "whitelist": ["192.168.1.0/24"],
+            "trusted_proxies": ["10.0.0.0/8"],
+            "use_forwarded_headers": true
+        }))
+        .unwrap();
+        let plugin = PluginIPRestriction { config };
+
+        // Attacker sends a spoofed first X-Forwarded-For with a whitelisted IP;
+        // the trusted proxy appends a second X-Forwarded-For with the real IP.
+        let session = crate::utils::testing::session_from_request(
+            "GET / HTTP/1.1\r\nHost: example.com\r\nX-Forwarded-For: 192.168.1.10\r\nX-Forwarded-For: 203.0.113.55\r\n\r\n",
+        )
+        .await;
+
+        let extracted = plugin.extract_forwarded_ip(&session).unwrap();
+        assert_eq!(
+            extracted,
+            Some("203.0.113.55".parse().unwrap()),
+            "rightmost untrusted IP across all X-Forwarded-For headers must win"
+        );
     }
 }

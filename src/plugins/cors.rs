@@ -90,8 +90,13 @@ impl PluginConfig {
     }
 
     fn validate(&self) -> Result<(), ValidationError> {
-        // Both "*" and "**" mean any origin; credentials cannot be combined with either.
-        if self.allow_credential && (self.allow_origins == "*" || self.allow_origins == "**") {
+        // Both "*" and "**" mean any origin; credentials cannot be combined with
+        // either unless `allow_origins_by_regex` is configured (in which case
+        // regex matching governs and the matched origin is reflected).
+        if self.allow_credential
+            && self.allow_origins_by_regex.is_none()
+            && (self.allow_origins == "*" || self.allow_origins == "**")
+        {
             return Err(ValidationError::new(
                 "allow_credential cannot be used with allow_origins='*' or '**'",
             ));
@@ -116,37 +121,42 @@ impl PluginConfig {
                 "allow_credential cannot be used with timing_allow_origins='*'",
             ));
         }
+        if let Some(regexes) = &self.allow_origins_by_regex {
+            Self::validate_regex_list(regexes, "allow_origins_by_regex")?;
+        }
         if let Some(timing_origins) = &self.timing_allow_origins {
             Self::validate_origin_list(timing_origins, "timing_allow_origins")?;
         }
         if let Some(regexes) = &self.timing_allow_origins_by_regex {
-            if regexes.is_empty() {
-                return Err(ValidationError::new(
-                    "timing_allow_origins_by_regex must not be empty",
-                ));
-            }
-            let mut seen = HashSet::new();
-            for regex in regexes {
-                if regex.is_empty() {
-                    return Err(ValidationError::new(
-                        "timing_allow_origins_by_regex entries must not be empty",
-                    ));
-                }
-                if regex.chars().count() > 4096 {
-                    return Err(ValidationError::new(
-                        "timing_allow_origins_by_regex entries must be at most 4096 characters",
-                    ));
-                }
-                if !seen.insert(regex.as_str()) {
-                    return Err(ValidationError::new(
-                        "timing_allow_origins_by_regex entries must be unique",
-                    ));
-                }
-            }
+            Self::validate_regex_list(regexes, "timing_allow_origins_by_regex")?;
         }
         if let Some(metadata) = &self.allow_origins_by_metadata {
             if !metadata.is_empty() {
                 return Err(ValidationError::new("plugin metadata is not supported"));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_regex_list(regexes: &[String], field: &str) -> Result<(), ValidationError> {
+        if regexes.is_empty() {
+            return Err(ValidationError::new("regex list must not be empty")
+                .with_message(format!("{field} must not be empty").into()));
+        }
+        let mut seen = HashSet::new();
+        for regex in regexes {
+            if regex.is_empty() {
+                return Err(ValidationError::new("regex entry must not be empty")
+                    .with_message(format!("{field} entries must not be empty").into()));
+            }
+            if regex.chars().count() > 4096 {
+                return Err(ValidationError::new("regex entry too long").with_message(
+                    format!("{field} entries must be at most 4096 characters").into(),
+                ));
+            }
+            if !seen.insert(regex.as_str()) {
+                return Err(ValidationError::new("regex entry must be unique")
+                    .with_message(format!("{field} entries must be unique").into()));
             }
         }
         Ok(())
@@ -324,6 +334,19 @@ impl OptimizedPluginConfig {
             return false;
         }
 
+        // When `allow_origins_by_regex` is configured, it takes precedence over
+        // the default `"*"`/`"**"` wildcard so configuring regex rules alone
+        // never inadvertently allows all origins. Explicit non-wildcard
+        // `allow_origins` lists continue to union with regex patterns.
+        if let Some(regex_list) = &self.allow_origins_by_regex {
+            if let Some(ref origins_set) = self.allow_origins_set {
+                if origins_set.contains(origin) {
+                    return true;
+                }
+            }
+            return regex_list.iter().any(|re| re.is_match(origin));
+        }
+
         // Handle wildcard cases
         if self.allow_origins == "*" || self.allow_origins == "**" {
             return true;
@@ -333,15 +356,6 @@ impl OptimizedPluginConfig {
         if let Some(ref origins_set) = self.allow_origins_set {
             if origins_set.contains(origin) {
                 return true;
-            }
-        }
-
-        // Check regex patterns if available
-        if let Some(regex_list) = &self.allow_origins_by_regex {
-            for re in regex_list {
-                if re.is_match(origin) {
-                    return true;
-                }
             }
         }
 
@@ -410,8 +424,10 @@ impl PluginCors {
         resp: &mut ResponseHeader,
         origin: &str,
     ) -> Result<()> {
-        // Without credentials, "*" may be returned literally; otherwise reflect Origin.
+        // Without credentials and without regex matching, "*" may be returned
+        // literally; otherwise reflect Origin (with Vary: Origin).
         let reflecting_origin = if !self.config.allow_credential
+            && self.config.allow_origins_by_regex.is_none()
             && (self.config.allow_origins == "*" || self.config.allow_origins == "**")
         {
             resp.insert_header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")?;
@@ -890,6 +906,73 @@ mod tests {
             resp.headers.get("Timing-Allow-Origin").unwrap(),
             "https://app.example"
         );
+    }
+
+    #[tokio::test]
+    async fn allow_origins_by_regex_is_not_bypassed_by_default_wildcard() {
+        let cfg = PluginConfig::try_from(serde_json::json!({
+            "allow_origins_by_regex": ["^https://trusted\\.example$"]
+        }))
+        .unwrap()
+        .compile_and_optimize()
+        .unwrap();
+        assert!(cfg.is_origin_allowed("https://trusted.example"));
+        assert!(
+            !cfg.is_origin_allowed("https://evil.example"),
+            "default allow_origins='*' must not bypass allow_origins_by_regex"
+        );
+
+        let plugin = PluginCors { config: cfg };
+        let mut session = cors_session("GET", &["Origin: https://trusted.example"]).await;
+        let mut resp = ResponseHeader::build(200, None).unwrap();
+        plugin.apply_cors_headers(&mut session, &mut resp).unwrap();
+        assert_eq!(
+            resp.headers
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .unwrap(),
+            "https://trusted.example",
+            "regex-matched origin must be reflected rather than emitting '*'"
+        );
+        assert!(resp
+            .headers
+            .get(header::VARY)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_ascii_lowercase()
+            .contains("origin"));
+
+        // Credentials + regex-only config is valid because matched origins are reflected.
+        let cred_cfg = PluginConfig::try_from(serde_json::json!({
+            "allow_origins_by_regex": ["^https://trusted\\.example$"],
+            "allow_methods": "GET",
+            "allow_headers": "Content-Type",
+            "allow_credential": true
+        }))
+        .expect("allow_credential with allow_origins_by_regex must be accepted");
+        assert!(cred_cfg.compile_and_optimize().is_ok());
+
+        // Explicit non-wildcard allow_origins continues to union with regex patterns.
+        let union_cfg = PluginConfig::try_from(serde_json::json!({
+            "allow_origins": "https://exact.example",
+            "allow_origins_by_regex": ["^https://sub\\.example$"]
+        }))
+        .unwrap()
+        .compile_and_optimize()
+        .unwrap();
+        assert!(union_cfg.is_origin_allowed("https://exact.example"));
+        assert!(union_cfg.is_origin_allowed("https://sub.example"));
+        assert!(!union_cfg.is_origin_allowed("https://other.example"));
+
+        // Empty or duplicate regex lists are rejected just like timing_allow_origins_by_regex.
+        assert!(PluginConfig::try_from(serde_json::json!({
+            "allow_origins_by_regex": []
+        }))
+        .is_err());
+        assert!(PluginConfig::try_from(serde_json::json!({
+            "allow_origins_by_regex": ["^https://a$", "^https://a$"]
+        }))
+        .is_err());
     }
 
     #[test]

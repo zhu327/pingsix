@@ -1,9 +1,8 @@
 use std::time::Duration;
 use std::{collections::HashMap, sync::Arc};
 
-use matchit::{InsertError, Router as MatchRouter};
+use matchit::Router as MatchRouter;
 use pingora_core::upstreams::peer::HttpPeer;
-use pingora_error::Result;
 use pingora_proxy::Session;
 
 use crate::{
@@ -351,8 +350,11 @@ pub(crate) fn apply_route_timeout(route_timeout: Option<&config::Timeout>, p: &m
 pub struct MatchEntry {
     /// Router for non-host URI matching
     non_host_uri: MatchRouter<Vec<Arc<ProxyRoute>>>,
-    /// Router for host URI matching
-    host_uris: MatchRouter<MatchRouter<Vec<Arc<ProxyRoute>>>>,
+    /// Exact (lowercased) host -> URI router
+    exact_hosts: std::collections::HashMap<String, MatchRouter<Vec<Arc<ProxyRoute>>>>,
+    /// Wildcard suffix (e.g. `".example.com"` for `"*.example.com"`) -> URI router,
+    /// sorted longest-suffix-first so the most specific wildcard wins.
+    wildcard_hosts: Vec<(String, MatchRouter<Vec<Arc<ProxyRoute>>>)>,
     /// Whether global rules enable CORS, making every method-compatible route
     /// a preflight fallback candidate. Compiled at build time.
     global_cors: bool,
@@ -363,35 +365,117 @@ impl MatchEntry {
         routes: &std::collections::HashMap<String, Arc<ProxyRoute>>,
         global_plugins: &ProxyPluginExecutor,
     ) -> ProxyResult<Self> {
-        let mut matcher = Self {
-            global_cors: global_plugins.has_plugin(cors::PLUGIN_NAME),
-            ..Self::default()
-        };
         // Make the matcher deterministic across process restarts: `HashMap`
         // iteration order is randomized, and equal-priority routes sharing the
-        // same URI keep insertion order in `insert_into_router`. Without an
-        // explicit tie-break, which route wins a tie could change on every boot.
-        let mut routes: Vec<_> = routes.values().cloned().collect();
-        routes.sort_by(|a, b| {
+        // same URI keep insertion order. Without an explicit tie-break, which
+        // route wins a tie could change on every boot.
+        let mut sorted_routes: Vec<_> = routes.values().cloned().collect();
+        sorted_routes.sort_by(|a, b| {
             b.inner
                 .priority
                 .cmp(&a.inner.priority)
                 .then_with(|| a.inner.id.cmp(&b.inner.id))
         });
-        for route in routes {
-            matcher.insert_route(route.clone()).map_err(|e| {
+
+        let mut non_host_groups: std::collections::HashMap<String, Vec<Arc<ProxyRoute>>> =
+            std::collections::HashMap::new();
+        let mut exact_host_groups: std::collections::HashMap<
+            String,
+            std::collections::HashMap<String, Vec<Arc<ProxyRoute>>>,
+        > = std::collections::HashMap::new();
+        let mut wildcard_host_groups: std::collections::HashMap<
+            String,
+            std::collections::HashMap<String, Vec<Arc<ProxyRoute>>>,
+        > = std::collections::HashMap::new();
+
+        // Group by exact host/URI pattern string before inserting into matchit.
+        // Calling `matchit::Router::at_mut` during insertion performs pattern
+        // matching rather than exact-key lookup, which would merge lower-priority
+        // specific routes into an already-inserted wildcard route.
+        for route in sorted_routes {
+            let route_hosts = route.get_hosts();
+            let uris = route.inner.get_uris();
+
+            if route_hosts.is_empty() {
+                for uri in uris {
+                    non_host_groups
+                        .entry(uri.to_string())
+                        .or_default()
+                        .push(route.clone());
+                }
+            } else {
+                for host in route_hosts {
+                    let normalized = host.to_ascii_lowercase();
+                    let target = if let Some(suffix) = normalized.strip_prefix('*') {
+                        wildcard_host_groups.entry(suffix.to_string()).or_default()
+                    } else {
+                        exact_host_groups.entry(normalized).or_default()
+                    };
+                    for uri in &uris {
+                        target
+                            .entry((*uri).to_string())
+                            .or_default()
+                            .push(route.clone());
+                    }
+                }
+            }
+        }
+
+        let non_host_uri = Self::compile_uri_router(non_host_groups)?;
+
+        let mut exact_hosts = std::collections::HashMap::with_capacity(exact_host_groups.len());
+        for (host, groups) in exact_host_groups {
+            exact_hosts.insert(host, Self::compile_uri_router(groups)?);
+        }
+
+        let mut wildcard_hosts = Vec::with_capacity(wildcard_host_groups.len());
+        for (suffix, groups) in wildcard_host_groups {
+            wildcard_hosts.push((suffix, Self::compile_uri_router(groups)?));
+        }
+        wildcard_hosts.sort_by(|(a, _), (b, _)| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+
+        Ok(Self {
+            non_host_uri,
+            exact_hosts,
+            wildcard_hosts,
+            global_cors: global_plugins.has_plugin(cors::PLUGIN_NAME),
+        })
+    }
+
+    fn compile_uri_router(
+        groups: std::collections::HashMap<String, Vec<Arc<ProxyRoute>>>,
+    ) -> ProxyResult<MatchRouter<Vec<Arc<ProxyRoute>>>> {
+        // Insert in deterministic pattern order so conflict errors are reproducible.
+        let mut entries: Vec<_> = groups.into_iter().collect();
+        entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+        let mut router = MatchRouter::new();
+        for (uri, routes) in entries {
+            let first_id = routes
+                .first()
+                .map(|r| r.inner.id.clone())
+                .unwrap_or_else(|| "<unknown>".to_string());
+            router.insert(uri, routes).map_err(|e| {
                 ProxyError::Configuration(format!(
-                    "Failed to build route matcher for '{}': {e}",
-                    route.inner.id
+                    "Failed to build route matcher for '{first_id}': {e}"
                 ))
             })?;
         }
-        Ok(matcher)
+        Ok(router)
+    }
+
+    /// Multi-label wildcard host match: `suffix` is the portion after `*`
+    /// (e.g. `".example.com"` for `"*.example.com"`). Requires at least one
+    /// leading character before the suffix so `"example.com"` does not match
+    /// `"*.example.com"`.
+    fn host_matches_wildcard(host_lower: &str, suffix: &str) -> bool {
+        host_lower.len() > suffix.len() && host_lower.ends_with(suffix)
     }
 
     /// Converts host to reversed matchit-compatible pattern.
     /// Wildcard "*.example.com" becomes "moc.elpmaxe.{*subdomain}".
     /// Exact "api.example.com" becomes "moc.elpmaxe.ipa".
+    #[cfg(test)]
     fn reverse_ascii_lowercase(input: &str) -> String {
         let mut reversed = String::with_capacity(input.len());
         for ch in input.chars().rev() {
@@ -400,6 +484,7 @@ impl MatchEntry {
         reversed
     }
 
+    #[cfg(test)]
     fn reverse_host(host: &str) -> String {
         if let Some(domain_part) = host.strip_prefix("*") {
             let reversed_domain = Self::reverse_ascii_lowercase(domain_part);
@@ -407,76 +492,6 @@ impl MatchEntry {
         } else {
             Self::reverse_ascii_lowercase(host)
         }
-    }
-
-    fn insert_into_router(
-        router: &mut MatchRouter<Vec<Arc<ProxyRoute>>>,
-        uri: &str,
-        proxy_route: Arc<ProxyRoute>,
-    ) -> Result<(), InsertError> {
-        match router.at_mut(uri) {
-            Ok(routes) => {
-                routes.value.push(proxy_route);
-                // Sort routes by priority (higher priority values take precedence)
-                routes
-                    .value
-                    .sort_by_key(|b| std::cmp::Reverse(b.inner.priority));
-            }
-            Err(_) => {
-                router.insert(uri, vec![proxy_route])?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Inserts a route into the match entry.
-    pub fn insert_route(&mut self, proxy_route: Arc<ProxyRoute>) -> Result<(), InsertError> {
-        let route_hosts = proxy_route.get_hosts();
-        let uris = proxy_route.inner.get_uris();
-
-        let has_hosts = if !route_hosts.is_empty() {
-            self.insert_host_uris(route_hosts.iter().copied(), &uris, &proxy_route)?;
-            true
-        } else {
-            false
-        };
-
-        if !has_hosts {
-            for uri in &uris {
-                Self::insert_into_router(&mut self.non_host_uri, uri, proxy_route.clone())?;
-            }
-        }
-
-        Ok(())
-    }
-
-    fn insert_host_uris<'a>(
-        &mut self,
-        hosts: impl Iterator<Item = &'a str>,
-        uris: &[&str],
-        proxy_route: &Arc<ProxyRoute>,
-    ) -> Result<(), InsertError> {
-        for host in hosts {
-            let processed_host = Self::reverse_host(host);
-            let inner_router = self.host_uris.at_mut(processed_host.as_str());
-
-            let inner_router = match inner_router {
-                Ok(router) => router.value,
-                Err(_) => {
-                    let new_router = MatchRouter::new();
-                    self.host_uris.insert(processed_host.clone(), new_router)?;
-                    self.host_uris
-                        .at_mut(processed_host.as_str())
-                        .unwrap()
-                        .value
-                }
-            };
-
-            for uri in uris {
-                Self::insert_into_router(inner_router, uri, proxy_route.clone())?;
-            }
-        }
-        Ok(())
     }
 
     /// Matches a request to a route.
@@ -499,11 +514,17 @@ impl MatchEntry {
         method: &str,
     ) -> RouteMatchResult {
         if let Some(host_str) = host.filter(|h| !h.is_empty()) {
-            // Reverse the host and let matchit handle wildcard suffix matching.
-            let reversed_host = Self::reverse_ascii_lowercase(host_str);
-            if let Ok(v) = self.host_uris.at(&reversed_host) {
-                if let Some(result) = Self::match_uri_method(v.value, uri, method) {
+            let host_lower = host_str.to_ascii_lowercase();
+            if let Some(router) = self.exact_hosts.get(&host_lower) {
+                if let Some(result) = Self::match_uri_method(router, uri, method) {
                     return Some(result);
+                }
+            }
+            for (suffix, router) in &self.wildcard_hosts {
+                if Self::host_matches_wildcard(&host_lower, suffix) {
+                    if let Some(result) = Self::match_uri_method(router, uri, method) {
+                        return Some(result);
+                    }
                 }
             }
         }
@@ -531,12 +552,21 @@ impl MatchEntry {
         }
         let uri = request.uri.path();
         if let Some(host) = get_request_host(request).filter(|host| !host.is_empty()) {
-            let reversed_host = Self::reverse_ascii_lowercase(host);
-            if let Ok(routes) = self.host_uris.at(&reversed_host) {
+            let host_lower = host.to_ascii_lowercase();
+            if let Some(router) = self.exact_hosts.get(&host_lower) {
                 if let Some(result) =
-                    Self::match_preflight_uri(routes.value, uri, method, self.global_cors)
+                    Self::match_preflight_uri(router, uri, method, self.global_cors)
                 {
                     return Some(result);
+                }
+            }
+            for (suffix, router) in &self.wildcard_hosts {
+                if Self::host_matches_wildcard(&host_lower, suffix) {
+                    if let Some(result) =
+                        Self::match_preflight_uri(router, uri, method, self.global_cors)
+                    {
+                        return Some(result);
+                    }
                 }
             }
         }
@@ -858,6 +888,130 @@ mod tests {
                 .expect("route matches");
             assert_eq!(route.inner.id, "alpha");
         }
+    }
+
+    #[test]
+    fn high_priority_wildcard_does_not_swallow_lower_priority_exact_uri() {
+        let resolver = crate::proxy::upstream::discovery::build_resolver_for_state().unwrap();
+        let mk = |id: &str, uri: &str, methods: Vec<http::Method>, priority: u32| {
+            Arc::new(
+                ProxyRoute::build(
+                    config::Route {
+                        id: id.to_string(),
+                        name: None,
+                        uri: Some(uri.to_string()),
+                        uris: vec![],
+                        methods,
+                        host: None,
+                        hosts: vec![],
+                        priority,
+                        plugins: HashMap::new(),
+                        upstream: None,
+                        upstream_id: None,
+                        service_id: None,
+                        timeout: None,
+                        enable_websocket: false,
+                    },
+                    &HashMap::new(),
+                    &HashMap::new(),
+                    &HashMap::new(),
+                    &config::EffectiveDefaults::default(),
+                    &resolver,
+                )
+                .unwrap(),
+            )
+        };
+
+        let mut routes = HashMap::new();
+        routes.insert(
+            "catch-all".to_string(),
+            mk("catch-all", "/{*path}", vec![http::Method::GET], 100),
+        );
+        routes.insert(
+            "admin-secret".to_string(),
+            mk("admin-secret", "/admin/secret", vec![http::Method::POST], 1),
+        );
+
+        let matcher = MatchEntry::build(&routes, &ProxyPluginExecutor::default_shared()).unwrap();
+
+        // A POST to an arbitrary path must NOT hit the lower-priority /admin/secret route.
+        assert!(
+            matcher
+                .match_host_uri_method(None, "/public/anything", "POST")
+                .is_none(),
+            "POST /public/anything must not be routed to /admin/secret"
+        );
+        let (_, matched_admin) = matcher
+            .match_host_uri_method(None, "/admin/secret", "POST")
+            .expect("exact POST /admin/secret must match");
+        assert_eq!(matched_admin.inner.id, "admin-secret");
+        let (_, matched_public) = matcher
+            .match_host_uri_method(None, "/public/anything", "GET")
+            .expect("GET catch-all must still match");
+        assert_eq!(matched_public.inner.id, "catch-all");
+    }
+
+    #[test]
+    fn high_priority_wildcard_host_does_not_swallow_exact_host_and_falls_back() {
+        let resolver = crate::proxy::upstream::discovery::build_resolver_for_state().unwrap();
+        let mk = |id: &str, host: &str, uri: &str, priority: u32| {
+            Arc::new(
+                ProxyRoute::build(
+                    config::Route {
+                        id: id.to_string(),
+                        name: None,
+                        uri: Some(uri.to_string()),
+                        uris: vec![],
+                        methods: vec![],
+                        host: Some(host.to_string()),
+                        hosts: vec![],
+                        priority,
+                        plugins: HashMap::new(),
+                        upstream: None,
+                        upstream_id: None,
+                        service_id: None,
+                        timeout: None,
+                        enable_websocket: false,
+                    },
+                    &HashMap::new(),
+                    &HashMap::new(),
+                    &HashMap::new(),
+                    &config::EffectiveDefaults::default(),
+                    &resolver,
+                )
+                .unwrap(),
+            )
+        };
+
+        let mut routes = HashMap::new();
+        routes.insert(
+            "wildcard".to_string(),
+            mk("wildcard", "*.example.com", "/shared", 100),
+        );
+        routes.insert(
+            "admin".to_string(),
+            mk("admin", "admin.example.com", "/secret", 1),
+        );
+
+        let matcher = MatchEntry::build(&routes, &ProxyPluginExecutor::default_shared()).unwrap();
+
+        // Other subdomains must NOT see admin.example.com's routes.
+        assert!(
+            matcher
+                .match_host_uri_method(Some("other.example.com"), "/secret", "GET")
+                .is_none(),
+            "other.example.com must not match admin.example.com routes"
+        );
+        // Exact host matches its own route.
+        let (_, matched_admin) = matcher
+            .match_host_uri_method(Some("admin.example.com"), "/secret", "GET")
+            .expect("admin.example.com/secret must match");
+        assert_eq!(matched_admin.inner.id, "admin");
+        // Exact host missing a URI falls back to matching wildcard host.
+        let (_, matched_wildcard) = matcher
+            .match_host_uri_method(Some("admin.example.com"), "/shared", "GET")
+            .expect("admin.example.com/shared must fall back to *.example.com");
+        assert_eq!(matched_wildcard.inner.id, "wildcard");
     }
 
     #[test]

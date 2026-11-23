@@ -34,11 +34,15 @@ pub fn validate_fault_injection_config(cfg: &JsonValue) -> ProxyResult<()> {
     Ok(())
 }
 
+/// Maximum allowed delay in seconds (24 hours), bounding `Duration::from_secs_f64`
+/// against floating-point overflow panics.
+const MAX_DELAY_SECS: f64 = 86_400.0;
+
 /// Configuration for injecting delays into requests
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 struct DelayConfig {
     /// Duration to delay the request in seconds (supports decimals)
-    #[validate(range(min = 0.0))]
+    #[validate(range(min = 0.0, max = 86_400.0))]
     duration: f64,
 
     /// Percentage of requests to apply delay to (0-100). If not set, applies to all requests.
@@ -193,7 +197,9 @@ impl PluginFaultInjection {
     async fn apply_delay(&self) {
         if let Some(ref delay_config) = self.config.delay {
             if Self::sample_hit(delay_config.percentage) {
-                let duration = Duration::from_secs_f64(delay_config.duration);
+                let clamped = delay_config.duration.clamp(0.0, MAX_DELAY_SECS);
+                let duration = Duration::try_from_secs_f64(clamped)
+                    .unwrap_or_else(|_| Duration::from_secs(MAX_DELAY_SECS as u64));
                 tokio::time::sleep(duration).await;
             }
         }
@@ -348,6 +354,16 @@ mod tests {
 
         let config = PluginConfig::try_from(cfg);
         assert!(config.is_err());
+
+        let huge = json!({
+            "delay": {
+                "duration": 1e300
+            }
+        });
+        assert!(
+            PluginConfig::try_from(huge).is_err(),
+            "overflowing duration must be rejected before Duration::from_secs_f64"
+        );
     }
 
     #[test]

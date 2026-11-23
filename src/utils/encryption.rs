@@ -186,9 +186,9 @@ impl Keyring {
         // than silently mishandled, so a future format is a clear error on an
         // old binary instead of a corrupt decrypt.
         let Some(payload) = value.strip_prefix(ENVELOPE_V1_PREFIX) else {
+            let prefix: String = value.chars().take(24).collect();
             return Err(ProxyError::Configuration(format!(
-                "Unsupported encryption envelope version in value starting with '{}'",
-                &value[..value.len().min(24)]
+                "Unsupported encryption envelope version in value starting with '{prefix}'"
             )));
         };
         let packed = BASE64.decode(payload.as_bytes()).map_err(|e| {
@@ -463,5 +463,13 @@ mod tests {
         });
         Outer::transform_secrets(&mut ok, SecretOp::Decrypt, &KeyringService::disabled()).unwrap();
         assert_eq!(ok["inner"]["secret"], "plain-secret");
+    }
+
+    #[test]
+    fn unknown_envelope_version_with_multibyte_utf8_does_not_panic() {
+        let keyring = KeyringService::new(true, &["test-key".into()]).unwrap();
+        let bad = format!("{CIPHERTEXT_PREFIX}v99:éééééééééééééééééééé");
+        let err = keyring.decrypt(&bad).unwrap_err();
+        assert!(err.to_string().contains("Unsupported encryption envelope"));
     }
 }

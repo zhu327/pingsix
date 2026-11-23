@@ -22,8 +22,10 @@ static DEFAULT_SERVER_NAME: &str = "*";
 /// Proxy SSL.
 pub struct ProxySSL {
     pub inner: config::SSL,
-    // Store parsed cert and key, handle parsing errors during creation/update
+    // Store parsed leaf cert, intermediate chain, and private key, handling
+    // parsing errors during creation/update.
     parsed_cert: X509,
+    parsed_chain: Vec<X509>,
     parsed_key: PKey<pingora::tls::pkey::Private>,
 }
 
@@ -47,9 +49,17 @@ impl TryFrom<config::SSL> for ProxySSL {
             }
         }
 
-        let parsed_cert = X509::from_pem(value.cert.as_bytes()).map_err(|e| {
+        let mut cert_chain = X509::stack_from_pem(value.cert.as_bytes()).map_err(|e| {
             ProxyError::Configuration(format!("Failed to parse cert for '{}': {e}", value.id))
         })?;
+        if cert_chain.is_empty() {
+            return Err(ProxyError::Configuration(format!(
+                "No certificates found in cert PEM for '{}'",
+                value.id
+            )));
+        }
+        let parsed_cert = cert_chain.remove(0);
+        let parsed_chain = cert_chain;
         let parsed_key = PKey::private_key_from_pem(value.key.as_bytes()).map_err(|e| {
             ProxyError::Configuration(format!("Failed to parse key for '{}': {e}", value.id))
         })?;
@@ -73,6 +83,7 @@ impl TryFrom<config::SSL> for ProxySSL {
         Ok(Self {
             inner: value,
             parsed_cert,
+            parsed_chain,
             parsed_key,
         })
     }
@@ -206,21 +217,12 @@ impl MatchEntry {
         if suffix.is_empty() {
             return !host.is_empty() && !host.contains('.');
         }
-        let suffix_len = suffix.len();
-        // Need at least one label + '.' + suffix.
-        if host.len() <= suffix_len + 1 {
+        let Some(prefix) = host.strip_suffix(suffix) else {
             return false;
-        }
-        let suffix_start = host.len() - suffix_len;
-        if host[suffix_start..] != *suffix {
+        };
+        let Some(label) = prefix.strip_suffix('.') else {
             return false;
-        }
-        // The byte immediately before the suffix must be the label separator.
-        if host.as_bytes()[suffix_start - 1] != b'.' {
-            return false;
-        }
-        // The leading label must contain no further dots (single label).
-        let label = &host[..suffix_start - 1];
+        };
         !label.is_empty() && !label.contains('.')
     }
 }
@@ -284,6 +286,11 @@ impl TlsAccept for DynamicCert {
 
         if let Err(e) = ext::ssl_use_certificate(ssl, &proxy_ssl.parsed_cert) {
             log::error!("Failed to use certificate: {e}");
+        }
+        for chain_cert in &proxy_ssl.parsed_chain {
+            if let Err(e) = ext::ssl_add_chain_cert(ssl, chain_cert) {
+                log::error!("Failed to add intermediate certificate to chain: {e}");
+            }
         }
         if let Err(e) = ext::ssl_use_private_key(ssl, &proxy_ssl.parsed_key) {
             log::error!("Failed to use private key: {e}");
@@ -412,5 +419,27 @@ mod tests {
         let mut matcher = MatchEntry::default();
         matcher.insert_ssl(ssl_for("*.example.com")).unwrap();
         assert!(matcher.insert_ssl(ssl_for("*.example.com")).is_err());
+    }
+
+    #[test]
+    fn certificate_bundle_loads_leaf_and_intermediate_chain() {
+        let bundled_pem = format!("{CERT}\n{CERT}");
+        let proxy = ProxySSL::try_from(SSL {
+            id: "chain".into(),
+            cert: bundled_pem,
+            key: KEY.into(),
+            snis: vec!["example.com".into()],
+        })
+        .expect("PEM bundle with intermediate cert must parse");
+        assert_eq!(proxy.parsed_chain.len(), 1);
+    }
+
+    #[test]
+    fn multibyte_utf8_sni_does_not_panic_in_wildcard_match() {
+        let mut matcher = MatchEntry::default();
+        matcher.insert_ssl(ssl_for("*.example.com")).unwrap();
+        // Byte length minus "example.com".len() lands inside a 2-byte UTF-8 char.
+        assert!(matcher.match_sni("ééééééé").is_none());
+        assert!(matcher.match_sni("ééééééé.example.com").is_some());
     }
 }

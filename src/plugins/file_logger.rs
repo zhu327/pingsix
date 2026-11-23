@@ -1,6 +1,7 @@
 use std::{
     fs::{File, OpenOptions},
     io::Write,
+    path::{Component, Path},
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, SyncSender, TrySendError},
@@ -193,11 +194,7 @@ impl PluginConfig {
 
     fn validate(&self) -> ProxyResult<()> {
         if let Some(path) = &self.path {
-            if path.is_empty() {
-                return Err(ProxyError::validation_error(
-                    "file-logger path must not be empty",
-                ));
-            }
+            validate_log_path(path)?;
         }
         if self.max_req_body_bytes < 1 {
             return Err(ProxyError::validation_error(
@@ -289,18 +286,58 @@ impl PluginFileLogger {
     }
 }
 
+/// Validate the configured log path without touching the filesystem.
+///
+/// Rejects empty paths, embedded NUL bytes, relative paths (which could write
+/// into the process working directory such as `/app/config.yaml`), and `..`
+/// parent-directory traversal components.
+fn validate_log_path(path: &str) -> ProxyResult<()> {
+    if path.is_empty() {
+        return Err(ProxyError::validation_error(
+            "file-logger path must not be empty",
+        ));
+    }
+    if path.contains('\0') {
+        return Err(ProxyError::validation_error(
+            "file-logger path must not contain NUL bytes",
+        ));
+    }
+    let parsed = Path::new(path);
+    if !parsed.is_absolute() {
+        return Err(ProxyError::validation_error(
+            "file-logger path must be an absolute path",
+        ));
+    }
+    if parsed
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(ProxyError::validation_error(
+            "file-logger path must not contain '..' traversal segments",
+        ));
+    }
+    Ok(())
+}
+
 /// Opens the log file in append mode, creating it when missing.
+///
+/// On Unix, passes `O_NOFOLLOW` so a symlink at the target path cannot
+/// redirect log writes to an unintended file.
 fn open_append_log(path: &str) -> ProxyResult<File> {
-    OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .map_err(|error| {
-            ProxyError::validation_error_with_cause(
-                format!("file-logger cannot open log file '{path}'"),
-                error,
-            )
-        })
+    validate_log_path(path)?;
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    options.open(path).map_err(|error| {
+        ProxyError::validation_error_with_cause(
+            format!("file-logger cannot open log file '{path}'"),
+            error,
+        )
+    })
 }
 
 /// Bounded, non-blocking producer paired with one dedicated file writer.
@@ -833,6 +870,10 @@ mod tests {
     fn config_validation_rejects_invalid_limits_and_empty_expression_lists() {
         for invalid in [
             json!({"path": ""}),
+            json!({"path": "relative.log"}),
+            json!({"path": "./config.yaml"}),
+            json!({"path": "/tmp/../etc/passwd"}),
+            json!({"path": "/tmp/bad\0name.log"}),
             json!({"max_req_body_bytes": 0}),
             json!({"max_resp_body_bytes": 0}),
             json!({"include_req_body_expr": []}),
@@ -1186,5 +1227,20 @@ mod tests {
         let abandoned = worker.join().expect("writer thread must not panic");
         assert_eq!(writes.load(Ordering::Relaxed), SHUTDOWN_DRAIN_BUDGET);
         assert_eq!(abandoned, LOG_QUEUE_CAPACITY - SHUTDOWN_DRAIN_BUDGET);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_append_log_rejects_symlink_targets() {
+        use std::os::unix::fs::symlink;
+
+        let target = TempLogPath::new("symlink_target");
+        std::fs::write(&target.path, b"original\n").unwrap();
+        let link = TempLogPath::new("symlink_link");
+        symlink(&target.path, &link.path).unwrap();
+
+        let err = open_append_log(link.path.to_str().unwrap())
+            .expect_err("symlink log path must be rejected by O_NOFOLLOW");
+        assert!(err.to_string().contains("cannot open log file"), "{err}");
     }
 }

@@ -297,6 +297,7 @@ impl<V> Shard<V> {
     /// entries, removing those whose state satisfies `evict` (an entry with
     /// no state is always removed). No request can scan the full map.
     pub(crate) fn sweep(&mut self, evict: impl Fn(&V) -> bool, on_miss: SweepMiss) {
+        let mut restored = Vec::new();
         for _ in 0..CLEANUP_BUDGET {
             let Some((touch, key)) = self.touch_order.pop_oldest() else {
                 break;
@@ -305,10 +306,16 @@ impl<V> Shard<V> {
                 self.entries.remove(&key);
             } else {
                 match on_miss {
-                    SweepMiss::Restore => self.touch_order.restore(touch, key),
+                    // Defer re-insertion until after the loop so a single
+                    // non-evictable oldest entry does not consume all
+                    // CLEANUP_BUDGET iterations.
+                    SweepMiss::Restore => restored.push((touch, key)),
                     SweepMiss::PushBack => self.touch(&key),
                 }
             }
+        }
+        for (touch, key) in restored {
+            self.touch_order.restore(touch, key);
         }
     }
 
@@ -454,6 +461,32 @@ mod tests {
         }
         shard.sweep(|_| true, SweepMiss::Restore);
         assert_eq!(shard.len(), 2, "an 8-item budget leaves two entries");
+    }
+
+    #[test]
+    fn sweep_restore_evicts_eligible_entries_behind_non_evictable_oldest() {
+        let mut shard: Shard<u32> = Shard::default();
+        // Oldest entry is live (`1`, not evictable); subsequent entries are expired (`0`).
+        shard.entry("live-oldest".into()).or_insert(1);
+        shard.touch("live-oldest");
+        for i in 0..CLEANUP_BUDGET {
+            let key = format!("expired-{i}");
+            shard.entry(key.clone()).or_insert(0);
+            shard.touch(&key);
+        }
+
+        shard.sweep(|v| *v == 0, SweepMiss::Restore);
+
+        // Budget of 8 visits `live-oldest` (restored) plus 7 expired entries (evicted).
+        assert!(shard.contains_key("live-oldest"));
+        assert_eq!(
+            shard.len(),
+            2,
+            "SweepMiss::Restore must inspect past a non-evictable oldest entry"
+        );
+        // `live-oldest` kept its original oldest recency position.
+        shard.evict_oldest();
+        assert!(!shard.contains_key("live-oldest"));
     }
 
     #[test]

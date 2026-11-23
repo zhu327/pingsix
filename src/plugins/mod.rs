@@ -214,7 +214,7 @@ static PLUGIN_META: &[PluginMeta] = &[
     },
     PluginMeta {
         name: jwt_auth::PLUGIN_NAME,
-        phases: PluginPhases::REQUEST.union(PluginPhases::RESPONSE),
+        phases: PluginPhases::REQUEST,
         factory: PluginFactory::Plain(jwt_auth::create_jwt_auth_plugin),
         secrets_transform: Some(jwt_auth::SECRETS_TRANSFORM),
         validate: jwt_auth::validate_jwt_auth_config,
@@ -575,7 +575,7 @@ mod builtin_phases_tests {
             ),
             (csrf::PLUGIN_NAME, request | PluginPhases::RESPONSE),
             (basic_auth::PLUGIN_NAME, request),
-            (jwt_auth::PLUGIN_NAME, request | PluginPhases::RESPONSE),
+            (jwt_auth::PLUGIN_NAME, request),
             (key_auth::PLUGIN_NAME, request),
             (cache::PLUGIN_NAME, request),
             (proxy_rewrite::PLUGIN_NAME, PluginPhases::UPSTREAM_REQUEST),

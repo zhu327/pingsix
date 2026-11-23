@@ -101,7 +101,8 @@ pub struct PluginCsrf {
 impl PluginCsrf {
     /// Generates HMAC-SHA256 signature for the token
     ///
-    /// Uses standard HMAC-SHA256(key, random || expires).
+    /// Uses HMAC-SHA256(key, random || ":" || expires) with an explicit
+    /// delimiter so digits cannot be shifted between `random` and `expires`.
     fn gen_sign(&self, random: &str, expires: u64) -> Option<String> {
         type HmacSha256 = Hmac<Sha256>;
         // HMAC accepts any key size, so new_from_slice always succeeds.
@@ -109,6 +110,7 @@ impl PluginCsrf {
         // sentinel value that could be compared equal.
         let mut mac = HmacSha256::new_from_slice(self.config.key.as_bytes()).ok()?;
         mac.update(random.as_bytes());
+        mac.update(b":");
         mac.update(expires.to_string().as_bytes());
         Some(hex::encode(mac.finalize().into_bytes()))
     }
@@ -173,6 +175,14 @@ impl PluginCsrf {
             log::debug!("CSRF token json decode error");
             return false;
         };
+
+        // Enforce the exact 16-byte hex format emitted by gen_token_string.
+        if token_table.random.len() != 32
+            || !token_table.random.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            log::debug!("CSRF token random field has invalid format");
+            return false;
+        }
 
         // Get current timestamp, handle system time errors gracefully
         let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
@@ -420,5 +430,26 @@ mod tests {
         }))
         .expect("explicit cookie name");
         assert_eq!(config.name, "apisix-csrf-token");
+    }
+
+    #[test]
+    fn digit_shift_between_random_and_expires_is_rejected() {
+        let plugin = build_plugin(1);
+        let expired_ts = 1_000_000_000_u64;
+        // Trailing decimal digit '9' in random could previously be moved onto
+        // expires to keep `random || expires` identical while extending TTL.
+        let random = "0123456789abcdef0123456789abcde9".to_string();
+        let sign = plugin.gen_sign(&random, expired_ts).expect("valid key");
+
+        let forged = CsrfToken {
+            random: random[..31].to_string(),
+            expires: 90_000_000_000_u64 + expired_ts,
+            sign,
+        };
+        let encoded = general_purpose::STANDARD.encode(serde_json::to_string(&forged).unwrap());
+        assert!(
+            !plugin.check_token(&encoded),
+            "digit-shifted CSRF token must be rejected"
+        );
     }
 }

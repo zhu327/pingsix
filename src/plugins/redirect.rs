@@ -105,6 +105,7 @@ struct PluginConfig {
     regex_uri: Vec<String>,
     /// HTTP status code for the redirect (e.g., 301, 302, 307, 308). Defaults to 302 (temporary redirect).
     #[serde(default = "PluginConfig::default_ret_code")]
+    #[validate(range(min = 200, max = 599))]
     ret_code: u16,
     /// If true, appends the original query string to the redirect URI, even if the target URI has a query string.
     #[serde(default)]
@@ -168,6 +169,14 @@ impl TryFrom<JsonValue> for PluginConfig {
                      (do not fall back to the request Host header)"
                         .into(),
                 ));
+            }
+        }
+
+        if let Some(host) = config.redirect_host.as_deref().map(str::trim) {
+            if !host.is_empty() && host.parse::<http::uri::Authority>().is_err() {
+                return Err(ProxyError::validation_error(format!(
+                    "redirect_host '{host}' is not a valid HTTP authority"
+                )));
             }
         }
 
@@ -311,26 +320,69 @@ impl PluginRedirect {
     fn build_uri_from_path(
         &self,
         path: &str,
+        parts: http::uri::Parts,
+        original_query: &str,
+    ) -> Option<Uri> {
+        self.build_redirect_target(path, parts, original_query)
+    }
+
+    fn build_uri_from_regex(
+        &self,
         mut parts: http::uri::Parts,
         original_query: &str,
     ) -> Option<Uri> {
-        let target_query = path
-            .parse::<Uri>()
-            .ok()
-            .and_then(|uri| uri.query().map(|q| q.to_string()))
-            .unwrap_or_default();
-        let new_path = path.split('?').next().unwrap_or(path);
-        let new_path = if self.config.encode_uri {
-            encode_uri_safe_path(new_path)
-        } else {
-            new_path.to_string()
-        };
+        let pq = parts.path_and_query.take()?;
+        let rewritten = apply_regex_uri_template(pq.path(), &self.regex_patterns);
+        self.build_redirect_target(&rewritten, parts, original_query)
+    }
+
+    /// Build a redirect target URI from either an absolute URL
+    /// (`scheme://authority[/path][?query]`) or an origin-form path
+    /// (`/path[?query]`).
+    fn build_redirect_target(
+        &self,
+        target: &str,
+        mut parts: http::uri::Parts,
+        original_query: &str,
+    ) -> Option<Uri> {
+        let (before_query, target_query) = target.split_once('?').unwrap_or((target, ""));
         let new_query = Self::merge_query_string(
-            &target_query,
+            target_query,
             original_query,
             self.config.append_query_string,
         );
 
+        if let Some((scheme_str, rest)) = before_query.split_once("://") {
+            let (authority_str, raw_path) = match rest.find('/') {
+                Some(idx) => (&rest[..idx], &rest[idx..]),
+                None => (rest, "/"),
+            };
+            let new_path = if self.config.encode_uri {
+                encode_uri_safe_path(raw_path)
+            } else {
+                raw_path.to_string()
+            };
+            let new_path_and_query = if new_query.is_empty() {
+                new_path
+            } else {
+                format!("{new_path}?{new_query}")
+            };
+            let scheme = http::uri::Scheme::try_from(scheme_str).ok()?;
+            let authority = http::uri::Authority::try_from(authority_str).ok()?;
+            let path_and_query = new_path_and_query.parse::<http::uri::PathAndQuery>().ok()?;
+            return Uri::builder()
+                .scheme(scheme)
+                .authority(authority)
+                .path_and_query(path_and_query)
+                .build()
+                .ok();
+        }
+
+        let new_path = if self.config.encode_uri {
+            encode_uri_safe_path(before_query)
+        } else {
+            before_query.to_string()
+        };
         let new_path_and_query = if new_query.is_empty() {
             new_path
         } else {
@@ -339,40 +391,6 @@ impl PluginRedirect {
 
         parts.path_and_query = Some(new_path_and_query.parse().ok()?);
         Uri::from_parts(parts).ok()
-    }
-
-    fn build_uri_from_regex(
-        &self,
-        mut parts: http::uri::Parts,
-        original_query: &str,
-    ) -> Option<Uri> {
-        if let Some(pq) = parts.path_and_query.take() {
-            let path = pq.path();
-            let rewritten = apply_regex_uri_template(path, &self.regex_patterns);
-            let (new_path, target_query) = rewritten
-                .split_once('?')
-                .map_or_else(|| (rewritten.as_ref(), ""), |(p, q)| (p, q));
-            let new_path = if self.config.encode_uri {
-                encode_uri_safe_path(new_path)
-            } else {
-                new_path.to_string()
-            };
-            let new_query = Self::merge_query_string(
-                target_query,
-                original_query,
-                self.config.append_query_string,
-            );
-
-            let new_uri = if new_query.is_empty() {
-                new_path
-            } else {
-                format!("{new_path}?{new_query}")
-            };
-            parts.path_and_query = Some(new_uri.parse().ok()?);
-            Uri::from_parts(parts).ok()
-        } else {
-            None
-        }
     }
 
     /// The redirect as a rejection value (the pipeline writes it through
@@ -740,5 +758,64 @@ mod tests {
         let key_host = apisix_key(&mut for_key, "host", false);
         assert_eq!(redirect_host, key_host.as_ref());
         assert_eq!(redirect_host, "uri.example");
+    }
+
+    #[tokio::test]
+    async fn absolute_url_uri_and_regex_redirects_succeed() {
+        let plugin = PluginRedirect {
+            config: PluginConfig::try_from(serde_json::json!({
+                "uri": "https://new.example.com/login?next=1",
+                "append_query_string": true
+            }))
+            .unwrap(),
+            regex_patterns: vec![],
+            trusted_proxies: vec![],
+        };
+        let mut session =
+            session_from_request("GET /old?from=home HTTP/1.1\r\nHost: old.example.com\r\n\r\n")
+                .await;
+        let target = plugin
+            .construct_uri(&mut session)
+            .await
+            .expect("absolute URL redirect must build a valid Uri");
+        assert_eq!(
+            target.to_string(),
+            "https://new.example.com/login?next=1&from=home"
+        );
+
+        let regex_cfg = PluginConfig::try_from(serde_json::json!({
+            "regex_uri": ["^/assets/(.*)$", "https://cdn.example.com/$1"]
+        }))
+        .unwrap();
+        let regex_plugin = PluginRedirect {
+            regex_patterns: vec![(
+                Regex::new("^/assets/(.*)$").unwrap(),
+                "https://cdn.example.com/$1".to_string(),
+            )],
+            config: regex_cfg,
+            trusted_proxies: vec![],
+        };
+        let mut session =
+            session_from_request("GET /assets/app.js HTTP/1.1\r\nHost: old.example.com\r\n\r\n")
+                .await;
+        let target = regex_plugin
+            .construct_uri(&mut session)
+            .await
+            .expect("absolute regex_uri redirect must build a valid Uri");
+        assert_eq!(target.to_string(), "https://cdn.example.com/app.js");
+    }
+
+    #[test]
+    fn invalid_ret_code_and_redirect_host_are_rejected() {
+        assert!(PluginConfig::try_from(serde_json::json!({
+            "uri": "/new",
+            "ret_code": 9999
+        }))
+        .is_err());
+        assert!(PluginConfig::try_from(serde_json::json!({
+            "http_to_https": true,
+            "redirect_host": "https://bad.example.com/path"
+        }))
+        .is_err());
     }
 }
